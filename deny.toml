@@ -1,0 +1,65 @@
+# adbc-vs dependency policy. See the "Licensing & dependency policy" section
+# of CLAUDE.md for the rules this file is checked against (`policy_test.rs`).
+#
+# Scope: this policy governs the Rust crate dependency tree only. The
+# `adbc-drivers/mysql` driver fetched at run time from the Columnar registry
+# is Apache-2.0 and is never bundled into an adbc-vs release artifact, so it
+# falls outside this policy (decision-log [15]).
+
+[graph]
+all-features = false
+no-default-features = false
+
+[licenses]
+# Permissive-only allow list. No copyleft (GPL/LGPL/AGPL/MPL) and no
+# standalone `OpenSSL` identifier is ever added here — the one crate that
+# inherits an `OpenSSL`-licensed file is handled below via a scoped exception
+# instead of widening this list.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# This policy grants no license exception today: reqwest's rustls-tls-webpki-roots
+# feature and rustls's ring provider (see crates/adbc-vs-adapter/Cargo.toml) keep
+# aws-lc-sys, the one crate this policy has ever needed to except, out of the
+# dependency graph. Adding an exception here — for example if a future TLS
+# provider change pulls aws-lc-sys back in under its OpenSSL-derived file — is a
+# reviewed change.
+exceptions = []
+
+[licenses.private]
+# Workspace crates (adbc-vs-adapter, adbc-vs-scan) are MIT-licensed but
+# unpublished, so their own license checks are skipped rather than requiring
+# them to appear in the allow list.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-workspace = true
+
+[advisories]
+# Every ignore entry MUST be preceded by a comment giving the ISO-8601 date
+# the exception was granted and the condition under which it is re-evaluated
+# (see policy_test.rs::advisory_ignores_are_dated). None are needed yet: the
+# `serde_yaml` RUSTSEC-2024-0370 advisory was avoided outright by depending
+# on `serde_yaml_ng` instead (decision-log [11]).
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

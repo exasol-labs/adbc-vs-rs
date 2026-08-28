@@ -1,0 +1,46 @@
+networks:
+  adbc-vs:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.5.0/24
+
+volumes:
+  exasol-data:
+
+services:
+  exasol:
+    image: exasol/docker-db:2025.2.1
+    privileged: true
+    shm_size: 2g
+    stop_grace_period: 120s
+    networks:
+      - adbc-vs
+    ports:
+      - "127.0.0.1:8563:8563"
+      - "127.0.0.1:2580:2580"
+      - "127.0.0.1:2581:2581"
+    volumes:
+      - exasol-data:/exa
+
+  mysql:
+    image: mysql:8.4
+    networks:
+      adbc-vs:
+        ipv4_address: 172.28.5.10
+    ports:
+      - "127.0.0.1:3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: adbc_vs_root
+      MYSQL_DATABASE: adbc_vs
+      MYSQL_USER: adbc_vs
+      MYSQL_PASSWORD: adbc_vs_password
+    volumes:
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
