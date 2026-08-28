@@ -304,6 +304,20 @@ fn test_artifact_depends_on_cross_udf_build() {
 }
 
 #[test]
+fn release_tarball_depends_on_cross_udf_build() {
+    let text = makefile_text();
+    let tarball = rule(&text, "release-tarball");
+    assert_eq!(
+        tarball.prerequisites,
+        vec!["$(RELEASE_TARBALL)".to_string()]
+    );
+
+    let dist_rule = rule(&text, "$(RELEASE_TARBALL)");
+    assert_eq!(dist_rule.prerequisites, vec!["$(SO_FILE)".to_string()]);
+    assert!(dist_rule.recipe.contains("tar -czf"));
+}
+
+#[test]
 fn test_it_target_needs_no_exasol() {
     let text = makefile_text();
     let it = rule(&text, "test-it");

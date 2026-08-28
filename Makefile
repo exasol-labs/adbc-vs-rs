@@ -39,8 +39,7 @@ WORKSPACE_MANIFESTS := \
 	Cargo.toml \
 	Cargo.lock \
 	crates/adbc-vs-adapter/Cargo.toml \
-	crates/adbc-vs-scan/Cargo.toml \
-	.cargo/config.toml
+	crates/adbc-vs-scan/Cargo.toml
 
 CARGO_RUN := docker run --rm \
 	-u $(HOST_UID):$(HOST_GID) \
@@ -98,6 +97,31 @@ test-it: stack-up-mysql
 .PHONY: test-e2e
 test-e2e: cross-udf-build stack-up
 	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_mysql_test -- --test-threads=1
+
+# --- release packaging --------------------------------------------------------
+#
+# Both targets back the `release` CI job. release-tarball is a real-file
+# target keyed on the .so, like cross-udf-build itself, so re-running it
+# without a new .so is a no-op. third-party-licenses is always re-run: it
+# reflects whatever Cargo.lock currently resolves to.
+
+DIST_DIR := dist
+RELEASE_TARBALL := $(DIST_DIR)/adbc-vs.tar.gz
+
+$(RELEASE_TARBALL): $(SO_FILE)
+	mkdir -p $(DIST_DIR)/pkg/udf
+	cp $(SO_FILE) $(DIST_DIR)/pkg/udf/
+	chmod 755 $(DIST_DIR)/pkg/udf/libadbc_vs_adapter.so
+	tar -czf $(RELEASE_TARBALL) -C $(DIST_DIR)/pkg udf
+
+.PHONY: release-tarball
+release-tarball: $(RELEASE_TARBALL)
+
+.PHONY: third-party-licenses
+third-party-licenses:
+	mkdir -p $(DIST_DIR)
+	cargo about generate --manifest-path crates/adbc-vs-adapter/Cargo.toml \
+		-c about.toml about.hbs -o $(DIST_DIR)/THIRD-PARTY-LICENSES.md
 
 # --- stack lifecycle -----------------------------------------------------------
 #
