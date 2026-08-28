@@ -273,6 +273,64 @@ fn workflow_has_no_cloud_or_arm_job() {
 }
 
 #[test]
+fn release_job_is_gated_and_packages_artifacts() {
+    let workflow = workflow();
+    let release = job(&workflow, "release");
+
+    let needs = release
+        .get("needs")
+        .and_then(Value::as_sequence)
+        .expect("release job must declare `needs`");
+    for required in [
+        "build-so",
+        "lint",
+        "unit-tests",
+        "deny",
+        "integration-tests",
+        "e2e",
+    ] {
+        assert!(
+            needs.iter().any(|n| n.as_str() == Some(required)),
+            "release must need `{required}` so a red job blocks it"
+        );
+    }
+
+    let condition = release
+        .get("if")
+        .and_then(Value::as_str)
+        .expect("release job must declare an `if` condition");
+    assert!(
+        condition.contains("refs/heads/main"),
+        "release must only run on push to main: {condition}"
+    );
+
+    let targets = make_targets_invoked(release);
+    assert!(
+        targets.iter().any(|t| t == "release-tarball"),
+        "release must call `make release-tarball`"
+    );
+    assert!(
+        targets.iter().any(|t| t == "third-party-licenses"),
+        "release must call `make third-party-licenses`"
+    );
+
+    let build_so_uploads = job(&workflow, "build-so")
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .expect("build-so job must declare steps")
+        .iter()
+        .any(|step| {
+            step.get("uses")
+                .and_then(Value::as_str)
+                .is_some_and(|u| u.starts_with("actions/upload-artifact"))
+        });
+    assert!(
+        build_so_uploads,
+        "build-so must upload the .so artifact for the release job to download"
+    );
+}
+
+#[test]
 fn e2e_job_relaxes_apparmor_and_frees_disk() {
     let workflow = workflow();
     let e2e = job(&workflow, "e2e");

@@ -15,7 +15,7 @@ Rust Exasol Virtual Schema over ADBC sources. Two crates (`adbc-vs-adapter`, `ad
 - `rust-toolchain.toml` pins `channel = "1.94"` with `rustfmt` + `clippy`, so host checks use the same compiler as the container build.
 - `make cross-udf-build` is the ONLY way to build the UDF `.so`: `cargo build --release -p adbc-vs-adapter` inside `rust:1.94-trixie`. NEVER run host `cargo build --release` — the glibc fingerprint must match the `language-container-rs` SLC or the `.so` is rejected at load time.
 - Output is `target/release/libadbc_vs_adapter.so`; both workspace crates link into that single `.so`.
-- It is a real-file Make target with source prerequisites (both crates' `src/`, `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`). Unchanged workspace is a no-op; touching a crate source forces a rebuild. No test ever runs against a stale binary.
+- It is a real-file Make target with source prerequisites (both crates' `src/`, `Cargo.toml`, `Cargo.lock`). Unchanged workspace is a no-op; touching a crate source forces a rebuild. No test ever runs against a stale binary.
 - The container runs as the invoking host UID/GID, so no artifact is root-owned, and mounts the named volume `adbc-vs-cargo-registry` so the download cache survives `--rm`.
 - The target self-validates with `cargo exasol-udf validate` and exits non-zero on a fingerprint mismatch. `SLC_VERSION` in the `Makefile` MUST track `exasol-udf-sdk`'s version exactly — see `crates/adbc-vs-adapter/Cargo.toml` and `SLC_VERSION` in `tests/common` — or a correct `.so` reports a false mismatch.
 - Every check goes through a Make target. CI calls `make <target>` and never re-spells a check as inline shell.
@@ -52,14 +52,15 @@ Rust Exasol Virtual Schema over ADBC sources. Two crates (`adbc-vs-adapter`, `ad
 ## CI
 
 - `.github/workflows/ci.yml`. Triggers: `push` to `main`, `pull_request` against `main`, `merge_group`, `workflow_dispatch`. Concurrency group is keyed on workflow + ref, with `cancel-in-progress` false for `main` and for tag refs so a merged run is never cancelled.
-- Six jobs, all `runs-on: ubuntu-latest`, x86_64 only:
-  - `build-so` → `make cross-udf-build`, then `make test-artifact`
+- Seven jobs, all `runs-on: ubuntu-latest`, x86_64 only:
+  - `build-so` → `make cross-udf-build`, then `make test-artifact`, then uploads the built `.so` as the `adbc-vs-so` artifact for `release` to consume
   - `lint` → `make fmt-check`, then `make lint`
   - `unit-tests` → `make test`
   - `deny` → `cargo install cargo-deny --locked`, then `make deny`
   - `integration-tests` → `make test-it`
   - `e2e` → `make test-e2e`
-- Every job body invokes `make <target>`. The only permitted inline shell is runner *preparation*, which configures the runner rather than running a check: the disk cleanup, the apparmor sysctl, and the `exapump` install. Starting the stack is NOT an exception — `make stack-up` owns it.
+  - `release` → needs all six jobs above and only runs on a push to `main`. Reads the workspace version out of the root `Cargo.toml`, and is a no-op if the `v<version>` tag already exists — merging a PR that doesn't bump the version releases nothing. When the version was bumped, it downloads the `adbc-vs-so` artifact, runs `make release-tarball` and `make third-party-licenses`, tags and pushes `v<version>`, and creates a GitHub Release (`generate_release_notes: true`) carrying `dist/adbc-vs.tar.gz` and `dist/THIRD-PARTY-LICENSES.md`.
+- Every job body invokes `make <target>`. The only permitted inline shell is runner *preparation*, which configures the runner rather than running a check: the disk cleanup, the apparmor sysctl, the `exapump` install, and `release`'s version-read/tag-gate/git-tag steps (deployment glue, not a check). Starting the stack is NOT an exception — `make stack-up` owns it.
 - `e2e` MUST run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` before the Exasol container starts. Exasol's UDF sandbox uses `nschroot`, which needs an unprivileged user namespace; Ubuntu 24.04 runners block that by default and every UDF then fails with **SQL state 22002 "VM crashed"**.
 - `e2e` MUST free disk before pulling images — `/usr/share/dotnet`, `/usr/local/lib/android`, `/opt/ghc`, `/opt/hostedtoolcache/CodeQL`, plus `docker image prune -af`. A GitHub-hosted runner has roughly 21GB free and Rust + Docker + Exasol exhausts it.
 - `e2e` dumps `docker compose logs exasol` and uploads it as the `exasol-container-log` artifact on failure.
@@ -70,12 +71,14 @@ Rust Exasol Virtual Schema over ADBC sources. Two crates (`adbc-vs-adapter`, `ad
 - MIT, `Copyright (c) 2026 Exasol AG` in `LICENSE`. Root `Cargo.toml` `[workspace.package]` sets `license = "MIT"`; every member manifest sets `license.workspace = true`.
 - `deny.toml` at the workspace root is the single source of truth. `cargo deny` is the sole enforcement mechanism, invoked through `make deny`.
 - Scope is the Rust crate dependency tree only. The MySQL ADBC driver fetched at run time from the driver registry is Apache-2.0 and is never bundled into a release artifact, so its license falls outside this policy.
-- The allow list is closed and permissive-only — `cargo deny` rejects any identifier absent from it: `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `0BSD`, `Unlicense`, `CC0-1.0`, `BSL-1.0`, `Unicode-3.0`, `CDLA-Permissive-2.0`. `confidence-threshold = 0.8`.
+- The allow list is closed and permissive-only — `cargo deny` rejects any identifier absent from it: `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `0BSD`, `Unlicense`, `CC0-1.0`, `BSL-1.0`, `Unicode-3.0`, `CDLA-Permissive-2.0`.
 - NEVER add a `GPL`, `LGPL`, `AGPL`, `MPL`, or standalone `OpenSSL` identifier to `allow`.
 - `[licenses.private] ignore = true` — the workspace's own crates are MIT but unpublished, so they are skipped rather than listed.
 - `exceptions = []` today. `aws-lc-sys` (OpenSSL-derived file, inherited from that crate's OpenSSL fork history) is the only crate this policy has ever needed to except; reqwest's `rustls-tls-webpki-roots` feature and rustls's `ring` provider keep it out of the graph. If a TLS-provider change pulls it back in, add a scoped `[[licenses.exceptions]]` entry as a reviewed change — never widen `allow`.
 - `[advisories] ignore` is empty. Every entry ever added MUST be preceded by a comment giving the ISO-8601 date the exception was granted and the condition under which it is re-evaluated (asserted by `policy_test.rs::advisory_ignores_are_dated`). The `serde_yaml` RUSTSEC-2024-0370 advisory was avoided outright by depending on `serde_yaml_ng`.
-- `[bans]`: `multiple-versions = "warn"`, `wildcards = "deny"`, `allow-workspace = true`. `[sources]`: crates.io only; unknown registry and unknown git are denied.
+- `[bans] wildcards = "deny"`, `allow-workspace = true`. `[sources] unknown-registry = "deny"`, `unknown-git = "deny"`.
+- `deny.toml` sets only the fields above — every field it doesn't set (`[graph]`, `confidence-threshold`, `multiple-versions`, `allow-registry`, etc.) is left at `cargo-deny`'s own default. Before adding a field back, confirm with `cargo deny init` (against a throwaway manifest) that its value actually differs from the tool's default; otherwise it's noise.
+- `about.toml` + `about.hbs` drive `cargo about generate` (pinned `cargo-about@0.9.0`), invoked by `make third-party-licenses`. `about.toml`'s `accepted` list MUST mirror `deny.toml`'s `[licenses].allow` exactly. The output, `dist/THIRD-PARTY-LICENSES.md`, is generated fresh by the `release` CI job and attached to the GitHub Release — it is never committed (`dist/` is gitignored).
 
 ## Spec-driven development
 

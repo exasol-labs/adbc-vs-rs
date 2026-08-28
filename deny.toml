@@ -6,10 +6,6 @@
 # is Apache-2.0 and is never bundled into an adbc-vs release artifact, so it
 # falls outside this policy (decision-log [15]).
 
-[graph]
-all-features = false
-no-default-features = false
-
 [licenses]
 # Permissive-only allow list. No copyleft (GPL/LGPL/AGPL/MPL) and no
 # standalone `OpenSSL` identifier is ever added here — the one crate that
@@ -30,7 +26,6 @@ allow = [
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
 ]
-confidence-threshold = 0.8
 
 # This policy grants no license exception today: reqwest's rustls-tls-webpki-roots
 # feature and rustls's ring provider (see crates/adbc-vs-adapter/Cargo.toml) keep
@@ -47,7 +42,6 @@ exceptions = []
 ignore = true
 
 [bans]
-multiple-versions = "warn"
 wildcards = "deny"
 allow-workspace = true
 
@@ -62,4 +56,3 @@ ignore = []
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]
