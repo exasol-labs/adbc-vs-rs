@@ -1,0 +1,55 @@
+[package]
+name = "adbc-vs-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The assertions against the shared object `make cross-udf-build` produces;
+# `make test-artifact` enables it, so a plain `cargo test --workspace` needs no
+# Docker.
+built-artifact = []
+# The end-to-end tier against the full Docker Compose stack. `make test-e2e`
+# enables it; a plain `cargo test --workspace` leaves
+# `tests/e2e_mysql_test.rs` empty, so the fast tier never needs a container.
+exasol-e2e = []
+# The `cargo deny` invocation, which needs cargo-deny on the host; `make deny`
+# enables it.
+policy-check = []
+
+[dependencies]
+adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.1.0" }
+adbc_core = "0.23"
+adbc_driver_manager = "0.23"
+arrow = "58"
+exasol-udf-macros = "0.23.0"
+exasol-udf-sdk = { version = "0.23.0", features = ["emit-arrow"] }
+flate2 = "1.1.9"
+# rustls with the bundled webpki root store and the ring provider: the UDF
+# sandbox guarantees no CA bundle, and ring needs no cmake in the SLC build
+# image. `default-features = false` keeps native-tls, and with it OpenSSL,
+# out of the tree entirely.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-webpki-roots",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10.0"
+sha2 = "0.10"
+tar = "0.4.46"
+tempfile = "3.27.0"
+toml = "0.8"
+
+[dev-dependencies]
+# A self-signed certificate and the TLS server that presents it, so the
+# registry client's certificate verification is asserted against a real
+# handshake rather than inspected.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }

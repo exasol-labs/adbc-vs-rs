@@ -1,0 +1,207 @@
+//! Converts a MySQL column definition into the Exasol data type the virtual
+//! table declares.
+//!
+//! The mapping is a pure function of MySQL catalog metadata — never of the
+//! Arrow type the ADBC driver returns at scan time, because the driver's
+//! `DATETIME` representation varies with the query. Only eight MySQL types
+//! map; every other type, and every unsigned integer, is unmapped. Unmapped
+//! is a normal outcome, not a system failure: the caller omits the column
+//! and records why.
+//!
+//! [`MappedType`] answers only "what Exasol type can a MySQL column become".
+//! What an `EMITS` column may *declare* is a wider question and a separate
+//! type, [`exa_type::ExasolType`](crate::exa_type::ExasolType). The widening
+//! from this set into that one lives here, and nothing converts back.
+
+use crate::exa_type;
+
+/// Exasol's maximum `DECIMAL` precision.
+const MAX_DECIMAL_PRECISION: u32 = 36;
+
+/// The `DECIMAL` precision a MySQL `INT` column maps to.
+const INT_PRECISION: u32 = 10;
+
+/// The `DECIMAL` precision a MySQL `BIGINT` column maps to.
+const BIGINT_PRECISION: u32 = 19;
+
+/// The only MySQL character set this release maps a character column from.
+///
+/// Filter, join, and aggregation pushdown render a character operand with an
+/// explicit `COLLATE utf8mb4_0900_as_cs` or `COLLATE utf8mb4_0900_bin`
+/// suffix, and MySQL rejects both collations for any other character set
+/// with error 1253. A column of another character set is unmapped rather
+/// than produced into a virtual table whose predicates cannot be delegated.
+pub(crate) const SUPPORTED_CHARACTER_SET: &str = "utf8mb4";
+
+/// A MySQL column as reported by `information_schema`: the fields the
+/// mapping needs and nothing else.
+pub struct MySqlColumn {
+    pub data_type: String,
+    pub character_length: Option<u32>,
+    pub character_set: Option<String>,
+    pub numeric_precision: Option<u32>,
+    pub numeric_scale: Option<u32>,
+    pub is_unsigned: bool,
+    pub is_nullable: bool,
+}
+
+/// The Exasol type a mapped MySQL column declares in the virtual table.
+///
+/// Exactly five, and no more: a MySQL column this adapter maps is never
+/// Exasol `BOOLEAN`, which MySQL has no column type for, and never Exasol
+/// `CHAR`, since MySQL `CHAR` maps to Exasol `VARCHAR` to keep a blank-padded
+/// type out of every virtual table. Both are declarable in an `EMITS` clause,
+/// which is why the declarable set is its own type rather than this one
+/// widened: a `MappedType` a MySQL column cannot produce would be a state
+/// every match over a mapped column had to carry an unreachable arm for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MappedType {
+    Decimal { precision: u32, scale: u32 },
+    Varchar { size: u32 },
+    Date,
+    Timestamp,
+    Double,
+}
+
+/// Widens a mapped type into the set an `EMITS` column may declare.
+///
+/// One-way by construction. Every type a MySQL column maps to is declarable,
+/// so this direction is total and lossless; the reverse would have to name
+/// the MySQL column an Exasol `BOOLEAN` or `CHAR` came from, and there is
+/// none.
+impl From<MappedType> for exa_type::ExasolType {
+    fn from(mapped: MappedType) -> Self {
+        match mapped {
+            MappedType::Decimal { precision, scale } => {
+                exa_type::ExasolType::Decimal { precision, scale }
+            }
+            MappedType::Varchar { size } => exa_type::ExasolType::Varchar { size },
+            MappedType::Date => exa_type::ExasolType::Date,
+            MappedType::Timestamp => exa_type::ExasolType::Timestamp,
+            MappedType::Double => exa_type::ExasolType::Double,
+        }
+    }
+}
+
+/// A MySQL column successfully mapped to an Exasol column definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappedColumn {
+    pub exasol_type: MappedType,
+    pub is_nullable: bool,
+}
+
+/// Maps a MySQL column to its Exasol column definition, or returns the
+/// reason it cannot be represented without loss.
+///
+/// `Err` here is not a system failure: an unmapped column is a normal,
+/// expected outcome that the caller omits from the virtual table and
+/// records rather than treating as fatal.
+pub fn map_column(column: &MySqlColumn) -> Result<MappedColumn, String> {
+    let exasol_type = map_data_type(column)?;
+    Ok(MappedColumn {
+        exasol_type,
+        is_nullable: column.is_nullable,
+    })
+}
+
+fn map_data_type(column: &MySqlColumn) -> Result<MappedType, String> {
+    let mysql_type = column.data_type.to_ascii_uppercase();
+    match mysql_type.as_str() {
+        "INT" => {
+            if column.is_unsigned {
+                return Err(unsigned_reason(&mysql_type));
+            }
+            Ok(MappedType::Decimal {
+                precision: INT_PRECISION,
+                scale: 0,
+            })
+        }
+        "BIGINT" => {
+            if column.is_unsigned {
+                return Err(unsigned_reason(&mysql_type));
+            }
+            Ok(MappedType::Decimal {
+                precision: BIGINT_PRECISION,
+                scale: 0,
+            })
+        }
+        "DECIMAL" => map_decimal(column.numeric_precision, column.numeric_scale),
+        "VARCHAR" | "CHAR" => map_character(column, &mysql_type),
+        "DATE" => Ok(MappedType::Date),
+        "DATETIME" => Ok(MappedType::Timestamp),
+        "DOUBLE" => Ok(MappedType::Double),
+        other => Err(format!(
+            "MySQL type {other} is not one of the eight types adbc-vs 0.1 maps"
+        )),
+    }
+}
+
+fn unsigned_reason(mysql_type: &str) -> String {
+    format!(
+        "MySQL {mysql_type} UNSIGNED is not supported in this release; the unsigned range exceeds the signed DECIMAL precision this type would otherwise map to"
+    )
+}
+
+fn map_decimal(
+    numeric_precision: Option<u32>,
+    numeric_scale: Option<u32>,
+) -> Result<MappedType, String> {
+    let precision = numeric_precision
+        .ok_or_else(|| "MySQL DECIMAL column is missing a declared precision".to_string())?;
+    if precision > MAX_DECIMAL_PRECISION {
+        return Err(format!(
+            "MySQL DECIMAL precision {precision} exceeds Exasol's maximum DECIMAL precision of {MAX_DECIMAL_PRECISION}"
+        ));
+    }
+    Ok(MappedType::Decimal {
+        precision,
+        scale: numeric_scale.unwrap_or(0),
+    })
+}
+
+/// Maps a MySQL `VARCHAR` or `CHAR` column to Exasol `VARCHAR`.
+///
+/// Both MySQL types map to the same Exasol type: Exasol blank-pads a `CHAR`
+/// value and MySQL does not pad a `CHAR` operand under the `NO PAD`
+/// collations pushdown renders, so a mapped Exasol `CHAR` would disagree
+/// with MySQL in both directions. Mapping to `VARCHAR` instead reproduces
+/// the value MySQL actually returns.
+fn map_character(column: &MySqlColumn, mysql_type: &str) -> Result<MappedType, String> {
+    require_utf8mb4(column.character_set.as_deref(), mysql_type)?;
+    Ok(MappedType::Varchar {
+        size: character_size(column.character_length, mysql_type)?,
+    })
+}
+
+fn require_utf8mb4(character_set: Option<&str>, mysql_type: &str) -> Result<(), String> {
+    match character_set {
+        Some(character_set) if character_set.eq_ignore_ascii_case(SUPPORTED_CHARACTER_SET) => {
+            Ok(())
+        }
+        Some(character_set) => Err(format!(
+            "MySQL {mysql_type} column has character set {character_set}, but adbc-vs 0.1 only \
+             maps character columns whose character set is {SUPPORTED_CHARACTER_SET}"
+        )),
+        None => Err(format!(
+            "MySQL {mysql_type} column reports no CHARACTER_SET_NAME, so adbc-vs cannot confirm \
+             it is {SUPPORTED_CHARACTER_SET}"
+        )),
+    }
+}
+
+fn character_size(declared_length: Option<u32>, mysql_type: &str) -> Result<u32, String> {
+    match declared_length {
+        None => Err(format!(
+            "MySQL {mysql_type} column reports no CHARACTER_MAXIMUM_LENGTH, so adbc-vs cannot declare its Exasol length"
+        )),
+        // A reported length of 0 is clamped up to 1 rather than rejected:
+        // Exasol rejects `VARCHAR(0)` outright, so declaring the column at its
+        // reported length would fail `CREATE VIRTUAL SCHEMA` for a column
+        // MySQL itself accepts.
+        Some(length) => Ok(length.max(1)),
+    }
+}
+
+#[cfg(test)]
+#[path = "type_mapping_tests.rs"]
+mod tests;
