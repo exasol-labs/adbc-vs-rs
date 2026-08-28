@@ -1,7 +1,7 @@
 <div align="center">
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
-[![CI](https://github.com/exasol-labs/adbc-vs/actions/workflows/ci.yml/badge.svg)](https://github.com/exasol-labs/adbc-vs/actions/workflows/ci.yml)
+[![CI](https://github.com/exasol-labs/adbc-vs-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/exasol-labs/adbc-vs-rs/actions/workflows/ci.yml)
 [![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)](specs/)
 [![Exasol|database](https://img.shields.io/badge/Exasol-database-blue.svg)](https://www.exasol.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
