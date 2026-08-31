@@ -10,7 +10,7 @@ Resolves the `DRIVER` property of a virtual schema to the one dialect, driver pa
 - The `DRIVER` property value is matched case-insensitively, as release 0.2 already matches `mysql`. The canonical lower-case spelling is what `adapterNotes` records and what an error message names.
 - An unsupported value names every supported value rather than one. Release 0.2's error names `mysql` as "the only driver this release supports", a sentence that stops being true with the second driver and would be wrong again with the third; the message is generated from the enum instead.
 - `getCapabilities` and `pushdown` MUST resolve the same identity from the same field, or the adapter can advertise one dialect's capabilities and render another's — the wrong-rows failure `vs-adapter/pushdown-dialect` exists to prevent, reintroduced one layer up. `pushdown` already reads `schemaMetadataInfo.adapterNotes`, whose `driver` field release 0.2 records and never reads; `getCapabilities` reads the same field.
-- Whether a `getCapabilities` request carries `schemaMetadataInfo.adapterNotes` on Exasol 2025.2.1 is unverified at planning time and is measured before the dialect tables are built, because the answer decides whether a per-dialect capability set is legal at all. `virtual-schema-common-java` models `schemaMetadataInfo` on every adapter request including this one, which is why the plan expects it, but the adapter reads the field rather than the framework's source. If the field does not arrive, no adapter can know which source it is being asked about, and the advertised set collapses to the intersection of every dialect's set. The scenario below asserts the shape rather than assuming it.
+- Whether a `getCapabilities` request carries `schemaMetadataInfo.adapterNotes` on Exasol 2025.2.1 is unverified at planning time and is measured before the dialect tables are built, because the answer decides whether a per-dialect capability set is legal at all. `virtual-schema-common-java` models `schemaMetadataInfo` on every adapter request including this one, which is why the plan expects it, but the adapter reads the field rather than the framework's source. If the field does not arrive, no adapter can know which source it is being asked about, and the advertised set collapses to the intersection of every dialect's set. The scenario below holds that measurement in place through what the adapter does rather than through what it receives: two virtual schemas over two drivers are served two different capability sets, which stays observable only while the identity reaches the request. Nothing asserts the raw request body, because an adapter that echoed what it received would be a disclosure surface added for a test.
 - The connection address's URI scheme is checked against the resolved driver. `vs-adapter/create-virtual-schema` takes the source database from the address's path component and passes the address straight through as the ADBC `uri` option, so a `postgresql://` address under `DRIVER = 'mysql'` reaches the MySQL driver and fails inside it, with a message about the source rather than about the mismatch the operator made.
 - Driver identity does not reach the source SQL. The dialect renders identifiers, literals, and collations; the metadata source queries the source's catalog. Nothing else in the adapter branches on which driver is in use, and a module that would need to is a module that should be behind one of the three tables instead.
 
@@ -49,14 +49,14 @@ Resolves the `DRIVER` property of a virtual schema to the one dialect, driver pa
 * *AND* a request recording `mysql` MUST advertise the MySQL dialect's own set
 * *AND* the adapter MUST NOT return one set for both, because Exasol delegates against the set it was given and the dialect that renders is chosen from the same field
 
-### Scenario: getCapabilities request carries the driver identity
+### Scenario: Each virtual schema is served the capability set its own driver advertises
 
-* *GIVEN* a virtual schema created against a source, and Exasol planning a query over it
-* *WHEN* the `getCapabilities` request the adapter receives is captured
-* *THEN* it MUST carry a `schemaMetadataInfo` object
-* *AND* that object MUST carry the `adapterNotes` string `createVirtualSchema` returned
-* *AND* the driver recorded in those notes MUST be the driver the `CREATE VIRTUAL SCHEMA` statement named
-* *AND* a departure from this shape MUST fail the test rather than be absorbed, because a per-dialect capability set is only sound while the identity reaches this request
+* *GIVEN* two virtual schemas created through `CREATE VIRTUAL SCHEMA` over the shipped adapter, one naming `DRIVER = 'mysql'` and one naming `DRIVER = 'postgresql'`
+* *WHEN* Exasol plans a `FULL OUTER JOIN` over each schema
+* *THEN* the statement generated for the PostgreSQL-backed schema MUST carry the delegated `FULL OUTER JOIN`, because that dialect advertises `JOIN_TYPE_FULL_OUTER`
+* *AND* no statement generated for the MySQL-backed schema MUST carry a join, because that dialect withholds the capability and Exasol joins the separately delegated table scans itself
+* *AND* the observed difference MUST come from the shipped adapter alone, with no probe adapter, no request-echo instrumentation, and no test-only code path through it, because a capability set observed anywhere but the production path says nothing about the production path
+* *AND* a departure from this shape MUST fail the test rather than be absorbed, because a per-dialect capability set is only sound while `getCapabilities` resolves the driver identity each schema recorded
 
 ### Scenario: getCapabilities without adapter notes fails rather than guessing a driver
 
