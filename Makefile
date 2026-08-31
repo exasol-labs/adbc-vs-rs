@@ -98,6 +98,10 @@ test-it: stack-up-mysql
 test-e2e: cross-udf-build stack-up
 	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_mysql_test -- --test-threads=1
 
+.PHONY: bench
+bench: cross-udf-build stack-up
+	cargo test -p adbc-vs-adapter --features bench --test bench_mysql_test -- --test-threads=1 --nocapture
+
 # --- release packaging --------------------------------------------------------
 #
 # Both targets back the `release` CI job. release-tarball is a real-file

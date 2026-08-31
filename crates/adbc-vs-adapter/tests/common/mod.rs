@@ -11,12 +11,17 @@
 
 #![allow(dead_code)]
 
+pub mod bench;
+pub mod bench_data;
+pub mod bench_stack;
 pub mod exasol;
 pub mod items;
+pub mod jdbc_vs;
 pub mod mirror;
 pub mod mysql;
 pub mod probe;
 pub mod readiness;
+pub mod report;
 pub mod schema;
 pub mod script;
 pub mod slc;
