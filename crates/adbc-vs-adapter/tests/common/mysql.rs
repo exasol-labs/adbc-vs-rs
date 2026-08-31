@@ -14,8 +14,8 @@ use super::{run, try_run};
 /// A fixed address on the Compose network, never the Compose service name:
 /// Exasol's `exaconf` rewrites `/etc/hosts` and `/etc/resolv.conf` at start-up,
 /// so Docker's service-name resolution does not survive into a UDF sandbox.
-const ADDRESS: &str = "172.28.5.10";
-const PORT: u16 = 3306;
+pub const ADDRESS: &str = "172.28.5.10";
+pub const PORT: u16 = 3306;
 
 /// The `host:port` the stack publishes MySQL at on the loopback interface.
 const PUBLISHED_ENDPOINT: &str = "127.0.0.1:3306";
@@ -134,6 +134,24 @@ impl MySql {
     /// Runs one or more statements against `DATABASE` as the root user.
     pub fn execute(&self, sql: &str) {
         self.execute_in(DATABASE, sql);
+    }
+
+    /// Runs a query of one row and one column against `DATABASE` and returns
+    /// that value as the text MySQL rendered it.
+    ///
+    /// A rejected query fails the run rather than returning, so a caller
+    /// reading a row count can never mistake an unreachable database, or a
+    /// table that is not there, for an empty one.
+    pub fn query_scalar(&self, sql: &str) -> String {
+        let rendered = self
+            .client(&format!("querying MySQL:\n{sql}"), Some(DATABASE), sql)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let value = rendered.trim();
+        assert!(
+            !value.contains('\n'),
+            "a single-value result was expected from `{sql}`, but MySQL answered:\n{rendered}"
+        );
+        value.to_owned()
     }
 
     /// Runs one or more statements against `database` as the root user.

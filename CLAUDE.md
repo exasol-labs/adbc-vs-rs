@@ -31,7 +31,8 @@ Rust Exasol Virtual Schema over ADBC sources. Two crates (`adbc-vs-adapter`, `ad
 - `make test-artifact` — `cargo test -p adbc-vs-adapter --features built-artifact --test artifact_test`, prereq `cross-udf-build`. Asserts against the real `.so`; MUST fail, not skip, when the `.so` is absent, and must run on the machine that holds it.
 - `make deny` — `cargo deny check licenses advisories bans sources`, then `cargo test -p adbc-vs-adapter --features policy-check --test policy_test`.
 - `make test-e2e` — full-stack tier, see below.
-- All non-unit tiers are behind default-off cargo features: `mysql-it`, `built-artifact`, `policy-check`, `exasol-e2e`.
+- `make bench` — transmission-throughput benchmark against the full stack, see "Benchmarking" below.
+- All non-unit tiers are behind default-off cargo features: `mysql-it`, `built-artifact`, `policy-check`, `exasol-e2e`, `bench`.
 - Stack lifecycle: `make stack-up-mysql` (MySQL alone, `compose up -d --wait`), `make stack-up` (adds Exasol), `make stack-down` (removes every service). Never a fixed `sleep`.
 
 ## E2E testing
@@ -48,6 +49,17 @@ Rust Exasol Virtual Schema over ADBC sources. Two crates (`adbc-vs-adapter`, `ad
 - BucketFS writes are asynchronous. Wait until the object (or an extracted archive's contents) is readable to a UDF; never assume it the moment the upload returns.
 - Verify every delegated fragment twice: `EXPLAIN VIRTUAL` proves the fragment reached the generated MySQL statement, and the returned rows prove it produced the right answer. Asserting only one cannot tell a correct delegation from a silently dropped one.
 - Prefer differential assertions: mirror the MySQL fixture into a local Exasol table holding identical values and run the same query over both. Collation, aggregate result type, and `MIN`/`MAX` ordering gaps then surface as a diff instead of having to be predicted case by case.
+
+## Benchmarking
+
+- Measures transmission throughput: wall-clock around a `CREATE ... AS SELECT` (CTAS) moving a MySQL table into Exasol, comparing this repo's ADBC-fronted virtual schema against Exasol's official JDBC-based `mysql-virtual-schema`.
+- **Framing correction:** for this query shape, the JDBC adapter's Java script only does metadata/pushdown planning — the actual bulk transfer runs through Exasol's native ExaLoader (`IMPORT ... FROM JDBC`), entirely outside the Java UDF sandbox. So this compares "ExaLoader-over-JDBC" vs. "Rust scan UDF over ADBC/Arrow," never "Java vs Rust" adapter code.
+- `make bench` → prereqs `cross-udf-build stack-up`, then `cargo test -p adbc-vs-adapter --features bench --test bench_mysql_test -- --test-threads=1 --nocapture`. Feature-gated (`bench`, default-off) so `make test` never needs a container.
+- `--test-threads=1` is mandatory, same reason as `test-e2e`: one shared setup module provisions both virtual schemas and the `BENCH` sink schema, which every sample's CTAS reuses.
+- No CI job. A shared GitHub runner is the wrong place to trust throughput numbers, and `workflow_test.rs` only asserts workflow→Makefile references, never the reverse, so an uninvoked `bench` target breaks nothing.
+- Three data tiers, seeded into MySQL: `narrow_small` (100,000 rows, 8 narrow columns, ~10MB), `narrow_large` (1,000,000 rows, same 8 columns, ~100MB), `wide` (200,000 rows, ~1KB/row via wider `VARCHAR`/`DECIMAL` columns, ~200MB).
+- Output: `dist/bench/results-<UTC-timestamp>.csv` (every raw sample) + `report-<UTC-timestamp>.md` (provenance header + summary table), gitignored via the existing `/dist` entry.
+- Known asymmetry, not a bug: MySQL `CHAR` maps to ADBC `VARCHAR`/JDBC `CHAR`, and MySQL `DATETIME` maps to ADBC `TIMESTAMP(3)`/JDBC `TIMESTAMP(0)`. Both are each adapter's own intentional mapping — a small real bias in the CTAS write cost shared by both sides, not something the benchmark corrects for.
 
 ## CI
 

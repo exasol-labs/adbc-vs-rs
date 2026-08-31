@@ -19,6 +19,10 @@ exasol-e2e = []
 # The `cargo deny` invocation, which needs cargo-deny on the host; `make deny`
 # enables it.
 policy-check = []
+# The transmission-throughput benchmark against the full Docker Compose
+# stack. `make bench` enables it; a plain `cargo test --workspace` leaves
+# `tests/bench_mysql_test.rs` empty, so the fast tier never needs a container.
+bench = []
 
 [dependencies]
 adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.2.0" }

@@ -341,3 +341,18 @@ fn test_e2e_depends_on_cross_udf_build() {
     assert!(e2e.recipe.contains("--test-threads=1"));
     assert!(e2e.recipe.contains("--test e2e_mysql_test"));
 }
+
+#[test]
+fn bench_target_has_expected_prerequisites_and_recipe() {
+    let text = makefile_text();
+    let bench = rule(&text, "bench");
+    assert_eq!(
+        bench.prerequisites,
+        vec!["cross-udf-build".to_string(), "stack-up".to_string()]
+    );
+    assert!(bench
+        .recipe
+        .contains("cargo test -p adbc-vs-adapter --features bench --test bench_mysql_test"));
+    assert!(bench.recipe.contains("--test-threads=1"));
+    assert!(bench.recipe.contains("--nocapture"));
+}
