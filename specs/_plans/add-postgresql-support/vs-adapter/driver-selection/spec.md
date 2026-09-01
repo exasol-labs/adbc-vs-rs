@@ -6,7 +6,11 @@ Resolves the `DRIVER` property of a virtual schema to the one dialect, driver pa
 
 - Release 0.2 supports one driver and needs no selection: `dispatch` names `MySqlDialect` at both of its dialect call sites, `create_schema` compares `DRIVER` against one string constant, and one set of pinned package constants describes the only driver there is. A second driver turns each of those into a decision, and a decision restated at four call sites is four places to forget the third driver.
 - The identity is a closed enum, one variant per supported driver, not a string passed around. Every per-driver table is keyed on that enum, so a Rust `match` over it is exhaustive and adding a variant fails the build at each table that needs a new row. That is the mechanism that makes "adding a driver adds an implementation rather than editing a renderer" true rather than aspirational.
-- Three tables are keyed on the identity, and they live in two crates because their consumers do. The driver package — pinned version, shared-library filename, package SHA-256, registry driver path, and ADBC entry-point symbol — lives in `adbc-vs-scan`, because the scan UDF loads the library and the adapter provisions it, and both already read that module. The dialect and the metadata source live in `adbc-vs-adapter`, which the scan crate does not depend on. The enum itself lives with the package table, so the adapter's tables key on the lower crate's type and the dependency still points one way.
+- Three tables are keyed on the identity, and they live in two crates because their consumers do. The driver package — version range, shared-library filename, registry driver path, and ADBC entry-point symbol — lives in `adbc-vs-scan`, because the scan UDF loads the library and the adapter provisions it, and both already read that module. The dialect and the metadata source live in `adbc-vs-adapter`, which the scan crate does not depend on. The enum itself lives with the package table, so the adapter's tables key on the lower crate's type and the dependency still points one way.
+- Two of the three tables are *values* and one is *behavior*, and the difference decides where each is written. A driver package row and a dialect's advertised capability list are values: one checked-in TOML file per technology holds both, and the build generates the tables from them, so a technology's data is a data edit. A dialect's SQL rendering and a metadata source's catalog queries and type mapping are behavior, which no data format expresses, so they stay code. `SqlDialect::capabilities` remains a trait method that answers per dialect — only the values it returns move — so `vs-adapter/pushdown-dialect`'s per-dialect ownership is unchanged.
+- The TOML files are compiled in, never read at run time. Nothing reads them from BucketFS or from a filesystem path while a query runs, so a malformed table fails the build rather than a query, and the generated tables keep the `'static` lifetime and exhaustive-`match` properties the enum exists for.
+- The build validates the `[package]` table's fields and nothing else. A capability name is protocol vocabulary rather than a type this repo defines — `SqlDialect::capabilities` returns bare strings — so the build has nothing to check a name against, and an allowlist inside the build script would be the second capability list `vs-adapter/pushdown-dialect` forbids. An unknown capability name therefore reaches the generated table and is caught by that feature's invariant test, which renders every advertised capability and has no rendering path for it.
+- The supported set is therefore fixed at build time, and the TOML files do not make it extensible. A technology needs a dialect and a metadata source as well as a package row, so a TOML file naming a technology with no code behind it could only fail. Adding a technology requires a new adbc-vs release carrying all three; what varies per virtual schema is which of the supported technologies it uses, not which technologies exist.
 - The `DRIVER` property value is matched case-insensitively, as release 0.2 already matches `mysql`. The canonical lower-case spelling is what `adapterNotes` records and what an error message names.
 - An unsupported value names every supported value rather than one. Release 0.2's error names `mysql` as "the only driver this release supports", a sentence that stops being true with the second driver and would be wrong again with the third; the message is generated from the enum instead.
 - `getCapabilities` and `pushdown` MUST resolve the same identity from the same field, or the adapter can advertise one dialect's capabilities and render another's — the wrong-rows failure `vs-adapter/pushdown-dialect` exists to prevent, reintroduced one layer up. `pushdown` already reads `schemaMetadataInfo.adapterNotes`, whose `driver` field release 0.2 records and never reads; `getCapabilities` reads the same field.
@@ -22,7 +26,7 @@ Resolves the `DRIVER` property of a virtual schema to the one dialect, driver pa
 * *WHEN* each value is resolved to a driver identity
 * *THEN* each MUST resolve to a distinct identity
 * *AND* each identity MUST yield the dialect, the driver package, and the metadata source belonging to that driver
-* *AND* no two identities MUST yield the same shared-library filename, because both libraries install into one BucketFS directory and a shared filename would make each driver's presence check answer for the other
+* *AND* no two identities MUST yield the same shared-library filename or the same registry driver path, because a shared value would make each driver's presence check answer for the other
 
 ### Scenario: DRIVER value is matched case-insensitively and recorded in canonical form
 
@@ -89,6 +93,40 @@ Resolves the `DRIVER` property of a virtual schema to the one dialect, driver pa
 * *THEN* the specification MUST carry the driver identity alongside the driver path
 * *AND* the scan MUST load the library with the ADBC entry-point symbol that identity names
 * *AND* the scan MUST NOT derive the entry-point symbol from the library filename, which is the naming heuristic `scan-udf/arrow-scan` already rejects
+
+### Scenario: Each technology's package row and capability list come from its own TOML file
+
+* *GIVEN* one checked-in TOML file per supported technology, each holding a `[package]` table and a `[capabilities]` list
+* *WHEN* the crate is built
+* *THEN* each driver identity's package row MUST be generated from that technology's own file
+* *AND* each dialect's advertised capability set MUST be generated from that technology's own file
+* *AND* the generated values MUST be compiled into the build output, with no TOML file read at query time from BucketFS or from any filesystem path
+* *AND* `SqlDialect::capabilities` MUST remain the per-dialect trait method that answers the question, so the values moving to data does not move the ownership
+
+### Scenario: A malformed or incomplete driver TOML file fails the build
+
+* *GIVEN* a driver TOML file missing a required `[package]` field, or holding one of the wrong type
+* *WHEN* the crate is built
+* *THEN* the build MUST fail
+* *AND* the failure MUST name the file and the field at fault
+* *AND* the failure MUST occur at build time rather than when a query resolves that driver, because a driver table that cannot be trusted is not a query-time condition
+* *AND* the build MUST NOT check a capability name against a list of its own, because capability names are protocol vocabulary and a list in the build script is the second capability list `vs-adapter/pushdown-dialect` forbids
+
+### Scenario: A capability name no dialect renders fails the invariant test rather than the build
+
+* *GIVEN* a driver TOML file whose `[capabilities]` list names a capability that technology's dialect cannot render
+* *WHEN* the capability invariant test runs over every driver identity
+* *THEN* the test MUST fail, naming the capability that has no rendering path
+* *AND* the build MUST succeed, because no capability type exists for the build script to match the name against
+* *AND* the guard MUST stay the invariant test rather than becoming a build check, so the adapter keeps exactly one list of capability names
+
+### Scenario: Adding a technology requires code, not only a TOML file
+
+* *GIVEN* the set of supported driver identities
+* *WHEN* the adapter resolves a `DRIVER` value
+* *THEN* the accepted set MUST be fixed at build time, enumerated from the closed identity type
+* *AND* the adapter MUST NOT discover a technology by scanning a directory, reading a configuration file at run time, or loading a plugin
+* *AND* a technology MUST NOT be resolvable without a dialect and a metadata source compiled in for it, because a package row alone cannot render SQL or read a catalog
 
 ### Scenario: Every driver identity has a complete set of tables
 
