@@ -18,12 +18,12 @@ Keeps `ORDER BY` and `LIMIT` in Exasol rather than delegating them to the source
 
 ### Scenario: Capability set withholds ordering and limiting
 
-* *GIVEN* a virtual schema backed by MySQL
+* *GIVEN* a virtual schema, for each driver this release supports
 * *WHEN* Exasol sends a `getCapabilities` request
 * *THEN* the `capabilities` array MUST NOT contain `ORDER_BY_COLUMN`
 * *AND* it MUST NOT contain `ORDER_BY_EXPRESSION`
-* *AND* it MUST NOT contain `LIMIT`
-* *AND* it MUST NOT contain `LIMIT_WITH_OFFSET`
+* *AND* it MUST NOT contain `LIMIT` or `LIMIT_WITH_OFFSET`
+* *AND* every dialect MUST withhold all four, because the emitting-script transport that makes them unsound is the same for every source
 
 ### Scenario: Ordered query over a virtual table returns a stable order
 
@@ -49,9 +49,9 @@ Keeps `ORDER BY` and `LIMIT` in Exasol rather than delegating them to the source
 
 ### Scenario: Pushed-down statement carries no ordering or limiting clause
 
-* *GIVEN* an Exasol query whose text carries `ORDER BY` and `LIMIT` over a virtual table
+* *GIVEN* an Exasol query whose text carries `ORDER BY` and `LIMIT` over a virtual table, for each driver this release supports
 * *WHEN* `EXPLAIN VIRTUAL` reports the statement the adapter generated
-* *THEN* the generated MySQL statement MUST NOT contain `ORDER BY`
+* *THEN* the generated statement MUST NOT contain `ORDER BY`
 * *AND* it MUST NOT contain `LIMIT`
 * *AND* it MUST NOT contain `OFFSET`
 
@@ -61,3 +61,4 @@ Keeps `ORDER BY` and `LIMIT` in Exasol rather than delegating them to the source
 * *WHEN* the adapter builds the response
 * *THEN* the adapter MUST return an error naming the element it will not delegate
 * *AND* the adapter MUST NOT return a statement that silently ignores the element
+* *AND* the same MUST hold for each dialect this release supports, because a request reaching a dialect that never advertised the capability is the case this rejection exists for

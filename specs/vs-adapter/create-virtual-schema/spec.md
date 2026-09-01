@@ -20,23 +20,24 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 
 ### Scenario: Creating a virtual schema exposes the source tables
 
-* *GIVEN* a reachable MySQL database holding two tables whose columns are all core types
-* *AND* an Exasol `CONNECTION` addressing that database
+* *GIVEN* a reachable source database holding two tables whose columns are all core types, for each driver this release supports
+* *AND* an Exasol `CONNECTION` addressing that database with the driver's own URI scheme
 * *WHEN* `CREATE VIRTUAL SCHEMA` runs with `DRIVER`, `CONNECTION_NAME`, and `BUCKETFS_CONNECTION` set
 * *THEN* the adapter MUST return a `schemaMetadata` object listing both tables
 * *AND* each table MUST carry its columns in the source's ordinal position order
-* *AND* each column MUST carry the Exasol data type produced by the type mapping
+* *AND* each column MUST carry the Exasol data type produced by that driver's type mapping
 
 ### Scenario: Source identifiers keep their original case
 
-* *GIVEN* a MySQL database holding a lower-case table name and lower-case column names
+* *GIVEN* a source database holding a lower-case table name and lower-case column names, for each driver this release supports
 * *WHEN* the virtual schema is created
-* *THEN* the returned table and column names MUST match the MySQL names character for character, including case
+* *THEN* the returned table and column names MUST match the source names character for character, including case
 * *AND* the adapter MUST NOT fold any identifier to upper case
+* *AND* a mixed-case source table name MUST be returned with its case intact, because the adapter quotes every identifier it renders
 
 ### Scenario: Views are exposed alongside base tables
 
-* *GIVEN* a MySQL database holding one base table and one view over it
+* *GIVEN* a source database holding one base table and one view over it, for each driver this release supports
 * *WHEN* the virtual schema is created
 * *THEN* the returned `schemaMetadata` MUST list both the base table and the view
 
@@ -46,14 +47,18 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 * *WHEN* the adapter handles the request
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST name the missing property
-* *AND* the same MUST hold when `DRIVER` or `BUCKETFS_CONNECTION` is omitted
+* *AND* the same MUST hold when `DRIVER` is omitted, and when `BUCKETFS_CONNECTION` is omitted while `DRIVER_PATH` is absent
+* *AND* omitting `BUCKETFS_CONNECTION` while `DRIVER_PATH` is set MUST NOT fail, because the property's only purpose is the write credential self-install needs and `DRIVER_PATH` performs no write
+* *AND* when `BUCKETFS_CONNECTION` is the missing property, the adapter MUST NOT attempt to provision a driver
 
 ### Scenario: Unsupported driver value fails with a named error
 
-* *GIVEN* a `CREATE VIRTUAL SCHEMA` statement setting `DRIVER` to `postgresql`
+* *GIVEN* a `CREATE VIRTUAL SCHEMA` statement setting `DRIVER` to `snowflake`
 * *WHEN* the adapter handles the request
 * *THEN* the adapter MUST return an error
-* *AND* the error message MUST name `mysql` as the only driver this release supports
+* *AND* the error message MUST name `snowflake` as the value it received
+* *AND* the error message MUST list both `mysql` and `postgresql` as the drivers this release supports
+* *AND* the error message MUST NOT name any single driver as the only one supported
 
 ### Scenario: Connection address without a database fails with a named error
 
@@ -61,52 +66,73 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 * *WHEN* the virtual schema is created
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST state that the connection address needs a database path component
+* *AND* the same MUST hold for a `postgresql://host:5432` address, because libpq selects the database from that component and the adapter passes the address through unchanged
 
 ### Scenario: Adapter notes record the state pushdown needs and no credential
 
-* *GIVEN* a successfully created virtual schema
+* *GIVEN* a successfully created virtual schema, for each driver this release supports
 * *WHEN* `schemaMetadata.adapterNotes` is read back from `SYS.EXA_ALL_VIRTUAL_SCHEMAS`
 * *THEN* it MUST be a stringified JSON object
-* *AND* it MUST record the driver name, the pinned driver version, the BucketFS path of the installed driver shared library, the `CONNECTION` object's name, and the MySQL database name
-* *AND* it MUST NOT contain the MySQL password, the MySQL user, or any BucketFS credential
+* *AND* it MUST record the driver name in its canonical lower-case spelling, the resolved driver version, the BucketFS path of the driver shared library in use, the `CONNECTION` object's name, and the source namespace
+* *AND* the recorded version MUST be the version the driver's range resolved to rather than a version compiled into adbc-vs, because under a range it is the only record of which driver a virtual schema is running
+* *AND* notes written by an earlier release, which recorded a pinned version and an unversioned driver path, MUST still parse
+* *AND* the recorded driver name MUST be the field `getCapabilities` and `pushdown` resolve their dialect from
+* *AND* it MUST NOT contain the source password, the source user, or any BucketFS credential
 
 ### Scenario: Columns of unmappable type are omitted and recorded
 
-* *GIVEN* a MySQL table holding two core-type columns and one `JSON` column
+* *GIVEN* a source table holding two core-type columns and one column of a type the driver's mapping does not map
 * *WHEN* the virtual schema is created
 * *THEN* the returned table MUST list only the two core-type columns
-* *AND* `adapterNotes` MUST record the omitted column's table name, column name, MySQL type, and the reason it was omitted
+* *AND* `adapterNotes` MUST record the omitted column's table name, column name, source type, and the reason it was omitted
 * *AND* the adapter MUST NOT fail the request
+* *AND* the same MUST hold for a PostgreSQL `jsonb` column and for a MySQL `JSON` column, so one omission path serves both drivers
 
 ### Scenario: Table with no mappable column is omitted
 
-* *GIVEN* a MySQL table whose every column is of an unmapped type
+* *GIVEN* a source table whose every column is of an unmapped type, for each driver this release supports
 * *WHEN* the virtual schema is created
 * *THEN* the returned `schemaMetadata` MUST NOT list that table
 * *AND* `adapterNotes` MUST record the table as omitted
 
 ### Scenario: Empty source database yields an empty table list
 
-* *GIVEN* a reachable MySQL database holding no tables
+* *GIVEN* a reachable source namespace holding no tables, for each driver this release supports
 * *WHEN* the virtual schema is created
 * *THEN* the adapter MUST return a `schemaMetadata` object whose `tables` array is empty
 * *AND* the adapter MUST NOT return an error
 
-### Scenario: Source server without the required collations is rejected at creation
-
-* *GIVEN* a reachable source server whose `information_schema.COLLATIONS` omits `utf8mb4_0900_bin`, or omits `utf8mb4_0900_as_cs`, as MariaDB and every MySQL older than 8.0.17 do
-* *WHEN* `CREATE VIRTUAL SCHEMA` runs against it
-* *THEN* the adapter MUST return an error
-* *AND* the error message MUST name whichever of the two collations it did not find, the server version string the source reported, and `8.0.17` as the minimum MySQL version this release supports
-* *AND* the adapter MUST NOT create the virtual schema, because its advertised capabilities would make Exasol delegate a character fragment the source cannot execute
-* *AND* a server listing both collations MUST be accepted, and MUST NOT be rejected on its version string alone, so that a fork reporting an unexpected version but supplying the collations still works
-* *AND* every request that resolves the source `CONNECTION` MUST perform the check — `refresh` and `setProperties` as well as `createVirtualSchema` — because `setProperties` can point an existing virtual schema at a different server and `refresh` re-discovers against whatever the connection resolves to now
-* *AND* the check MUST refuse the source before any table is discovered from it, and the collation names it requires MUST be the ones the dialect renders rather than a second list of its own
-
 ### Scenario: Unreachable source fails creation with a diagnosable message
 
-* *GIVEN* an Exasol `CONNECTION` whose address names a MySQL host and port nothing listens on
+* *GIVEN* an Exasol `CONNECTION` whose address names a host and port nothing listens on, for each driver this release supports
 * *WHEN* `CREATE VIRTUAL SCHEMA` runs
 * *THEN* the statement MUST fail
 * *AND* the error surfaced to the querying session MUST name the address it could not reach
+* *AND* the adapter MUST NOT create the virtual schema
+
+### Scenario: Every supported driver value creates a virtual schema
+
+* *GIVEN* a reachable source database for each driver value this release supports, each addressed by an Exasol `CONNECTION` carrying that driver's own URI scheme
+* *WHEN* `CREATE VIRTUAL SCHEMA` runs once per supported driver value
+* *THEN* every statement MUST succeed, and each returned `schemaMetadata` MUST list the tables of that source's namespace
+* *AND* each virtual schema's `adapterNotes` MUST record its driver in the canonical lower-case spelling, whatever letter case the statement used
+* *AND* the driver values MUST be enumerated from the supported set rather than listed one by one, so a release adding a driver extends this coverage without editing it
+
+### Scenario: DRIVER_PATH is accepted and bypasses driver provisioning
+
+* *GIVEN* a BucketFS path holding a readable driver shared library for the named driver
+* *WHEN* `CREATE VIRTUAL SCHEMA` runs with `DRIVER`, `CONNECTION_NAME`, and `DRIVER_PATH` set
+* *THEN* the statement MUST succeed
+* *AND* the adapter MUST use exactly the path given, without modifying or re-rooting it
+* *AND* `adapterNotes` MUST record that path as the driver path
+* *AND* the statement MUST succeed with `BUCKETFS_CONNECTION` absent, because no BucketFS write is required
+* *AND* the same MUST hold for each driver this release supports
+
+### Scenario: DRIVER_PATH naming no readable file fails with a named error
+
+* *GIVEN* a `CREATE VIRTUAL SCHEMA` statement whose `DRIVER_PATH` names a path holding no readable file
+* *WHEN* the adapter handles the request
+* *THEN* the adapter MUST return an error
+* *AND* the error message MUST name the `DRIVER_PATH` property, the path it received, and the driver
+* *AND* the adapter MUST NOT provision the driver from the registry instead
 * *AND* the adapter MUST NOT create the virtual schema

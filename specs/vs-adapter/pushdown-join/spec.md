@@ -17,46 +17,22 @@ Delegates an equi-join between two virtual tables of one virtual schema to the s
 
 ## Scenarios
 
-### Scenario: Join capabilities cover inner and one-sided outer joins only
-
-* *GIVEN* a virtual schema backed by MySQL
-* *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, and `JOIN_CONDITION_EQUI`
-* *AND* it MUST NOT contain `JOIN_TYPE_FULL_OUTER`, because MySQL implements no `FULL OUTER JOIN`
-* *AND* it MUST NOT contain `JOIN_CONDITION_ALL`, because a non-equi join is out of scope
-
-### Scenario: Inner join of two virtual tables renders one MySQL statement
-
-* *GIVEN* virtual tables `orders` and `customers` sharing a key column
-* *WHEN* Exasol pushes down an inner join over that key
-* *THEN* the generated MySQL statement MUST join both tables in a single `SELECT`
-* *AND* both tables MUST be qualified by the database `adapterNotes` records
-* *AND* the join condition MUST render as an equality between the two qualified columns
-* *AND* the statement MUST NOT read either table in a separate statement
-
-### Scenario: Each join type renders its MySQL counterpart
-
-* *GIVEN* a `pushdown` request whose `from` element carries `join_type`
-* *WHEN* the dialect renders the join
-* *THEN* `inner` MUST render as `INNER JOIN`
-* *AND* `left_outer` MUST render as `LEFT OUTER JOIN`
-* *AND* `right_outer` MUST render as `RIGHT OUTER JOIN`
-* *AND* the operand order MUST match the request's `left` and `right`, because reversing an outer join changes its result
-
 ### Scenario: Unsupported join type fails with a named error
 
-* *GIVEN* a `pushdown` request whose `join_type` is `full_outer`, or a value the dialect does not render
+* *GIVEN* a `pushdown` request whose `join_type` is a value the resolved dialect does not render
 * *WHEN* the adapter builds the response
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST name the join type it received
 * *AND* the adapter MUST NOT substitute a different join type
+* *AND* a `join_type` of `full_outer` MUST fail this way in a dialect that never advertised it and MUST render in one that did
 
 ### Scenario: Every joined table is aliased and every column is qualified
 
-* *GIVEN* a join whose two tables both declare a column named `id`
+* *GIVEN* a join whose two tables both declare a column named `id`, for each driver this release supports
 * *WHEN* the dialect renders the statement
 * *THEN* each of the join's tables in the `FROM` clause MUST carry an alias
 * *AND* every column reference MUST be qualified by the alias of the table it belongs to
+* *AND* every alias MUST be quoted with the dialect's own quoting character
 * *AND* the `EMITS` clause MUST declare two distinct positional column names for the two `id` columns
 
 ### Scenario: Column that matches no table in the from tree fails with a named error
@@ -65,27 +41,45 @@ Delegates an equi-join between two virtual tables of one virtual schema to the s
 * *WHEN* the adapter builds the response
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST name the column and the table reference it could not resolve
-* *AND* the adapter MUST NOT emit an unqualified column reference, because MySQL would then resolve it against the wrong table or reject the statement
+* *AND* the adapter MUST NOT emit an unqualified column reference, because every source this release supports would then resolve it against the wrong table or reject the statement
 
 ### Scenario: Outer join emits nulls for the unmatched side
 
-* *GIVEN* a left outer join whose right table has no matching row for one left row
+* *GIVEN* a left outer join whose right table has no matching row for one left row, for each driver this release supports
 * *WHEN* the query runs through the virtual schema
 * *THEN* the unmatched row MUST come back with nulls for every right-table column
-* *AND* the scan MUST NOT fail on a null in a column whose MySQL declaration is `NOT NULL`
+* *AND* the scan MUST NOT fail on a null in a column the source declares `NOT NULL`
 * *AND* the returned rows MUST equal what Exasol returns for the same join executed locally over the same data
 
 ### Scenario: Join composes with a delegated filter and aggregation
 
-* *GIVEN* a join carrying a `filter` and a `groupBy` in the same `pushdown` request
+* *GIVEN* a join carrying a `filter` and a `groupBy` in the same `pushdown` request, for each driver this release supports
 * *WHEN* the dialect renders the statement
 * *THEN* the generated statement MUST carry the join, the `WHERE` clause, and the `GROUP BY` clause together
-* *AND* the clauses MUST appear in MySQL's required order: `FROM`, `WHERE`, `GROUP BY`
+* *AND* the clauses MUST appear in the target's required order: `FROM`, `WHERE`, `GROUP BY`
 * *AND* the returned rows MUST equal what Exasol returns for the same query executed locally over the same data
 
-### Scenario: Nested join renders as a nested MySQL join
+### Scenario: Each join type renders its counterpart
 
-* *GIVEN* a `from` element whose `left` is itself a join element
+* *GIVEN* a `pushdown` request whose `from` element carries `join_type`
+* *WHEN* each dialect renders the join
+* *THEN* `inner` MUST render as `INNER JOIN`
+* *AND* `left_outer` MUST render as `LEFT OUTER JOIN`, and `right_outer` as `RIGHT OUTER JOIN`
+* *AND* `full_outer` MUST render as `FULL OUTER JOIN` in every dialect that advertises `JOIN_TYPE_FULL_OUTER`
+* *AND* the operand order MUST match the request's `left` and `right`, because reversing an outer join changes its result
+
+### Scenario: Inner join of two virtual tables renders one statement
+
+* *GIVEN* virtual tables `orders` and `customers` sharing a key column, for each driver this release supports
+* *WHEN* Exasol pushes down an inner join over that key
+* *THEN* the generated statement MUST join both tables in a single `SELECT`, reading neither in a separate statement
+* *AND* both tables MUST be qualified by the source namespace `adapterNotes` records
+* *AND* the join condition MUST render as an equality between the two qualified columns
+* *AND* a character join key MUST carry whatever suffix its dialect renders for an equality operand
+
+### Scenario: Nested join renders as a nested join
+
+* *GIVEN* a `from` element whose `left` is itself a join element, for each driver this release supports
 * *WHEN* the dialect renders the statement
 * *THEN* the generated statement MUST render the nested join before joining the outer table
 * *AND* every table across both levels MUST carry a distinct alias

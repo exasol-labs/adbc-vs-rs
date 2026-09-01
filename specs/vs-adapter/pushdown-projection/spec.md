@@ -28,8 +28,9 @@ Reports the query fragments this release can delegate to the source, and rewrite
 
 * *GIVEN* a virtual table `orders` with three mapped columns
 * *WHEN* Exasol pushes down a select carrying no `selectList` field
-* *THEN* the generated MySQL statement MUST project all three columns in the virtual table's declared order
+* *THEN* the generated statement MUST project all three columns in the virtual table's declared order
 * *AND* the generated statement MUST NOT use `SELECT *`, because a source column added after creation would then break the declared `EMITS` arity
+* *AND* the same MUST hold for each dialect this release supports
 
 ### Scenario: Empty select list projects a single constant
 
@@ -40,25 +41,9 @@ Reports the query fragments this release can delegate to the source, and rewrite
 * *AND* the `EMITS` clause MUST declare exactly one column, named positionally
 * *AND* that column MUST declare the Exasol type `DECIMAL(1,0)`, which is the type of the constant the statement projects, because an empty `selectList` carries no `selectListDataTypes` entry and no involved column to take a type from
 
-### Scenario: Backtick in an identifier is escaped
-
-* *GIVEN* a MySQL table or column whose name contains a backtick
-* *WHEN* the adapter builds the pushdown statement
-* *THEN* the emitted identifier MUST double every backtick it contains
-* *AND* the emitted identifier MUST remain enclosed in a single pair of backticks
-* *AND* the adapter MUST NOT interpolate the raw name into the statement
-
 ### Scenario: Pushdown response carries no credential
 
-* *GIVEN* a pushdown request against a virtual schema
+* *GIVEN* a pushdown request against a virtual schema, for each driver this release supports
 * *WHEN* the adapter returns its `sql` response
-* *THEN* the returned SQL text MUST NOT contain the MySQL password, the MySQL user, or any BucketFS credential
+* *THEN* the returned SQL text MUST NOT contain the source password, the source user, or any BucketFS credential
 * *AND* the embedded scan specification MUST reference the `CONNECTION` object by name only
-
-### Scenario: Projection pushdown reaches MySQL rather than Exasol
-
-* *GIVEN* a virtual schema over a MySQL table with eight mapped columns
-* *WHEN* Exasol runs a `SELECT` naming two of them
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement projecting only those two columns
-* *AND* the query MUST return those two columns with the values seeded in MySQL
-* *AND* the generated statement MUST NOT name any other mapped column

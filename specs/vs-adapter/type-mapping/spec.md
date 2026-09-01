@@ -15,70 +15,43 @@ States the contract every source-to-Exasol column mapping obeys: the closed set 
 
 ## Scenarios
 
-### Scenario: Signed integer types map to DECIMAL with the matching digit count
-
-* *GIVEN* a MySQL column of type `INT`
-* *WHEN* the column is mapped
-* *THEN* the result MUST be the Exasol type `DECIMAL` with precision 10 and scale 0
-* *AND* a `BIGINT` column MUST map to `DECIMAL` with precision 19 and scale 0
-
-### Scenario: DECIMAL preserves the source precision and scale
-
-* *GIVEN* a MySQL column of type `DECIMAL` with precision 12 and scale 4
-* *WHEN* the column is mapped
-* *THEN* the result MUST be the Exasol type `DECIMAL` with precision 12 and scale 4
-
 ### Scenario: DECIMAL beyond Exasol's maximum precision is unmapped
 
-* *GIVEN* a MySQL column of type `DECIMAL` with precision 40 and scale 2
+* *GIVEN* a source column of a numeric type whose declared precision exceeds what Exasol can declare, such as precision 40 and scale 2
 * *WHEN* the column is mapped
 * *THEN* the result MUST be unmapped
 * *AND* the stated reason MUST name Exasol's maximum `DECIMAL` precision of 36
 * *AND* the mapping MUST NOT silently reduce the precision, because that would truncate values
-
-### Scenario: Character types preserve the declared length and use UTF8
-
-* *GIVEN* a MySQL column of type `VARCHAR` with a declared character length of 100 and character set `utf8mb4`
-* *WHEN* the column is mapped
-* *THEN* the result MUST be the Exasol type `VARCHAR` with size 100 and character set `UTF8`
-* *AND* a `CHAR` column with declared length 10 and character set `utf8mb4` MUST map to Exasol `VARCHAR` with size 10 and character set `UTF8`
-* *AND* the mapping MUST NOT produce Exasol `CHAR` for any MySQL column, because Exasol blank-pads a `CHAR` value and MySQL does not pad a `CHAR` operand under the collations pushdown renders
-* *AND* a declared length of 0 MUST map to size 1, because Exasol's minimum character-type size is 1
-
-### Scenario: Character column of a non-utf8mb4 character set is unmapped
-
-* *GIVEN* MySQL columns of type `VARCHAR` and `CHAR` whose character set is `latin1`
-* *WHEN* each column is mapped
-* *THEN* each result MUST be unmapped
-* *AND* the stated reason MUST name the column's character set and `utf8mb4` as the only character set this release maps
-* *AND* the mapping MUST NOT map it to Exasol `VARCHAR` with character set `UTF8`, because a predicate over that column cannot be delegated with the collation Exasol's comparison semantics require
-
-### Scenario: Temporal and floating-point types map to their Exasol counterparts
-
-* *GIVEN* MySQL columns of type `DATE`, `DATETIME`, and `DOUBLE`
-* *WHEN* each column is mapped
-* *THEN* `DATE` MUST map to Exasol `DATE`
-* *AND* `DATETIME` MUST map to Exasol `TIMESTAMP`
-* *AND* `DOUBLE` MUST map to Exasol `DOUBLE`
-
-### Scenario: Unsigned integer columns are unmapped
-
-* *GIVEN* a MySQL column of type `BIGINT UNSIGNED`
-* *WHEN* the column is mapped
-* *THEN* the result MUST be unmapped
-* *AND* the stated reason MUST identify the unsigned modifier as unsupported in this release
-* *AND* the mapping MUST NOT map it to `DECIMAL` with precision 19, because the unsigned range exceeds that precision
-
-### Scenario: Non-core MySQL types are unmapped
-
-* *GIVEN* MySQL columns of type `JSON`, `TEXT`, `BLOB`, `ENUM`, `SET`, `TINYINT`, `SMALLINT`, `MEDIUMINT`, `FLOAT`, `TIME`, `YEAR`, `TIMESTAMP`, and `GEOMETRY`
-* *WHEN* each column is mapped
-* *THEN* each result MUST be unmapped
-* *AND* each stated reason MUST name the MySQL type that was rejected
+* *AND* the rule MUST hold whatever the source names that type, because the bound is Exasol's own rather than the source's
 
 ### Scenario: Column nullability carries through unchanged
 
-* *GIVEN* a MySQL column declared `NOT NULL`
+* *GIVEN* a source column the catalog reports as not nullable, for each driver this release supports
 * *WHEN* the column is mapped
 * *THEN* the mapped column MUST report `isNullable` as false
-* *AND* a column without `NOT NULL` MUST report `isNullable` as true
+* *AND* a column the catalog reports as nullable MUST report `isNullable` as true
+* *AND* the mapping MUST read the catalog's own flag rather than infer it, so one rule covers every driver whatever that catalog spells the flag
+
+### Scenario: Each technology states its own mapping table
+
+* *GIVEN* two drivers whose catalogs carry different fields — MySQL's unsigned flag and per-column character set, PostgreSQL's `udt_name` and collation determinism
+* *WHEN* a virtual schema is created over either
+* *THEN* each driver's metadata source MUST return columns already mapped, so `create_schema` MUST branch on no driver
+* *AND* there MUST be no shared source-column struct and no lowest-common-denominator catalog row, because reducing both to one loses whichever field only one source has
+* *AND* which source types map, and why the rest are omitted, MUST be stated by `vs-adapter/mysql-type-mapping` and `vs-adapter/postgresql-type-mapping` rather than here
+
+### Scenario: A mapped column declares only an Exasol type this release produces
+
+* *GIVEN* every column a driver's mapping returns as mapped
+* *WHEN* the declared Exasol type of each is read
+* *THEN* each MUST be one of `DECIMAL`, `VARCHAR`, `DATE`, `TIMESTAMP`, and `DOUBLE`, and none MUST be `BOOLEAN`, a type an `EMITS` clause declares for a delegated predicate but no source column produces
+* *AND* the set MUST be identical across drivers, so adding a driver adds no Exasol type to the system
+* *AND* a mapping that would widen the set MUST be treated as a change to the pushdown closure argument `vs-adapter/pushdown-dialect` states rather than as a local addition
+
+### Scenario: Omission records the source type under a source-neutral field
+
+* *GIVEN* a virtual schema whose source holds one column of an unmapped type
+* *WHEN* the recorded omission is read back from `adapterNotes`
+* *THEN* the omission MUST name the table, the column, the source type, and the reason
+* *AND* the field carrying the source type MUST be spelled for any source rather than for MySQL alone
+* *AND* an `adapterNotes` value written by an earlier release under the MySQL-specific spelling MUST still parse, because Exasol persists those notes and a virtual schema created before this release is read back rather than recreated
