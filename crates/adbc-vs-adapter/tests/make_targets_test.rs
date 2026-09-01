@@ -218,6 +218,87 @@ fn touching_source_invalidates_so() {
     );
 }
 
+/// Restores a workspace file's modification time on drop, so a test that dates
+/// a build input into the future leaves the tree exactly as it found it — a
+/// file left dated forward would make every later `make` and `cargo` run treat
+/// it as newer than every artifact built from it.
+struct Mtime {
+    path: PathBuf,
+    original: SystemTime,
+}
+
+impl Mtime {
+    fn dated_to(path: PathBuf, mtime: SystemTime) -> Self {
+        let original = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let dated = Mtime { path, original };
+        dated.set(mtime);
+        dated
+    }
+
+    fn set(&self, mtime: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(&self.path)
+            .and_then(|file| file.set_modified(mtime))
+            .unwrap_or_else(|error| panic!("failed to date {}: {error}", self.path.display()));
+    }
+}
+
+impl Drop for Mtime {
+    fn drop(&mut self) {
+        self.set(self.original);
+    }
+}
+
+/// CLAUDE.md ("Toolchain & build"): no test ever runs against a stale binary.
+///
+/// `adbc-vs-scan`'s build script and its `drivers/*.toml` declarations sit
+/// outside both crates' `src/` and are not manifests, so they reach the `.so`
+/// only through a prerequisite of their own. Without one, editing a version
+/// range or a capability list — the edit the declarations exist to make cheap —
+/// leaves `make cross-udf-build` a no-op, and `test-artifact`, `test-e2e`, and
+/// `bench` then certify the previous binary.
+///
+/// Each input is dated past a `.so` that is otherwise newer than the whole
+/// workspace, so the only thing that can turn the target out of date is that
+/// input: a prerequisite list that drops the declarations fails here rather
+/// than returning a stale `.so` silently.
+#[test]
+fn touching_a_scan_build_input_invalidates_so() {
+    let _guard = SO_LOCK.lock().unwrap();
+    let newer_than_every_source = SystemTime::now() + Duration::from_secs(2 * 60 * 60);
+    let _so = SoBackup::remove_existing().create_with_mtime(newer_than_every_source);
+
+    for input in [
+        "crates/adbc-vs-scan/build.rs",
+        "crates/adbc-vs-scan/drivers/mysql.toml",
+        "crates/adbc-vs-scan/drivers/postgresql.toml",
+    ] {
+        let up_to_date = run_make(&["-q", "cross-udf-build"]);
+        assert_eq!(
+            up_to_date.status.code(),
+            Some(0),
+            "a .so newer than every source must be reported up to date before {input} is dated \
+             past it, or this test proves nothing about {input}"
+        );
+
+        let _dated = Mtime::dated_to(
+            workspace_root().join(input),
+            newer_than_every_source + Duration::from_secs(60 * 60),
+        );
+
+        let query = run_make(&["-q", "cross-udf-build"]);
+        assert_eq!(
+            query.status.code(),
+            Some(1),
+            "{input} newer than the .so must be reported out of date: it is a build input, so a \
+             .so built before it is stale"
+        );
+    }
+}
+
 #[test]
 fn lint_fmt_test_targets_use_expected_flags() {
     let fmt_check = dry_run_stdout("fmt-check");
@@ -261,8 +342,16 @@ fn stack_targets_start_expected_services() {
         "stack-up-mysql must start MySQL alone: {mysql_only}"
     );
 
+    let postgres_only = dry_run_stdout("stack-up-postgres");
+    assert!(postgres_only.contains("docker compose up -d --wait postgres"));
+    assert!(
+        !postgres_only.to_lowercase().contains("exasol"),
+        "stack-up-postgres must start PostgreSQL alone: {postgres_only}"
+    );
+
     let both = dry_run_stdout("stack-up");
     assert!(both.contains("docker compose up -d --wait mysql"));
+    assert!(both.contains("docker compose up -d --wait postgres"));
     assert!(both.contains("docker compose up -d exasol"));
 
     let down = dry_run_stdout("stack-down");
@@ -290,6 +379,21 @@ fn container_tests_depend_on_tier_stack_target() {
         !it.prerequisites.iter().any(|p| p == "stack-up"),
         "test-it must never start the Exasol-bearing stack: {:?}",
         it.prerequisites
+    );
+
+    let it_postgres = rule(&text, "test-it-postgres");
+    assert!(
+        it_postgres
+            .prerequisites
+            .iter()
+            .any(|p| p == "stack-up-postgres"),
+        "test-it-postgres must declare stack-up-postgres as a prerequisite: {:?}",
+        it_postgres.prerequisites
+    );
+    assert!(
+        !it_postgres.prerequisites.iter().any(|p| p == "stack-up"),
+        "test-it-postgres must never start the Exasol-bearing stack: {:?}",
+        it_postgres.prerequisites
     );
 }
 
@@ -333,6 +437,27 @@ fn test_it_target_needs_no_exasol() {
 }
 
 #[test]
+fn test_it_postgres_target_needs_no_exasol() {
+    let text = makefile_text();
+    let it_postgres = rule(&text, "test-it-postgres");
+    assert_eq!(
+        it_postgres.prerequisites,
+        vec!["stack-up-postgres".to_string()]
+    );
+    assert!(!it_postgres
+        .prerequisites
+        .iter()
+        .any(|p| p == "cross-udf-build"));
+    assert!(it_postgres.recipe.contains("--features postgres-it"));
+    assert!(it_postgres.recipe.contains("--test postgres_it_test"));
+    assert!(
+        !it_postgres.recipe.to_lowercase().contains("exasol"),
+        "test-it-postgres drives the ADBC layer directly and must not mention Exasol: {}",
+        it_postgres.recipe
+    );
+}
+
+#[test]
 fn test_e2e_depends_on_cross_udf_build() {
     let text = makefile_text();
     let e2e = rule(&text, "test-e2e");
@@ -340,6 +465,33 @@ fn test_e2e_depends_on_cross_udf_build() {
     assert!(e2e.recipe.contains("--features exasol-e2e"));
     assert!(e2e.recipe.contains("--test-threads=1"));
     assert!(e2e.recipe.contains("--test e2e_mysql_test"));
+}
+
+#[test]
+fn test_e2e_postgres_depends_on_cross_udf_build_and_stack_up() {
+    let text = makefile_text();
+    let e2e_postgres = rule(&text, "test-e2e-postgres");
+    assert!(
+        e2e_postgres
+            .prerequisites
+            .iter()
+            .any(|p| p == "cross-udf-build"),
+        "test-e2e-postgres must declare cross-udf-build as a prerequisite: {:?}",
+        e2e_postgres.prerequisites
+    );
+    assert!(
+        e2e_postgres.prerequisites.iter().any(|p| p == "stack-up"),
+        "test-e2e-postgres must declare stack-up as a prerequisite: {:?}",
+        e2e_postgres.prerequisites
+    );
+    assert!(e2e_postgres.recipe.contains("--features exasol-e2e"));
+    assert!(e2e_postgres.recipe.contains("--test-threads=1"));
+    assert!(e2e_postgres.recipe.contains("--test e2e_postgres_test"));
+    assert!(
+        !e2e_postgres.recipe.contains("e2e_mysql_test"),
+        "test-e2e-postgres must run its own binary, not the MySQL one: {}",
+        e2e_postgres.recipe
+    );
 }
 
 #[test]
@@ -355,4 +507,26 @@ fn bench_target_has_expected_prerequisites_and_recipe() {
         .contains("cargo test -p adbc-vs-adapter --features bench --test bench_mysql_test"));
     assert!(bench.recipe.contains("--test-threads=1"));
     assert!(bench.recipe.contains("--nocapture"));
+}
+
+/// CLAUDE.md ("Test tiers"): every non-unit tier sits behind a default-off
+/// cargo feature and is reached through a target of its own.
+///
+/// This one also has to start nothing: it reads a public HTTPS endpoint, so a
+/// container prerequisite would make the slowest part of the check the part
+/// that has nothing to do with what it measures.
+#[test]
+fn test_registry_live_target_needs_no_stack() {
+    let text = makefile_text();
+    let registry_live = rule(&text, "test-registry-live");
+
+    assert!(
+        registry_live.prerequisites.is_empty(),
+        "test-registry-live reads the public registry and must start no container: {:?}",
+        registry_live.prerequisites
+    );
+    assert!(registry_live.recipe.contains("--features registry-live"));
+    assert!(registry_live
+        .recipe
+        .contains("--test provisioning_test -- registry_live"));
 }

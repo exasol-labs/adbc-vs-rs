@@ -57,54 +57,15 @@
 //! and its statement stays the one this dialect generated before it rendered
 //! joins at all.
 
+use adbc_vs_scan::driver::Driver;
+
 use crate::exa_type::ExasolType;
+use crate::mysql_type_mapping::SUPPORTED_CHARACTER_SET;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
     InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
-use crate::type_mapping::SUPPORTED_CHARACTER_SET;
-
-/// The capabilities this dialect renders, and therefore the set the adapter
-/// advertises. It lives in the module that renders them because a second
-/// list elsewhere could advertise a fragment this renderer drops, and Exasol
-/// would return the dropped rows rather than an error.
-const CAPABILITIES: &[&str] = &[
-    "SELECTLIST_PROJECTION",
-    "SELECTLIST_EXPRESSIONS",
-    "FILTER_EXPRESSIONS",
-    "AGGREGATE_SINGLE_GROUP",
-    "AGGREGATE_GROUP_BY_COLUMN",
-    "FN_AGG_COUNT",
-    "FN_AGG_COUNT_STAR",
-    "FN_AGG_COUNT_DISTINCT",
-    "FN_AGG_MIN",
-    "FN_AGG_MAX",
-    "FN_PRED_AND",
-    "FN_PRED_OR",
-    "FN_PRED_NOT",
-    "FN_PRED_EQUAL",
-    "FN_PRED_NOTEQUAL",
-    "FN_PRED_LESS",
-    "FN_PRED_LESSEQUAL",
-    "FN_PRED_IS_NULL",
-    "FN_PRED_IS_NOT_NULL",
-    "FN_PRED_LIKE",
-    "FN_PRED_LIKE_ESCAPE",
-    "FN_PRED_BETWEEN",
-    "FN_PRED_IN_CONSTLIST",
-    "LITERAL_NULL",
-    "LITERAL_EXACTNUMERIC",
-    "LITERAL_DOUBLE",
-    "LITERAL_STRING",
-    "LITERAL_DATE",
-    "LITERAL_TIMESTAMP",
-    "JOIN",
-    "JOIN_TYPE_INNER",
-    "JOIN_TYPE_LEFT_OUTER",
-    "JOIN_TYPE_RIGHT_OUTER",
-    "JOIN_CONDITION_EQUI",
-];
 
 /// The collation every character-typed comparison operand carries. Measured
 /// on MySQL 8.4 and Exasol 2025.2.1: it reproduces Exasol's case
@@ -193,8 +154,13 @@ const TEMPORAL_LITERAL_CHARACTERS: &str = "0123456789-:. ";
 pub struct MySqlDialect;
 
 impl SqlDialect for MySqlDialect {
+    /// The set `drivers/mysql.toml` declares, which is this dialect's claim
+    /// about what the renderer below covers rather than a fact about MySQL:
+    /// the values are a data edit, but advertising one this module cannot
+    /// render still returns wrong rows, so the two stay one decision that
+    /// `capabilities_tests` renders entry by entry.
     fn capabilities(&self) -> &'static [&'static str] {
-        CAPABILITIES
+        Driver::MySql.capabilities()
     }
 
     fn render(&self, query: &Query) -> Result<String, RenderError> {
@@ -1054,6 +1020,9 @@ fn quote_identifier(identifier: &str) -> String {
     format!("`{}`", identifier.replace('`', "``"))
 }
 
+/// Visible to the crate's own tests: `capabilities_tests` drives the
+/// per-dialect capability invariants through each dialect's fixture table,
+/// and this module owns MySQL's.
 #[cfg(test)]
 #[path = "mysql_dialect_tests.rs"]
-mod tests;
+pub(crate) mod tests;

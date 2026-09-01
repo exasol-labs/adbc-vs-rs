@@ -276,22 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn driver_uri_carries_no_credential() {
-        let uri = driver_uri(DATABASE);
-        assert!(
-            !uri.contains(PASSWORD) && !uri.contains('@'),
-            "user and password travel as separate ADBC options, never in the URI: {uri}"
+    fn container_address_invariants_hold() {
+        super::super::assert_container_address_invariants(
+            &driver_uri(DATABASE),
+            &unreachable_uri(),
+            PUBLISHED_ENDPOINT,
+            PORT,
+            PASSWORD,
         );
-    }
-
-    #[test]
-    fn the_unreachable_uri_names_the_same_host_on_a_port_nothing_serves() {
-        assert_eq!(unreachable_uri(), "mysql://172.28.5.10:3307/adbc_vs");
-    }
-
-    #[test]
-    fn the_published_endpoint_and_the_in_network_address_share_a_port() {
-        assert!(PUBLISHED_ENDPOINT.ends_with(&format!(":{PORT}")));
     }
 
     #[test]

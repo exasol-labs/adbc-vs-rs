@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adbc-vs-adapter"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "adbc-vs-scan",
  "adbc_core",
@@ -16,6 +16,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -27,15 +28,17 @@ dependencies = [
 
 [[package]]
 name = "adbc-vs-scan"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "adbc-vs-adapter",
  "adbc_core",
  "adbc_driver_manager",
  "arrow",
  "flate2",
  "reqwest",
- "sha2",
+ "serde",
  "tar",
+ "toml 0.8.23",
 ]
 
 [[package]]

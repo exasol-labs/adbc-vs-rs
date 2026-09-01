@@ -14,15 +14,24 @@
 mod common;
 
 use adbc_vs_adapter::exa_type::{self, ExasolType};
+use adbc_vs_scan::driver::Driver;
 use common::exasol::cell;
 use common::stack::{self, MYSQL_CONNECTION, VIRTUAL_SCHEMA};
 use common::{items, mirror, mysql, probe, schema};
 
-/// Where the pinned driver is installed, in the two forms the test asserts
-/// against: the bucket-relative path BucketFS lists it at, and the file path
-/// the adapter records for a UDF to open.
-const DRIVER_BUCKET_PATH: &str = "adbc-drivers/libadbc_driver_mysql.so";
-const DRIVER_UDF_PATH: &str = "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so";
+/// Where the MySQL driver is installed, in the pieces the tests assert
+/// against: the bucket-relative prefix its versions sit under, the library
+/// file name each version's directory ends in, and the mount a UDF opens the
+/// result at.
+///
+/// The version segment between the prefix and the file name is whatever the
+/// driver's declared range resolves to against the registry today, so nothing
+/// here spells it: the tests find the installed object and read the version
+/// back out of the path, rather than asserting a version this repository
+/// cannot pin.
+const DRIVER_BUCKET_PREFIX: &str = "adbc-drivers/mysql/";
+const DRIVER_LIBRARY: &str = "libadbc_driver_mysql.so";
+const BUCKET_MOUNT: &str = "/buckets/bfsdefault/default";
 
 /// A lower bound distinguishing an installed driver package from a stray
 /// placeholder file: the pinned `libadbc_driver_mysql.so` measured 46,408,368
@@ -52,17 +61,20 @@ const STABILITY_RUN_COUNT: u32 = 3;
 #[test]
 fn first_use_installs_driver_from_registry() {
     let stack = stack::shared();
-    stack.exasol.delete_file(DRIVER_BUCKET_PATH);
-    let before_install = stack.exasol.bucket_file_size(DRIVER_BUCKET_PATH);
+    let previously_installed = installed_driver(stack)
+        .expect("the shared setup already installed a driver for this test to delete");
+    stack.exasol.delete_file(&previously_installed);
+    let before_install = installed_driver(stack);
 
-    schema::create_virtual_schema(&stack.exasol, "FIRSTUSE", MYSQL_CONNECTION);
+    schema::create_virtual_schema(&stack.exasol, Driver::MySql, "FIRSTUSE", MYSQL_CONNECTION);
 
-    let installed = stack.exasol.bucket_file_size(DRIVER_BUCKET_PATH);
+    let installed = installed_driver(stack).and_then(|path| stack.exasol.bucket_file_size(&path));
     schema::drop_virtual_schema(&stack.exasol, "FIRSTUSE");
 
-    assert_eq!(
-        before_install, None,
-        "the driver must be gone before the install under test"
+    assert!(
+        before_install.is_none(),
+        "the driver must be gone before the install under test, and {before_install:?} is \
+         still there"
     );
     let installed = installed.expect(
         "the first CREATE VIRTUAL SCHEMA must install the driver, which requires the PUT to \
@@ -78,16 +90,18 @@ fn first_use_installs_driver_from_registry() {
 fn driver_lands_in_bucketfs() {
     let stack = stack::shared();
 
-    let entries = stack.exasol.bucket_entries();
+    let installed = installed_driver(stack).unwrap_or_else(|| {
+        panic!(
+            "BucketFS lists {:?}, which includes no driver under {DRIVER_BUCKET_PREFIX}",
+            stack.exasol.bucket_entries()
+        )
+    });
 
-    assert!(
-        entries.iter().any(|entry| entry == DRIVER_BUCKET_PATH),
-        "BucketFS lists {entries:?}, which does not include the installed driver"
-    );
     assert_eq!(
         adapter_notes(stack)["driverPath"],
-        DRIVER_UDF_PATH,
-        "the recorded driver path must be the path a UDF opens"
+        format!("{BUCKET_MOUNT}/{installed}"),
+        "the recorded driver path must be the path a UDF opens, carrying the driver and \
+         the resolved version"
     );
 }
 
@@ -107,8 +121,10 @@ fn second_schema_reuses_driver() {
         &stack.exasol,
         schema::VirtualSchemaSpec {
             schema: "SECONDVS",
+            driver: Driver::MySql,
             connection: MYSQL_CONNECTION,
-            bucketfs_connection: "ADBC_VS_BUCKETFS_CLOSED",
+            bucketfs_connection: Some("ADBC_VS_BUCKETFS_CLOSED"),
+            driver_path: None,
         },
     );
 
@@ -320,7 +336,7 @@ fn all_request_types_return_matching_type() {
         mysql::EMPTY_DATABASE,
     );
 
-    schema::create_virtual_schema(&stack.exasol, "DISPATCHVS", MYSQL_CONNECTION);
+    schema::create_virtual_schema(&stack.exasol, Driver::MySql, "DISPATCHVS", MYSQL_CONNECTION);
     stack
         .exasol
         .execute("ALTER VIRTUAL SCHEMA DISPATCHVS REFRESH");
@@ -450,9 +466,16 @@ fn adapter_notes_hold_state_not_credentials() {
 
     let notes = adapter_notes(stack);
 
+    let installed = installed_driver(stack).expect("the shared virtual schema installed a driver");
+
     assert_eq!(notes["driver"], "mysql");
-    assert_eq!(notes["driverVersion"], "v0.6.0");
-    assert_eq!(notes["driverPath"], DRIVER_UDF_PATH);
+    assert_eq!(
+        notes["driverVersion"].as_str(),
+        Some(installed_version(&installed).as_str()),
+        "the notes must report the version resolution actually selected — the one the \
+         install path carries — rather than a version compiled into this release"
+    );
+    assert_eq!(notes["driverPath"], format!("{BUCKET_MOUNT}/{installed}"));
     assert_eq!(notes["connection"], MYSQL_CONNECTION);
     assert_eq!(notes["database"], mysql::DATABASE);
 
@@ -483,7 +506,7 @@ fn unmappable_column_omitted_and_recorded() {
         .find(|entry| entry["column"] == "payload")
         .expect("the omitted JSON column must be recorded");
     assert_eq!(entry["table"], "mixed_types");
-    assert_eq!(entry["mysqlType"], "json");
+    assert_eq!(entry["sourceType"], "json");
     assert!(
         entry["reason"].as_str().is_some_and(|r| !r.is_empty()),
         "the omission must carry a reason: {entry}"
@@ -507,7 +530,7 @@ fn latin1_column_omitted_and_recorded() {
         .iter()
         .find(|entry| entry["table"] == "items" && entry["column"] == "region")
         .expect("the omitted latin1 column must be recorded");
-    assert_eq!(entry["mysqlType"], "varchar");
+    assert_eq!(entry["sourceType"], "varchar");
     assert!(
         entry["reason"]
             .as_str()
@@ -542,7 +565,7 @@ fn empty_database_yields_empty_tables() {
     let stack = stack::shared();
     schema::create_mysql_connection(&stack.exasol, "ADBC_VS_EMPTY", mysql::EMPTY_DATABASE);
 
-    schema::create_virtual_schema(&stack.exasol, "EMPTYVS", "ADBC_VS_EMPTY");
+    schema::create_virtual_schema(&stack.exasol, Driver::MySql, "EMPTYVS", "ADBC_VS_EMPTY");
 
     let tables = table_names("EMPTYVS");
     schema::drop_virtual_schema(&stack.exasol, "EMPTYVS");
@@ -558,7 +581,12 @@ fn empty_database_yields_empty_tables() {
 fn scan_resolves_connection_object() {
     let stack = stack::shared();
     schema::create_mysql_connection(&stack.exasol, "ADBC_VS_ROTATING", mysql::DATABASE);
-    schema::create_virtual_schema(&stack.exasol, "ROTATINGVS", "ADBC_VS_ROTATING");
+    schema::create_virtual_schema(
+        &stack.exasol,
+        Driver::MySql,
+        "ROTATINGVS",
+        "ADBC_VS_ROTATING",
+    );
     let query = "SELECT COUNT(*) AS N FROM ROTATINGVS.\"orders\"";
     let before_rotation = cell(&stack.exasol.query_rows(query)[0], "N");
 
@@ -594,6 +622,7 @@ fn unreachable_source_fails_create() {
 
     let error = schema::create_virtual_schema_expecting_failure(
         &stack.exasol,
+        Driver::MySql,
         "CLOSEDVS",
         "ADBC_VS_CLOSED",
     );
@@ -1369,6 +1398,32 @@ fn generated_statement_carries_no_order_or_limit() {
 
         assert_matches_mirror(query);
     }
+}
+
+/// The bucket-relative path of the installed MySQL driver library, whatever
+/// version the range resolved to, or nothing when no version is installed.
+///
+/// The listing is read rather than a path composed, because the version
+/// segment is the registry's answer at run time and no constant in this
+/// repository can state it.
+fn installed_driver(stack: &stack::Stack) -> Option<String> {
+    stack
+        .exasol
+        .bucket_entries()
+        .into_iter()
+        .find(|entry| entry.starts_with(DRIVER_BUCKET_PREFIX) && entry.ends_with(DRIVER_LIBRARY))
+}
+
+/// The version segment of an installed driver's bucket-relative path, which is
+/// the version resolution selected for it.
+fn installed_version(installed: &str) -> String {
+    installed
+        .strip_prefix(DRIVER_BUCKET_PREFIX)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| {
+            panic!("an installed driver's path carries a version segment: {installed}")
+        })
+        .to_string()
 }
 
 /// The `adapterNotes` Exasol persisted for the shared virtual schema, parsed.

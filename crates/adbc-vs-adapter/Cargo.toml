@@ -23,9 +23,15 @@ policy-check = []
 # stack. `make bench` enables it; a plain `cargo test --workspace` leaves
 # `tests/bench_mysql_test.rs` empty, so the fast tier never needs a container.
 bench = []
+# The one check that reaches the public driver registry: it resolves every
+# driver's declared version range against the index the CDN publishes today,
+# so a range the registry has moved past is caught. `make test-registry-live`
+# enables it. Default-off and in no CI job, because a CDN outage is not a
+# defect in the commit under test.
+registry-live = []
 
 [dependencies]
-adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.2.0" }
+adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.3.0" }
 adbc_core = "0.23"
 adbc_driver_manager = "0.23"
 arrow = "58"
@@ -40,15 +46,22 @@ reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
     "rustls-tls-webpki-roots",
 ] }
+# Compares the registry index's published version scalars against each
+# driver's declared range. String equality cannot do it: the index mixes the
+# `v0.6.0` and `1.12.0` spellings, and a range needs an ordering.
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10.0"
-sha2 = "0.10"
 tar = "0.4.46"
 tempfile = "3.27.0"
 toml = "0.8"
 
 [dev-dependencies]
+# Verifies the JDBC jars the benchmark's reference virtual schema installs.
+# Not a runtime dependency of the adapter: self-install verifies no digest, so
+# nothing the shipped `.so` does needs a hash.
+sha2 = "0.10"
 # A self-signed certificate and the TLS server that presents it, so the
 # registry client's certificate verification is asserted against a real
 # handshake rather than inspected.

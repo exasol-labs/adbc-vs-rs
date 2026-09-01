@@ -18,7 +18,11 @@ pub mod exasol;
 pub mod items;
 pub mod jdbc_vs;
 pub mod mirror;
+pub mod mirror_table;
 pub mod mysql;
+pub mod postgres;
+pub mod postgres_mirror;
+pub mod postgres_stack;
 pub mod probe;
 pub mod readiness;
 pub mod report;
@@ -63,4 +67,32 @@ pub fn try_run(description: &str, program: &str, args: &[&str]) -> Result<String
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The container-address invariants every technology's stack module owes,
+/// asserted once here rather than once per module: the driver URI an operator
+/// writes carries no credential, the deliberately unreachable URI names the
+/// same host on the very next port, and the published endpoint agrees with
+/// the in-network address on port.
+pub fn assert_container_address_invariants(
+    driver_uri: &str,
+    unreachable_uri: &str,
+    published_endpoint: &str,
+    port: u16,
+    password: &str,
+) {
+    assert!(
+        !driver_uri.contains(password) && !driver_uri.contains('@'),
+        "a credential must never reach the driver URI an operator writes: {driver_uri}"
+    );
+    assert!(
+        unreachable_uri.contains(&format!(":{}/", port + 1)),
+        "the deliberately unreachable URI must name a port nothing serves, one past the real \
+         port: {unreachable_uri}"
+    );
+    assert!(
+        published_endpoint.ends_with(&format!(":{port}")),
+        "the published endpoint must share its port with the in-network address: \
+         {published_endpoint}"
+    );
 }

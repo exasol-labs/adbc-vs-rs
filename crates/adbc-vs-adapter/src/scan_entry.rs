@@ -1,5 +1,5 @@
 //! The scan UDF's own body: parses the scan specification a `pushdown`
-//! response embedded, opens the MySQL connection it names, and streams
+//! response embedded, opens the source connection it names, and streams
 //! `adbc-vs-scan`'s already-coerced batch stream straight to Exasol.
 //!
 //! [`adbc_vs_scan::scan::execute_scan`] owns both running the statement and
@@ -23,21 +23,21 @@ pub fn run_scan(ctx: &mut dyn UdfContext, scan_spec_json: &str) -> Result<(), Ud
     let spec = scan_spec::parse(scan_spec_json).map_err(UdfError::User)?;
 
     let connection_object = ctx.connection(&spec.connection)?;
-    let mysql_connection = adbc_vs_scan::connection::MysqlConnection {
+    let source_connection = adbc_vs_scan::connection::SourceConnection {
         uri: connection_object.address,
         username: connection_object.user,
         password: connection_object.password,
     };
 
     let mut connection =
-        adbc_vs_scan::connection::open_mysql_connection(&spec.driver_path, &mysql_connection)
+        adbc_vs_scan::connection::open(spec.driver, &spec.driver_path, &source_connection)
             .map_err(|error| UdfError::User(error.to_string()))?;
 
     let declared_columns: Vec<DeclaredColumn> = spec.columns.iter().map(declared_column).collect();
     let request = ScanRequest {
         statement: &spec.sql,
         columns: &declared_columns,
-        password: &mysql_connection.password,
+        password: &source_connection.password,
     };
     let batches = adbc_vs_scan::scan::execute_scan(&mut connection, request)
         .map_err(|error| UdfError::User(error.to_string()))?;
