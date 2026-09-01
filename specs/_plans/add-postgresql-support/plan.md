@@ -6,6 +6,8 @@ Adds PostgreSQL as a second ADBC source behind a driver identity that keys every
 
 **Self-install's integrity guarantee narrows to TLS alone, for both drivers.** A range resolves to versions no maintainer reviewed and the registry publishes no checksum, so the compiled-in SHA-256 digest is removed rather than replaced; decision `[22]` records why, and § Impact states the cost.
 
+**The spec library splits framework from technology in the same plan.** A framework feature states what a pushdown fragment, a type mapping, or a scan is, whatever backs the schema; a `<technology>-<concern>` feature states one target's own capabilities, rendering, collation placement, mapping, and connection mechanism. MySQL's shipped spec content migrates rather than staying behind, on decision `[19]`'s principle. Decision `[25]` records the structure, the measurement showing `speq` cannot represent a nested path, and the `DELTA` sequence that expresses a move the merge has no marker for. Decision `[26]` closes the two organization questions `[25]` escalated: `driver-provisioning` splits three ways along framework-internal lines, and `vs-adapter`'s 16 features are accepted as the standing shape.
+
 ## Design
 
 ### Context
@@ -105,6 +107,9 @@ Type mapping moves behind `MetadataSource`. The catalog row is the source's own 
 | Explicit operator override beats an implicit fallback | `DRIVER_PATH` skips self-install; a missing file fails and never falls back | An air-gapped path the operator chooses is an interface; one discoverable only from an error message is not |
 | Measure before advertising | Gates 2.1, 2.2b, 2.3 precede the capability sets they justify | An advertised capability the source refuses converts a query Exasol would answer into a hard failure |
 | Differential verification against a local Exasol mirror | PostgreSQL E2E tier | Catches collation, type, and aggregate gaps generically instead of predicting them one at a time |
+| Specs split framework from technology, mirroring the code's own seam | Framework features keep the protocol's vocabulary; `<technology>-<concern>` features hold one target's facts | The code already gives each per-driver decision one owner keyed on `Driver`; a spec library that mixes both concerns in one file describes a design the code does not have |
+| Technology axis in the feature name, never in directory depth | `mysql-collation`, `postgresql-type-mapping`, `scan-udf/postgresql-scan` | `speq` represents exactly two path levels and drops a nested feature from `feature list` silently rather than rejecting it, so nesting would make a spec invisible |
+| A concern splits where the technologies disagree, not along the protocol's taxonomy | Collation is its own feature per technology; fragment kind is not | Collation is the one divergence whose *reason* differs, and cutting there keeps every file under the scenario threshold that a per-fragment cut would blow |
 
 ### Consequences
 
@@ -128,23 +133,46 @@ Type mapping moves behind `MetadataSource`. The catalog row is the source's own 
 | Credential inside PostgreSQL's `uri` option, redacted everywhere | libpq environment variables (`PGPASSWORD`); percent-encoded URI credential | The driver accepts no other option, so the only choice is the form. Environment variables are untested in a UDF sandbox, are process-visible, and `set_var` is `unsafe` in edition 2024. Conninfo escaping is total where URI percent-encoding breaks on a password containing `&`, `#`, `@`, or `/` |
 | Type mapping moves behind `MetadataSource` | A separate `TypeMapper` trait keyed on `Driver` | A `TypeMapper` needs a common source-column struct, which loses the fields one source has and the other does not. Discovery already knows the catalog's column names, so mapping belongs with it |
 | Keep the default `en_US.utf8` locale in the test container | Force `C.UTF-8` at initdb | The locale default is what makes a missing `COLLATE "C"` fail a test rather than pass silently, and it is what a production cluster is likelier to have |
+| Spec library splits into framework and `<technology>-<concern>` features | A `postgresql/` or `framework/` top-level domain; directory nesting under `vs-adapter/mysql/`; parameterizing the MySQL scenarios by dialect; leaving PostgreSQL's scenarios as `DELTA:NEW` blocks in the shared files | A new domain is forbidden by this repo's spec governance. Nesting is measured to be silently ignored by `speq`, so a nested spec would be invisible rather than rejected. Parameterizing would erase the measured MySQL specifics — collation names, error 1055, backtick escaping, hex literals. Leaving the blocks in place is what the instruction rejected, and `pushdown-join` already showed the failure shape: a `DELTA:REMOVED` reproducing a MySQL-named scenario beside its PostgreSQL-flavored replacement in one file. Decision `[25]` |
+| MySQL's shipped spec content migrates in this plan | Leave MySQL's scenarios in the framework files and give only PostgreSQL technology features | Two structures for one kind of fact is the scattering the split exists to end, and it would leave the third technology's author copying the wrong one. The same argument decision `[19]` made for the capability TOML, applied to spec text |
+| `driver-provisioning` gets no technology split | A `mysql-provisioning` / `postgresql-provisioning` pair | Its technology-dependence is entirely *data* — registry path, library, entry point, version range — already living in `drivers/<technology>.toml` under decisions `[17]` and `[21]`. No provisioning scenario states a behavior one technology contradicts, so a technology feature would duplicate the TOML rather than separate a concern |
+| `driver-provisioning` splits three ways along framework-internal lines | Keep one `driver-self-install` feature at 17 scenarios; split it by execution stage (fetch, then verify, then upload) | 17 scenarios in one file mixes three questions with three different answers: how a package is installed, which version is wanted, and how an operator opts out of both. A stage split would organize by execution order, which is the temporal leakage `/speq:design-philosophy` names — every stage would still carry the version decision. Decision `[26]` |
+| `scan-udf` does get the split | Keep both credential mechanisms in `arrow-scan` | PostgreSQL's credential path is behavior, not data: its driver accepts only `uri`, so the credential goes into an escaped libpq conninfo string and is stripped from every surfaced error, where MySQL passes separate options. Leaving MySQL's mechanism in the framework file while PostgreSQL's moved out would give one decision two owners |
 
 ## Features
 
-| Feature | Status | Spec |
-|---------|--------|------|
-| vs-adapter/driver-selection | NEW | `vs-adapter/driver-selection/spec.md` |
-| vs-adapter/pushdown-dialect | CHANGED | `vs-adapter/pushdown-dialect/spec.md` |
-| vs-adapter/create-virtual-schema | CHANGED | `vs-adapter/create-virtual-schema/spec.md` |
-| vs-adapter/type-mapping | CHANGED | `vs-adapter/type-mapping/spec.md` |
-| vs-adapter/pushdown-projection | CHANGED | `vs-adapter/pushdown-projection/spec.md` |
-| vs-adapter/pushdown-filter | CHANGED | `vs-adapter/pushdown-filter/spec.md` |
-| vs-adapter/pushdown-aggregation | CHANGED | `vs-adapter/pushdown-aggregation/spec.md` |
-| vs-adapter/pushdown-join | CHANGED | `vs-adapter/pushdown-join/spec.md` |
-| vs-adapter/result-ordering | CHANGED | `vs-adapter/result-ordering/spec.md` |
-| vs-adapter/adapter-request-dispatch | CHANGED | `vs-adapter/adapter-request-dispatch/spec.md` |
-| driver-provisioning/driver-self-install | CHANGED | `driver-provisioning/driver-self-install/spec.md` |
-| scan-udf/arrow-scan | CHANGED | `scan-udf/arrow-scan/spec.md` |
+This plan restructures the spec library as well as extending it. Every feature is now either **framework** — true whatever technology backs the virtual schema — or **technology** — one target's own capabilities, rendering, mapping, or connection mechanism. Decision `[25]` records the split, the measurement behind the naming, and the migration mechanics. Technology features are flat, prefixed feature names inside the three existing domains, because `speq` represents exactly two path levels and silently ignores a nested directory.
+
+| Feature | Kind | Status | Spec |
+|---------|------|--------|------|
+| vs-adapter/pushdown-dialect | framework | CHANGED | `vs-adapter/pushdown-dialect/spec.md` |
+| vs-adapter/pushdown-projection | framework | CHANGED | `vs-adapter/pushdown-projection/spec.md` |
+| vs-adapter/pushdown-filter | framework | CHANGED | `vs-adapter/pushdown-filter/spec.md` |
+| vs-adapter/pushdown-aggregation | framework | CHANGED | `vs-adapter/pushdown-aggregation/spec.md` |
+| vs-adapter/pushdown-join | framework | CHANGED | `vs-adapter/pushdown-join/spec.md` |
+| vs-adapter/type-mapping | framework | CHANGED | `vs-adapter/type-mapping/spec.md` |
+| vs-adapter/create-virtual-schema | framework | CHANGED | `vs-adapter/create-virtual-schema/spec.md` |
+| vs-adapter/result-ordering | framework | CHANGED | `vs-adapter/result-ordering/spec.md` |
+| vs-adapter/adapter-request-dispatch | framework | CHANGED | `vs-adapter/adapter-request-dispatch/spec.md` |
+| vs-adapter/driver-selection | framework | NEW | `vs-adapter/driver-selection/spec.md` |
+| vs-adapter/mysql-pushdown | technology | NEW | `vs-adapter/mysql-pushdown/spec.md` |
+| vs-adapter/mysql-collation | technology | NEW | `vs-adapter/mysql-collation/spec.md` |
+| vs-adapter/mysql-type-mapping | technology | NEW | `vs-adapter/mysql-type-mapping/spec.md` |
+| vs-adapter/postgresql-pushdown | technology | NEW | `vs-adapter/postgresql-pushdown/spec.md` |
+| vs-adapter/postgresql-collation | technology | NEW | `vs-adapter/postgresql-collation/spec.md` |
+| vs-adapter/postgresql-type-mapping | technology | NEW | `vs-adapter/postgresql-type-mapping/spec.md` |
+| scan-udf/arrow-scan | framework | CHANGED | `scan-udf/arrow-scan/spec.md` |
+| scan-udf/mysql-scan | technology | NEW | `scan-udf/mysql-scan/spec.md` |
+| scan-udf/postgresql-scan | technology | NEW | `scan-udf/postgresql-scan/spec.md` |
+| driver-provisioning/driver-self-install | framework | CHANGED | `driver-provisioning/driver-self-install/spec.md` |
+| driver-provisioning/driver-version-resolution | framework | NEW | `driver-provisioning/driver-version-resolution/spec.md` |
+| driver-provisioning/driver-path-override | framework | NEW | `driver-provisioning/driver-path-override/spec.md` |
+
+Six NEW technology features carry content that already existed: MySQL's from the permanent library, PostgreSQL's from this plan's own earlier deltas. Each migration is one `DELTA:REMOVED` block naming the library's heading byte for byte, paired with the scenario reproduced in the new feature's full spec — the merge has no marker for moving a scenario, so a move is always that pair. No feature file empties, so none is retired and no manual deletion step exists; every source file keeps a genuine framework remainder.
+
+Three `pushdown-filter` scenarios take a second shape, because only part of each moves. Their MySQL-only steps go to `mysql-collation` and `mysql-pushdown`, and a dialect-neutral remainder stays. Each is therefore a `DELTA:REMOVED` block paired with a `DELTA:NEW` block of the same heading, carrying only the framework steps. `speq record` applies the removal before the addition, so the merged file holds the replacement once — verified against the CLI rather than assumed.
+
+`driver-provisioning` splits three ways, and the axis is framework-internal rather than per-technology. Decision `[26]` records it. `driver-self-install` keeps the install mechanism — download, manifest check, upload, visibility wait, transport policy. `driver-version-resolution` takes everything read out of the registry index: which version a range resolves to, which platform package serves it, and whether the mount already holds that version. `driver-path-override` takes the `DRIVER_PATH` air-gap mechanism. None of the three is a technology feature: provisioning's technology-dependence is already TOML *data*, not spec scenarios, which is what decision `[25]` settled and this split does not disturb. Three of the moves leave the permanent library, so each is the same `DELTA:REMOVED`-plus-full-scenario pair every other migration uses.
 
 ## Impact
 
@@ -205,9 +233,9 @@ Existing MySQL virtual schemas keep working without recreation. Seven visible ch
 
 - [ ] 3.1 [expert] Introduce `Driver` in `adbc-vs-scan::driver` as a closed enum with `parse` (case-insensitive), `as_str` (canonical lower case), and `package() -> &'static DriverPackage`, and introduce the per-technology TOML mechanism that feeds it. Add `crates/adbc-vs-scan/drivers/mysql.toml` holding a `[package]` table with `registry_path`, `library`, `entry_point`, and `version_range`, and add `crates/adbc-vs-scan/build.rs` generating the `&'static DriverPackage` table from every file in `drivers/` into `OUT_DIR`, included by `driver.rs`. The build script MUST fail the build, naming the file and the field, on a malformed or incomplete table — that failure mode is the reason codegen was chosen over a run-time parse, per decision `[17]`, and it MUST be asserted by a test that builds a deliberately broken fixture. `adbc-vs-scan` MUST gain no run-time dependency: `toml` and `serde` belong to the build script's `[build-dependencies]` only. Set MySQL's `version_range` to `>=0.6.0, <0.7.0` and carry no exact version and no digest in the row; task 6.1 makes the range resolvable and until it lands MySQL resolves to `v0.6.0` as the only in-range published version, so this task stays behavior-preserving. `PACKAGE_SHA256` stays a bare constant that `Registry::pinned()` still reads, so digest verification keeps working unchanged through this task; task 6.6 removes it, which is why the row has no integrity field to hold it. Replace `Registry::pinned()`'s reads of the bare constants and `provisioning.rs`'s `DRIVER_LIBRARY`/`DRIVER_VERSION` re-export with per-driver reads threaded from the identity, and make `driver_install_path` take it. Add no PostgreSQL row yet — task 6.4 does. Every existing provisioning test MUST pass unchanged.
 - [ ] 3.2 [expert] Route dialect resolution through the identity. Add `dialect_for(Driver) -> &'static dyn SqlDialect` beside the `SqlDialect` trait, resolve `Driver` from `schemaMetadataInfo.adapterNotes` in both `dispatch`'s `getCapabilities` and `pushdown` arms, and remove `dispatch`'s import of `MySqlDialect` so no call site names a concrete dialect. A `getCapabilities` request carrying no notes MUST error naming the missing field rather than defaulting to a driver. Replace `create_schema::SUPPORTED_DRIVER` and `validate_driver` with `Driver::parse`, whose error lists every supported value generated from the identities. Add the connection-address scheme check against the resolved driver. Update `dispatch_test.rs` and `capabilities_tests.rs` for the notes-bearing request shape.
-- [ ] 3.3 Add the driver identity to `ScanSpec` and to the scan's driver load: rename `MysqlConnection` to `SourceConnection` and `open_mysql_connection` to an open taking the identity, reading the entry-point symbol from `Driver::package()` instead of the module-level `DRIVER_ENTRY_POINT`. Update `scan_entry.rs`, `scan_spec.rs`, their tests, and `mysql_it_test.rs`'s call sites. MySQL's rendered scan specification gains one field and nothing else changes.
+- [ ] 3.3 Add the driver identity to `ScanSpec` and to the scan's driver load: rename `MysqlConnection` to `SourceConnection` and `open_mysql_connection` to an open taking the identity, reading the entry-point symbol from `Driver::package()` instead of the module-level `DRIVER_ENTRY_POINT`. Update `scan_entry.rs`, `scan_spec.rs`, their tests, and `mysql_it_test.rs`'s call sites. MySQL's rendered scan specification gains one field and nothing else changes. Split `connection_tests.rs`'s credential assertions along the same seam the specs now use: `credentials_are_resolved_per_open_and_never_persisted` asserts the framework invariant `scan-udf/arrow-scan` owns — the credential is read from the resolved `CONNECTION` at open and reaches no persisted structure — while `mysql_passes_credentials_as_separate_options` and `mysql_connection_string_carries_no_credential` assert the MySQL mechanism `scan-udf/mysql-scan` owns. Task 5.4 adds PostgreSQL's counterpart beside them.
 - [ ] 3.4 Make the capability invariant test enumerate dialects from the `Driver` type rather than naming one: run the every-advertised-capability-renders arm and the byte-identical-re-render arm once per variant. Add the test that every identity yields a dialect, a package, and a metadata source with no fallback, and the test asserting the installed library filenames are pairwise distinct across identities. The set-difference test lands with task 4.4, once a second set exists.
-- [ ] 3.5 [expert] Move type mapping behind `MetadataSource`. `discover_tables` returns columns already mapped to `MappedType` with omissions recorded, so `create_schema` no longer calls `type_mapping::map_column` and branches on no driver; add the dialect-stated source precondition check to the trait, with MySQL's collation-and-version check as its first implementation and `discover_collations` no longer an inherent method. Rename `Omission.mysql_type` to `source_type` serialized as `sourceType`, with `#[serde(alias = "mysqlType")]` so notes Exasol persisted before this release still parse. Relocate the mapping assertions that move out of `create_schema_tests.rs`.
+- [ ] 3.5 [expert] Move type mapping behind `MetadataSource`. `discover_tables` returns columns already mapped to `MappedType` with omissions recorded, so `create_schema` no longer calls `type_mapping::map_column` and branches on no driver; add the dialect-stated source precondition check to the trait, with MySQL's collation-and-version check as its first implementation and `discover_collations` no longer an inherent method. Rename `Omission.mysql_type` to `source_type` serialized as `sourceType`, with `#[serde(alias = "mysqlType")]` so notes Exasol persisted before this release still parse. Relocate the mapping assertions that move out of `create_schema_tests.rs`. Rename `crates/adbc-vs-adapter/src/type_mapping_tests.rs` to `mysql_type_mapping_tests.rs`, so the test module names the technology its assertions belong to and sits beside the `postgres_type_mapping_tests.rs` task 5.2 adds. The rename is mechanical and behavior-preserving — every assertion moves unchanged — and it is what keeps the test layout readable against the spec layout decision `[25]` settles, where `vs-adapter/type-mapping` is framework and each technology's table lives in its own feature. Add `crates/adbc-vs-adapter/src/metadata_source_tests.rs` for the two framework rules that bind every source rather than one: `each_source_maps_its_own_catalog_row`, asserting each implementation returns already-mapped columns from its own catalog shape with no shared source-column struct, and `every_mapped_type_is_in_the_declarable_set`, asserting that no source maps a column to an Exasol type outside the closed set `vs-adapter/pushdown-dialect`'s closure argument rests on.
 - [ ] 3.6 Generalize the integration tier's driver-fetch helper over the driver identity, and stop it reconstructing the package URL by convention. `mysql_it_test.rs`'s `package_url()` builds the whole URL from `REGISTRY_BASE_URL`, `REGISTRY_DRIVER_PATH`, `DRIVER_VERSION`, and `PLATFORM` without reading `index.yaml` at all, and `install_driver` caches the extracted library under `PACKAGE_SHA256`; the range removes both constants, so neither expression survives. Replace them with a shared per-driver helper taking a `Driver` that resolves the range through the index exactly as the product does and caches under the **resolved version**. This closes a divergence that predates the range: today the tier and the product disagree about where a package lives, and `extract_library` matches the filename directly where the product reads `MANIFEST`, so a registry layout change would break them differently. Have the helper read the manifest too. `mysql_it_test.rs` MUST still fetch, extract, and cache, and MUST still fail rather than skip. This is the only route the repo has to a driver library outside BucketFS, and it is a prerequisite of task 7.2. Depends on task 6.1 for range resolution, so it runs in Group G after task 6.1 rather than in Group D.
 - [ ] 3.7 [expert] Move MySQL's advertised capability list out of `MySqlDialect::capabilities()` and into `drivers/mysql.toml` as a `[capabilities]` list, generated by task 3.1's build script into the same `&'static` shape the trait method returns. `SqlDialect::capabilities()` stays a trait method — only the values move — so the per-dialect ownership decision `[3]` records is unchanged and `dialect_for` still answers per virtual schema. The generated MySQL set MUST be exactly the set release 0.2 advertises, asserted element for element rather than by count, and every existing capability test MUST pass unmodified. A capability name stays a bare protocol string: `SqlDialect::capabilities` keeps returning `&'static [&'static str]`, this plan adds no `Capability` type, and the build script MUST NOT carry an allowlist of valid capability names — that would be the second capability list `vs-adapter/pushdown-dialect` forbids. An unknown name is caught by task 3.4's every-advertised-capability-renders invariant test, which finds no rendering path for it. This is the migration decision `[19]` requires, and doing it before the PostgreSQL dialect exists means PostgreSQL's list is authored into the mechanism rather than retrofitted onto it.
 - [ ] 3.8 Make the new build inputs prerequisites of the `.so`, and assert it. The `$(SO_FILE)` rule's prerequisites are `ADAPTER_SRCS`, `SCAN_SRCS`, and four manifest paths; `crates/adbc-vs-scan/build.rs` and `crates/adbc-vs-scan/drivers/` are under neither, so after task 3.1 a `version_range`, capability-list, or build-script edit leaves `make cross-udf-build` a no-op and `make test-artifact`, `make test-e2e`, `make test-e2e-postgres`, and `make bench` all certify the previous `.so`. Add `SCAN_BUILD_INPUTS := crates/adbc-vs-scan/build.rs $(shell find crates/adbc-vs-scan/drivers -type f 2>/dev/null)` to the `Makefile` and add it to the `$(SO_FILE)` rule's prerequisite list. **The assertion is the guard, not the Makefile edit**: extend `crates/adbc-vs-adapter/tests/make_targets_test.rs` with a test modelled on `touching_source_invalidates_so` that touches `crates/adbc-vs-scan/drivers/mysql.toml` and asserts `make -q cross-udf-build` reports the `.so` out of date, so a later prerequisite-list edit that drops the TOML files fails a test rather than silently returning stale binaries. Lands with task 3.1, which creates both inputs.
@@ -215,19 +243,21 @@ Existing MySQL virtual schemas keep working without recreation. Seven visible ch
 ### Phase 4: PostgreSQL dialect rendering
 
 - [ ] 4.1 Add `postgres_dialect.rs` with `PostgresDialect` implementing `SqlDialect`: double-quote identifier quoting doubling an embedded double quote, projection rendering, table qualification by the recorded namespace, the single-constant projection for an empty select list, and positional `EMITS` naming. Advertise MySQL's set verbatim for now; tasks 4.2 to 4.4 adjust it. Register the dialect in `dialect_for`.
-- [ ] 4.2 [expert] Render PostgreSQL filters: string literals as `E'<body>'` with a backslash doubled and a single quote doubled, rendered unconditionally so no value changes the statement's shape; `DATE`/`TIMESTAMP` typed literals; numeric and null literals; every advertised predicate; `<>` for not-equal; parenthesized nesting. Apply `COLLATE "C"` to a character operand of `predicate_less`, `predicate_lessequal`, and `predicate_between` and to nothing else, per gate 2.3(c), (d), and (f). Read both comparison operands by position.
+- [ ] 4.2 [expert] Render PostgreSQL filters: string literals as `E'<body>'` with a backslash doubled and a single quote doubled, rendered unconditionally so no value changes the statement's shape; `DATE`/`TIMESTAMP` typed literals; numeric and null literals; every advertised predicate; `<>` for not-equal; parenthesized nesting. Apply `COLLATE "C"` to a character operand of `predicate_less`, `predicate_lessequal`, and `predicate_between` and to nothing else, per gate 2.3(c), (d), and (f). "Nothing else" is load-bearing at exactly three sites where MySQL does render a suffix and `vs-adapter/mysql-collation` states it: a `LIKE` operand, an `IN` compared operand, and a predicate in select-list position. Each MUST render bare here, and each MUST be asserted rather than left implied. Read both comparison operands by position.
 - [ ] 4.3 [expert] Render PostgreSQL aggregation: `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)`, `MIN`, `MAX` in canonical upper case whatever case arrived; `COLLATE "C"` on a character operand of `MIN`/`MAX`; no collation on a `GROUP BY` key, on a bare select-list occurrence of a grouped column, or on a `DISTINCT` operand; `single_group` renders no `GROUP BY`. Per gate 2.3(b), render rather than reject a select-list predicate reading the query's character grouping key, and keep MySQL's rejection bound to the MySQL dialect. Reject `having`, `orderBy`, and `limit` elements with the same named errors MySQL's dialect returns.
-- [ ] 4.4 Render `FULL OUTER JOIN` and add `JOIN_TYPE_FULL_OUTER` to the PostgreSQL capability set, conditional on gate 2.3(a); render `INNER`/`LEFT OUTER`/`RIGHT OUTER` and the positional aliasing and column qualification MySQL's dialect uses, with no collation on a character join key. Add the test asserting the two dialects' sets differ in exactly `JOIN_TYPE_FULL_OUTER`. If gate 2.3(a) measured a rejection, withhold the capability, record it in the decision log, and revise `pushdown-join`'s and `pushdown-dialect`'s scenarios to state that the two sets coincide in this release.
-- [ ] 4.5 Unit tests for `PostgresDialect` in `postgres_dialect_tests.rs`: identifier quoting including an embedded double quote and a mixed-case name; every literal form; every predicate form; the full collation-placement matrix over character, numeric, and temporal operands in comparison, ordering, grouping, `DISTINCT`, and `MIN`/`MAX` positions; each join type; nested joins; a shared column name; an unresolvable column; an unrenderable aggregate and join type; and a byte-identical re-render of one request.
+- [ ] 4.4 Render `FULL OUTER JOIN` and add `JOIN_TYPE_FULL_OUTER` to the PostgreSQL capability set, conditional on gate 2.3(a); render `INNER`/`LEFT OUTER`/`RIGHT OUTER` and the positional aliasing and column qualification MySQL's dialect uses, with no collation on a character join key. Add the test asserting the two dialects' sets differ in exactly `JOIN_TYPE_FULL_OUTER`, and `avg_and_sum_are_withheld_per_dialect`, asserting that neither dialect advertises `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, or `FN_AGG_AVG_DISTINCT` — the framework all-or-nothing rule `vs-adapter/pushdown-aggregation` states over every dialect, which needs a per-dialect assertion now that there are two. If gate 2.3(a) measured a rejection, withhold the capability, record it in the decision log, and revise `pushdown-join`'s and `pushdown-dialect`'s scenarios to state that the two sets coincide in this release.
+- [ ] 4.5 Unit tests for `PostgresDialect` in `postgres_dialect_tests.rs`: identifier quoting including an embedded double quote and a mixed-case name; every literal form; every predicate form; the full collation-placement matrix over character, numeric, and temporal operands in comparison, ordering, grouping, `DISTINCT`, and `MIN`/`MAX` positions; each join type; nested joins; a shared column name; an unresolvable column; an unrenderable aggregate and join type; and a byte-identical re-render of one request. Name three of them after the framework scenarios `vs-adapter/pushdown-filter` states for every dialect, so the coverage audit finds one test per dialect: `like_renders_its_escape_clause`, `between_and_in_keep_operand_order`, and `select_list_predicate_renders_as_projected_boolean`. Their MySQL arms need no new code and MUST NOT be renamed — `mysql_dialect_tests.rs::like_renders_pattern_and_escape`, `::between_and_in_keep_operand_order`, and `::a_select_list_predicate_renders_where_the_query_groups_by_nothing` already assert the framework steps plus the MySQL halves `vs-adapter/mysql-collation` and `vs-adapter/mysql-pushdown` now state. Verify each still asserts `COLLATE utf8mb4_0900_as_cs` on the `LIKE` operand, on the `IN` compared operand rather than on the list, and on a select-list predicate, and the hex form on a `LIKE` pattern and its `escapeChar`; the three MySQL scenarios that stated those rules as unqualified framework `MUST`s are removed from `pushdown-filter` by this plan, so these tests are what keeps them asserted.
 
 ### Phase 5: PostgreSQL metadata, mapping, and connection
 
 - [ ] 5.1 Add the PostgreSQL metadata source: `information_schema.tables` and `information_schema.columns` filtered to `table_schema = 'public'`, reading `table_name`, `column_name`, `ordinal_position`, `data_type`, `character_maximum_length`, `numeric_precision`, `numeric_scale`, `is_nullable`, and `collation_name`, exposing both `BASE TABLE` and `VIEW`. Record `public` as the namespace in `adapterNotes`. Do not reuse MySQL's query text: `COLUMN_TYPE` does not exist in PostgreSQL and `table_schema` names a schema rather than a database.
-- [ ] 5.2 Add the PostgreSQL type mapping and its unit tests: `integer`, `bigint`, `numeric(p,s)`, `character varying(n)`, `date`, `timestamp without time zone`, `double precision` mapped; a `numeric` precision above 36, an absent precision, an absent character length, `character`, `boolean`, `text`, `smallint`, `real`, both `time` types, `timestamptz`, `uuid`, `json`, `jsonb`, `bytea`, `interval`, `money`, and `ARRAY` unmapped with the reason naming the type; a character column of a nondeterministic collation unmapped, treating a server that reports no determinism flag as deterministic.
+- [ ] 5.2 Add the PostgreSQL type mapping and its unit tests: `integer`, `bigint`, `numeric(p,s)`, `character varying(n)`, `date`, `timestamp without time zone`, `double precision` mapped; a `numeric` precision above 36, an absent precision, an absent character length, `character`, `boolean`, `text`, `smallint`, `real`, both `time` types, `timestamptz`, `uuid`, `json`, `jsonb`, `bytea`, `interval`, `money`, and `ARRAY` unmapped with the reason naming the type; a character column of a nondeterministic collation unmapped, treating a server that reports no determinism flag as deterministic. Include `oversize_numeric_is_unmapped` and `nullability_carries_through`, the PostgreSQL half of the two framework rules `vs-adapter/type-mapping` states over every source.
 - [ ] 5.3 Add PostgreSQL's source precondition check through the `MetadataSource` trait: the database encoding MUST be `UTF8`, checked before any table is discovered and on every request that resolves the source `CONNECTION`, with the error naming the reported encoding and `UTF8`. Assert MySQL's collation check does not run for a PostgreSQL source.
 - [ ] 5.4 [expert] Build PostgreSQL's connection value as a libpq keyword/value connection string from the `CONNECTION` object's address and credentials: host, port, and `dbname` from the address, every address query parameter carried across as a keyword of the same name, `user` and `password` from the object, and every value single-quoted with an embedded quote or backslash escaped. Pass it as the driver's only accepted database option, and pass no `username` or `password` option for this driver. Strip the resolved password from every surfaced error, including text the driver or libpq produced, while keeping the host and database in the message. The connection value MUST NOT be interpolated as an error subject: `connect_error` today passes `&connection.uri` as the subject and redacts only the driver's message, which for PostgreSQL would print the conninfo string verbatim. Redaction applies to every caller of the shared open path, not to the scan alone — `create_schema.rs:193-199` opens the source connection through it, so `createVirtualSchema`, `refresh`, and `setProperties` traverse the same value. Unit-test the escaping over a password containing a single quote, a backslash, a space, and an ampersand, and test that the redaction survives a driver error carrying the connection string.
 
 ### Phase 6: Range resolution, driver path, and PostgreSQL provisioning
+
+This phase implements all three `driver-provisioning` features. Tasks 6.1, 6.2, and 6.4 carry `driver-version-resolution`; task 6.3 carries `driver-path-override`; tasks 6.5 and 6.6 carry `driver-self-install`. The split is one of spec ownership only: no task, file, or ordering edge changes because of it, and decision `[26]` states why.
 
 - [ ] 6.1 [expert] Replace the registry index's exact-match version lookup with range resolution. `registry_index::package_url` today finds a block with `block.version == version`, raw `String` equality; change it to parse every published `version` scalar for the driver, normalize one optional leading `v`, and select the **highest** version satisfying the driver's `version_range`, then read that block's `linux_amd64` `url` as it does now. Add `semver` as a direct dependency of `adbc-vs-adapter` (already in `Cargo.lock` at 1.0.28 via `rustc_version`, `MIT OR Apache-2.0`, so no `deny.toml` or `about.toml` change). Return the resolved version alongside the URL, because tasks 6.2 and 6.4 both need it. A published scalar that does not parse MUST be skipped rather than failing the lookup, so one malformed entry cannot make a driver uninstallable; a range satisfied by no published version MUST fail with an error naming the driver, the range, and the versions the index publishes. Extend the `tests/fixtures/index.yaml` fixture with several in-range and out-of-range versions per driver, deliberately including both the `v`-prefixed and bare spellings and one unparseable scalar, and assert the highest in-range version wins in each case. Replace `LookupError::NoVersion`'s "the version adbc-vs pins" wording, which the range makes false.
 - [ ] 6.2 [expert] Version the BucketFS install path and rebind the presence check to the resolved version. `driver_install_path` is `mount.join(DRIVER_DIRECTORY).join(DRIVER_LIBRARY)` and `ensure_driver` returns early on `install_path.is_file()` before any network call; change the path to `<mount>/adbc-drivers/<driver>/<version>/<library>` and its `driver_url` twin to match, and move the presence check to **after** range resolution so it tests the version actually resolved. Without this the range resolves exactly once per cluster and never again, which is decision `[23]`. Assert explicitly that a mount already holding an older in-range version does **not** short-circuit the install of a newer resolved one, and that installing the newer version leaves the older file in place rather than deleting or overwriting it. Record the consequence in the error path too: an unreachable registry can no longer be answered from the mount, so `RegistryUnreachable` and `RegistryRejected` MUST name `DRIVER_PATH` as the supported offline route rather than a fixed path to pre-load, per task 6.3.
@@ -238,14 +268,14 @@ Existing MySQL virtual schemas keep working without recreation. Seven visible ch
 
 ### Phase 7: Scan coercion and the PostgreSQL integration tier
 
-- [ ] 7.1 Coerce a `numeric` column the driver returns as an Arrow string into its declared `DECIMAL(p,s)`, with the source precision and scale intact, treating the string form as a first-class case rather than a fallback. Fail with an error naming the value and the declared type for `NaN`, `Infinity`, and `-Infinity`, per value rather than per column, and keep a finite value in the same column coercing. Add the cases to `coerce_tests.rs`.
+- [ ] 7.1 Coerce a `numeric` column the driver returns as an Arrow string into its declared `DECIMAL(p,s)`, with the source precision and scale intact, treating the string form as a first-class case rather than a fallback. Name that assertion `string_form_numeric_coerces_to_declared_decimal`; it is the first of the two halves `scan-udf/postgresql-scan` states, and only the failing half had a scenario before this revision. Fail with an error naming the value and the declared type for `NaN`, `Infinity`, and `-Infinity`, per value rather than per column, and keep a finite value in the same column coercing. Add the cases to `coerce_tests.rs`.
 - [ ] 7.2 Add the PostgreSQL integration tier: a `postgres-it` cargo feature, default off, and `tests/postgres_it_test.rs` in `adbc-vs-scan` covering driver load by the PostgreSQL entry point, statement execution, Arrow batch streaming across more than one batch, and coercion of every mapped type including the string-form `numeric` and a microsecond timestamp. Fetch the driver library through task 3.6's per-driver helper, which is this task's prerequisite alongside task 6.4's package row — there is no other route to a driver library outside BucketFS. Needs the `postgres` container only, never Exasol, and links the crate as an `rlib` so it does not depend on `cross-udf-build`.
 
 ### Phase 8: End-to-end tier
 
 - [ ] 8.1 Grow `docker/postgres/init.sql` into the differential fixture and add local Exasol mirror tables seeded from identical values: character values differing only by case and only by accent, the ordering triple `B`/`a`/`C`, a trailing-space pair, `numeric(12,4)`, an unconstrained `numeric`, `character(8)`, `character varying(100)`, `text`, `timestamp`, `timestamptz`, `uuid`, `jsonb`, `bytea`, a nullable numeric column, two tables sharing a key with an unmatched row on each side, and a table whose every column is unmapped. Put the case and accent variants in the column the aggregation tests group by.
 - [ ] 8.2 [expert] Differential PostgreSQL E2E tests in `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` behind the `exasol-e2e` feature, with its own shared setup module creating both a PostgreSQL and a MySQL virtual schema so task 8.3 has both: for projection, filter, aggregation, and join, assert through `EXPLAIN VIRTUAL` that the fragment reached PostgreSQL and through a row comparison against the mirror that it produced Exasol's answer. Cover the collation placements explicitly — `COLLATE "C"` present on an ordering comparison and on `MIN`/`MAX`, absent on equality, `LIKE`, the `GROUP BY` key and its select-list occurrence, and a `DISTINCT` operand — and assert the uncollated `GROUP BY` and `COUNT(DISTINCT)` return the mirror's group count. Assert a delegated `FULL OUTER JOIN` returns both unmatched rows with nulls; a select-list predicate over the grouped character column delegates and matches the mirror; `AVG` and `SUM` render in no generated statement and still return the mirror's values; a two-column `GROUP BY` is withdrawn; and no generated statement carries `ORDER BY`, `LIMIT`, or `OFFSET`.
-- [ ] 8.3 Add the two-driver end-to-end test to `e2e_postgres_test.rs`, over the two virtual schemas task 8.2's setup created: assert both driver libraries are present in BucketFS at their distinct paths, and assert a query over each returns its own source's rows. Task 8.5 owns the capability half of the two-driver assertion and states its mechanism, so this task does not restate it. This is the test that would fail if package resolution or metadata discovery defaulted to one driver.
+- [ ] 8.3 Add the two-driver end-to-end test to `e2e_postgres_test.rs`, over the two virtual schemas task 8.2's setup created: assert both driver libraries are present in BucketFS at their distinct paths, and assert a query over each returns its own source's rows. Task 8.5 owns the capability half of the two-driver assertion and states its mechanism, so this task does not restate it. This is the test that would fail if package resolution or metadata discovery defaulted to one driver. Add `every_supported_driver_creates_a_virtual_schema` in the same file, asserting that `CREATE VIRTUAL SCHEMA` succeeds once per value `Driver::parse` accepts, enumerated from the identity rather than listed — so a third driver inherits the assertion. It replaces the earlier PostgreSQL-only "driver value is accepted" scenario, which named one technology inside a framework feature.
 - [ ] 8.4 Add the PostgreSQL omission E2E test: `adapterNotes` records every unmapped column with its PostgreSQL type and reason under `sourceType`, the all-unmapped table is absent from `schemaMetadata`, and creation still succeeds. Add the adapter-side credential assertion in the same file: point the `CONNECTION` at a wrong password, and separately at a host and port nothing listens on, and assert that no error surfaced by `createVirtualSchema`, `refresh`, or `setProperties` contains the password or the libpq conninfo string, while each still names the host and the database.
 - [ ] 8.5 Add `two_virtual_schemas_advertise_their_own_capability_sets` to `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs`, over the two virtual schemas task 8.2's setup module created — one `DRIVER = 'postgresql'`, one `DRIVER = 'mysql'`, both through the ordinary `CREATE VIRTUAL SCHEMA` path against the shipped `ADBC_ADAPTER`. Plan a `FULL OUTER JOIN` over each schema's own pair of joinable fixture tables and read the `PUSHDOWN_SQL` rows `EXPLAIN VIRTUAL` reports for it, the way `e2e_mysql_test.rs`'s `pushdown_statement` helper and `two_column_group_by_is_not_delegated` already read a delegation decision — reading every reported row rather than the first, because a withdrawn join leaves one pushed-down statement per scanned table. Assert the PostgreSQL schema's generated statement carries the delegated `FULL OUTER JOIN`, and that no statement generated for the MySQL schema carries a join at all, since Exasol withdraws a join the advertised set omits and performs it itself. What the two answers prove is the per-driver dispatch itself — `getCapabilities` resolving its dialect from `adapterNotes.driver`, live, through the shipped code path — which is strictly more than the presence of a JSON field. Add no probe adapter, no request-echo instrumentation to the shipped adapter, and no test-only code path through it. This is the standing regression test behind the plan's keystone precondition: gate 2.1 measures the request shape once, and a later loss of the identity on the `getCapabilities` request collapses this difference and MUST fail this test rather than be absorbed.
 
@@ -254,6 +284,7 @@ Existing MySQL virtual schemas keep working without recreation. Seven visible ch
 - [ ] 9.1 Add `test-e2e-postgres` to the `Makefile` — prereqs `cross-udf-build stack-up`, running `cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_postgres_test -- --test-threads=1` — as a second target beside `test-e2e` rather than folding both drivers into one binary. Two binaries keep each driver's shared setup independent, so a MySQL-only run provisions no PostgreSQL virtual schema and a failure names which driver's tier broke. Update `tests/make_targets_test.rs`.
 - [ ] 9.2 Extend `.github/workflows/ci.yml`: run `make test-it-postgres` in `integration-tests` and the PostgreSQL end-to-end target in `e2e`, both as `make` invocations with no inline shell. Confirm the `e2e` job's disk cleanup still leaves room for a third image, and update `tests/workflow_test.rs` for the new target references.
 - [ ] 9.3 Update `CLAUDE.md`'s dense bullets: the `postgres` service, its image tag, static IP `172.28.5.11`, and deliberate `en_US.utf8` locale; the `postgres-it` tier and what it does and does not cover; the per-technology `drivers/*.toml` files, the `build.rs` that generates the tables from them, and the rule that a new technology edits a TOML file *and* ships Rust in a release rather than being loaded at run time; that `crates/adbc-vs-scan/build.rs` and `crates/adbc-vs-scan/drivers/*.toml` are `cross-udf-build` prerequisites, so a TOML edit alone rebuilds the `.so` and no tier ever certifies a stale binary; that the build validates the `[package]` fields only and an unknown capability name is caught by the capability invariant test rather than by the build; each driver's `version_range` and the rule that the two ranges are independent; the versioned BucketFS install path; the `DRIVER_PATH` property and that it is the supported air-gapped route; that self-install verifies no checksum and no signature, so the download's TLS connection is its only integrity guarantee, and that the compiled-in digest release 0.2 checked is gone for MySQL too; the PostgreSQL credential path and its redaction requirement; the `public`-schema-only boundary. Delete the version-spelling-trap bullet if one was added, since range resolution removes it. Record the two consequences of task 1.2's `stack-up` edge in the stack-lifecycle and Benchmarking bullets: `make test-e2e` now starts a container it does not use, and `make bench` samples throughput on a host carrying a third database.
+- [ ] 9.5 Record the spec library's framework/technology convention in `CLAUDE.md`'s **Spec governance** section, so a later planner extends the structure rather than re-deriving it. State: every feature is either framework or technology; a framework feature keeps the protocol's own vocabulary as its name; a technology feature is named `<technology>-<concern>` and sits flat inside one of the three existing domains. State the reason nesting is not used — `speq` represents exactly two path levels and drops a nested feature from `feature list` silently rather than rejecting it, so a nested spec would be invisible to search and validation. State that a new technology adds `<technology>-pushdown`, `<technology>-collation`, `<technology>-type-mapping`, and `<technology>-scan`, and adds no provisioning feature, because provisioning's technology-dependence is data in `drivers/<technology>.toml` rather than behavior. State that `driver-provisioning` holds three framework features — `driver-self-install`, `driver-version-resolution`, `driver-path-override` — split along framework-internal lines rather than per technology, per decision `[26]`. Keep the existing rule that the live domains are `vs-adapter/`, `scan-udf/`, and `driver-provisioning/`, and that no `e2e/`, `toolchain/`, `ci/`, or `licensing/` group may be created. Point at decisions `[25]` and `[26]` for the reasoning rather than restating it. Two bullets this task would otherwise write are **already in `CLAUDE.md`**, added when decision `[26]` was made: the `vs-adapter` feature-count acceptance and the `driver-provisioning` three-feature shape. Verify both still read true against the merged library and extend them; do not duplicate them.
 - [ ] 9.4 Update `specs/mission.md`: PostgreSQL moves from the aspirational v1 driver set to a shipped driver; the MySQL 8.0.17 source-server constraint becomes one driver's precondition beside PostgreSQL's UTF-8 encoding requirement; the `SqlDialect` row in the tech-stack table names both dialects; note that the credential-by-separate-option rule holds for MySQL and not for PostgreSQL.
 
 ### Phase 10: Review and verification
@@ -264,7 +295,8 @@ Existing MySQL virtual schemas keep working without recreation. Seven visible ch
 - [ ] 10.4 Run the automated checklist (build, test, artifact, integration both drivers, e2e both drivers, lint, format, deny)
 - [ ] 10.5 Scenario coverage audit
 - [ ] 10.6 Manual verification steps
-- [ ] 10.7 Generate verification report
+- [ ] 10.7 Confirm the record-time Background and description rewrites are still owed, and hand them to whoever runs `/speq:record`. Re-derive § Verification § Recording notes' eleven-feature list from the deltas rather than trusting the table: a feature is on the list when `specs/<domain>/<feature>/spec.md` exists and the delta's description line or `## Background` differs from it. Run that section's post-record check against the unmerged library; it MUST report `FAIL` for all eleven and exit 1, because the merge has not happened yet — a `ok` row means the list drifted from the deltas and the table needs correcting. Record in the verification report that `/speq:record` owes the manual head replacement, naming the section and the eleven features, so the obligation reaches the recorder rather than sitting only in plan.md.
+- [ ] 10.8 Generate verification report
 
 ## Parallelization
 
@@ -277,11 +309,11 @@ Existing MySQL virtual schemas keep working without recreation. Seven visible ch
 | Group D | 3.1 → 3.2 → 3.3, and 3.5 after 3.1; 3.4 after 3.2; 3.7 after 3.1; 3.8 after 3.1. Task 3.6 moves to Group G, after 6.1 |
 | Group E | 4.1 → 4.2 → 4.3 → 4.4 → 4.5 |
 | Group F | 5.1, 5.2 in parallel; then 5.3, 5.4 |
-| Group G | 6.1 → 6.6 → 6.2 → 6.3 → 6.4 → 6.5 |
+| Group G | 6.1 → 6.6 → 6.2 → 6.3 → 6.4 → 6.5 (all three `driver-provisioning` features) |
 | Group H | 7.1, 7.2 |
 | Group I | 8.1 → 8.2 → 8.3, 8.4, 8.5 |
-| Group J | 9.1, 9.2, 9.3, 9.4 |
-| Group K | 10.1 → 10.7 |
+| Group J | 9.1, 9.2, 9.3, 9.4, 9.5 |
+| Group K | 10.1 → 10.8 |
 
 Sequential dependencies:
 
@@ -292,6 +324,7 @@ Sequential dependencies:
 - Group C → Groups E and H (gate 2.3 grounds every PostgreSQL rendering rule)
 - Group D → Groups E, F, G, H — **the plan's main fan-out.** The driver-identity refactor and the TOML mechanism are done once, then four workstreams run concurrently on largely disjoint files: the dialect renderer (`postgres_dialect.rs`), the metadata source and mapping (`postgres_source.rs`, `create_schema.rs`), provisioning (`registry_index.rs`, `provisioning.rs`, `drivers/postgresql.toml`, `provisioning_test.rs`), and the scan coercion and integration tier (`coerce.rs`, `postgres_it_test.rs`). Group G is now the longest chain rather than the shortest — range resolution, the versioned path, and `DRIVER_PATH` are three sequential changes to one module where release 0.2 had a single package row to extend — so it is the critical path and should start first among the four
 - Group G's `DRIVER_PATH` task (6.3) touches `create_schema.rs`, which Group F's task 3.5 work also touches. Sequence 6.3 after Group F rather than running them concurrently, or accept a merge in one file
+- Group G stays one sequential chain despite now serving three spec features. The three features cut the *specification* into three owners, not the code: `registry_index.rs`, `provisioning.rs`, and `create_schema.rs` are the same three files in the same order, and tasks 6.1, 6.2, and 6.3 remain three sequential edits to overlapping code. Decision `[26]` split the specs where the questions differ, which is not where the file boundaries fall, so it adds no parallelism and removes none
 - Task 6.1 → task 3.6, a new edge the range creates: the integration tier can no longer construct a package URL from a pinned version, so its helper needs range resolution before it can resolve anything. Task 3.6 therefore moves out of Group D's fan-out and lands after Group G's first task
 - Task 6.4 → task 7.2, the one remaining edge crossing the fan-out: the integration tier fetches the PostgreSQL package through the row 6.4 adds, using task 3.6's helper. Task 7.1 needs nothing from Group G
 - Groups E, F, G, H → Group I (the end-to-end tier exercises all four)
@@ -327,7 +360,85 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 
 ## Verification
 
+### Recording notes: apply the Background and description rewrites by hand
+
+**`/speq:record` MUST hand-apply this plan's Background and feature-description rewrites. The marker merge silently drops them.** `/speq:spec-merge`'s marker table defines exactly three actions, and all three are scoped to a scenario: `DELTA:NEW` appends a scenario, `DELTA:CHANGED` replaces a scenario of the same name, `DELTA:REMOVED` deletes one. Neither the feature-description line nor the `## Background` block has a marker verb. A `DELTA:CHANGED` block wrapping a Background is therefore discarded with no warning, and `speq feature validate` still passes — a dropped Background is not invalid, it just never lands. Round 6 confirmed this against the `speq record` CLI in a throwaway project rather than inferring it from the table.
+
+Eleven of this plan's twenty-two deltas target a feature the library already holds. **Every one of the eleven rewrites its `## Background`, and eight also rewrite the feature-description line.** None of those rewrites merges on its own. The eleven brand-new features are unaffected: no library file exists, so the merge copies each delta whole and its Background lands intact. That asymmetry is what hides the defect — the new MySQL and PostgreSQL technology features read correctly after recording, and only the framework features they defer to keep saying MySQL.
+
+**Skipping the step below recreates the exact defect this restructuring removes.** Each framework file would keep its MySQL-only Background and description standing over now dialect-neutral scenarios. `vs-adapter/pushdown-filter` would still declare `COLLATE utf8mb4_0900_as_cs` "the collation of every equality question this release delegates" while `vs-adapter/postgresql-collation` requires no suffix there. That is round 5's `[REQUIREMENT_CONFLICT]` with its halves swapped, which is why this is a checked step and not a note.
+
+#### The manual step
+
+For each feature in the table below, before stripping DELTA markers from the merged file:
+
+1. Replace the library file's feature-description line — the first non-blank line under `# Feature:`, line 3 in all eleven files — with the delta's.
+2. Replace the library file's entire `## Background` block — every line from `## Background` down to the next `## ` heading — with the delta's, DELTA markers removed.
+3. Merge `## Scenarios` the ordinary marker-driven way. Nothing about the scenario merge changes.
+
+Steps 1 and 2 together replace everything above `## Scenarios`, because `## Scenarios` is the heading that follows `## Background` in all eleven library files and all eleven deltas. Each delta wraps its whole Background in exactly one `<!-- DELTA:CHANGED -->` … `<!-- /DELTA:CHANGED -->` pair with no bullet outside it, so step 2 is a whole-block copy rather than a per-bullet reconciliation.
+
+| # | Feature | Delta holding the final text | Background bullets library → delta | Description line |
+|---|---------|------------------------------|------------------------------------|------------------|
+| 1 | `specs/vs-adapter/pushdown-dialect/spec.md` | `vs-adapter/pushdown-dialect/spec.md` | 17 → 21 | unchanged |
+| 2 | `specs/vs-adapter/pushdown-projection/spec.md` | `vs-adapter/pushdown-projection/spec.md` | 8 → 9 | rewritten |
+| 3 | `specs/vs-adapter/pushdown-filter/spec.md` | `vs-adapter/pushdown-filter/spec.md` | 12 → 12 | rewritten |
+| 4 | `specs/vs-adapter/pushdown-aggregation/spec.md` | `vs-adapter/pushdown-aggregation/spec.md` | 23 → 19 | rewritten |
+| 5 | `specs/vs-adapter/pushdown-join/spec.md` | `vs-adapter/pushdown-join/spec.md` | 8 → 10 | rewritten |
+| 6 | `specs/vs-adapter/type-mapping/spec.md` | `vs-adapter/type-mapping/spec.md` | 8 → 8 | rewritten |
+| 7 | `specs/vs-adapter/create-virtual-schema/spec.md` | `vs-adapter/create-virtual-schema/spec.md` | 10 → 11 | rewritten |
+| 8 | `specs/vs-adapter/result-ordering/spec.md` | `vs-adapter/result-ordering/spec.md` | 7 → 9 | unchanged |
+| 9 | `specs/vs-adapter/adapter-request-dispatch/spec.md` | `vs-adapter/adapter-request-dispatch/spec.md` | 5 → 6 | unchanged |
+| 10 | `specs/scan-udf/arrow-scan/spec.md` | `scan-udf/arrow-scan/spec.md` | 9 → 12 | rewritten |
+| 11 | `specs/driver-provisioning/driver-self-install/spec.md` | `driver-provisioning/driver-self-install/spec.md` | 11 → 15 | rewritten |
+
+Delta paths are relative to this plan directory. Background text is not duplicated here: each delta's `## Background` block is the final text, and duplicating roughly 130 bullets would create a second copy to keep in step. The eight rewritten description lines are one line each, so they are quoted in full below and the recorder needs no second file open for them.
+
+| Feature | Final description line |
+|---------|------------------------|
+| `vs-adapter/pushdown-projection` | Reports the query fragments this release can delegate to the source, and rewrites the projection fragment into a `SELECT` the scan UDF executes at that source. |
+| `vs-adapter/pushdown-filter` | Delegates a query's `WHERE` clause to the source, rendering each predicate so the source selects exactly the rows Exasol would have selected itself. |
+| `vs-adapter/pushdown-aggregation` | Delegates a single-group or `GROUP BY` aggregation to the source, declaring for each aggregate the Exasol type Exasol's own compiler computed for it. |
+| `vs-adapter/pushdown-join` | Delegates an equi-join between two virtual tables of one virtual schema to the source, so the source joins the rows instead of shipping both tables to Exasol. |
+| `vs-adapter/type-mapping` | States the contract every source-to-Exasol column mapping obeys: the closed set of Exasol types a mapped column may declare, how nullability carries, and how a column the mapping cannot represent without loss is omitted. |
+| `vs-adapter/create-virtual-schema` | Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual tables backed by an ADBC-fronted source database, provisioning that source's ADBC driver on the way. |
+| `scan-udf/arrow-scan` | Executes the pushed-down source statement through the ADBC driver the virtual schema names and streams the driver's Arrow record batches into Exasol without a row-by-row conversion step. |
+| `driver-provisioning/driver-self-install` | Installs the ADBC driver a virtual schema names into BucketFS by downloading it from the public driver registry, so no operator packaging step stands between installing adbc-vs and querying that source. |
+
+The three features whose description line is unchanged — `pushdown-dialect`, `result-ordering`, `adapter-request-dispatch` — still need step 2. Their Backgrounds are all rewritten.
+
+#### The post-record check
+
+Run this from the repo root under `bash`, after `/speq:record` merges. It asserts the post-record state directly rather than trusting that step 1 and step 2 were performed.
+
+```bash
+# DELTA_ROOT is specs/_plans/add-postgresql-support before /speq:record archives
+# the plan, and specs/_recorded/NNN-add-postgresql-support after.
+DELTA_ROOT=specs/_plans/add-postgresql-support
+head_of() { sed -n '1,/^## Scenarios$/p' "$1" | sed '$d' | grep -v '^<!-- /\?DELTA:'; }
+fail=0
+for f in vs-adapter/pushdown-dialect vs-adapter/pushdown-projection \
+         vs-adapter/pushdown-filter vs-adapter/pushdown-aggregation \
+         vs-adapter/pushdown-join vs-adapter/type-mapping \
+         vs-adapter/create-virtual-schema vs-adapter/result-ordering \
+         vs-adapter/adapter-request-dispatch scan-udf/arrow-scan \
+         driver-provisioning/driver-self-install; do
+  if diff -q <(head_of "specs/$f/spec.md") <(head_of "$DELTA_ROOT/$f/spec.md") >/dev/null
+  then echo "ok    $f"; else echo "FAIL  $f"; fail=1; fi
+done
+exit $fail
+```
+
+The check compares each library file's description line and Background against the delta's, marker-stripped, and exits non-zero on any difference. Both halves were verified rather than reasoned about:
+
+- **It detects the defect.** Run against the library as it stands today, before any merge, it reports `FAIL` for all eleven features and exits 1.
+- **The manual step satisfies it.** Applied to copies of the eleven library files — each head replaced by its delta's, per steps 1 and 2 — the check reports `ok` for all eleven and exits 0, and `speq feature validate` reports no new error and no new warning on the result.
+
 ### Scenario Coverage
+
+Scenarios are grouped by the feature that owns them after decision `[25]`. A scenario a technology feature now owns is listed under that feature, never under the framework feature it left. A framework scenario that must hold for every dialect maps to one test per dialect.
+
+#### Framework — vs-adapter
 
 `vs-adapter/driver-selection`
 
@@ -353,12 +464,57 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 | Scenario | Test Type | Test Location | Test Name |
 |----------|-----------|---------------|-----------|
 | Every advertised capability has a rendering path | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `every_advertised_capability_renders_per_dialect` |
-| Capability set advertises the fragments this release renders | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `mysql_capability_set_is_exact` |
-| PostgreSQL advertises its own capability set | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `postgres_capability_set_is_exact` |
 | The two dialects' capability sets differ only where their SQL differs | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `dialect_sets_differ_only_in_full_outer_join` |
-| Unrepresentable request fragment fails rather than returning wrong rows | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `unrenderable_fragment_named_in_error` |
-| Comparison operands are read by position, not by assumed role | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `comparison_operands_keep_request_order` |
+| Unrepresentable request fragment fails rather than returning wrong rows | Integration | `crates/adbc-vs-adapter/tests/dispatch_test.rs` | `unrenderable_fragment_named_in_error` |
+| Comparison operands are read by position, not by assumed role | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `swapped_comparison_keeps_operand_order`, `comparison_operands_keep_request_order` |
 | Generated statement is deterministic for a given request | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `same_request_renders_identically_per_dialect` |
+
+`vs-adapter/pushdown-projection`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Absent select list projects every mapped column | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `absent_select_list_projects_all`, `absent_select_list_projects_every_column` |
+| Pushdown response carries no credential | Integration | `crates/adbc-vs-adapter/tests/dispatch_test.rs` | `pushdown_response_carries_no_credential` |
+
+`vs-adapter/pushdown-filter`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Numeric comparison is rendered as a WHERE clause | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `each_comparison_operator_renders_its_mysql_counterpart`, `standard_predicate_forms_render` |
+| LIKE renders its pattern and its escape character | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `like_renders_pattern_and_escape`, `like_renders_its_escape_clause` |
+| BETWEEN and IN keep their operand order | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `between_and_in_keep_operand_order`, `between_and_in_keep_operand_order` |
+| Predicate in select-list position renders as a projected boolean | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `a_select_list_predicate_renders_where_the_query_groups_by_nothing`, `select_list_predicate_renders_as_projected_boolean` |
+
+`vs-adapter/pushdown-aggregation`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Predicate over an aggregate is delegated as a BOOLEAN column | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `a_select_list_predicate_over_an_aggregate_renders`, `select_list_predicate_over_an_aggregate_renders` |
+| AVG and SUM are computed by Exasol rather than delegated | Unit + Integration | `crates/adbc-vs-adapter/src/capabilities_tests.rs`, `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `avg_and_sum_are_withheld_per_dialect`, `avg_and_sum_match_local_exasol_result` |
+| Aggregate value that overflows its declared type fails rather than truncating | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `overflowing_aggregate_fails_named` |
+
+`vs-adapter/pushdown-join`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Each join type renders its counterpart | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `each_join_type_renders_its_mysql_keyword_in_the_requests_operand_order`, `each_join_type_renders` |
+| Unsupported join type fails with a named error | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `an_unrenderable_join_type_fails_naming_the_value_it_received`, `unsupported_join_type_named_per_dialect` |
+| Inner join of two virtual tables renders one statement | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `a_join_renders_one_statement_with_every_table_aliased_and_every_column_qualified`, `inner_join_renders_one_statement` |
+| Nested join renders as a nested join | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `a_nested_join_renders_the_inner_join_parenthesized_inside_the_outer`, `nested_join_renders_nested` |
+| Outer join emits nulls for the unmatched side | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `outer_join_emits_nulls_for_unmatched_side` |
+| Join composes with a delegated filter and aggregation | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `join_composes_with_filter_and_group_by`, `join_composes_with_filter_and_grouping` |
+| Every joined table is aliased and every column is qualified | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `every_column_position_in_a_join_carries_its_tables_alias`, `joined_tables_are_aliased_and_qualified` |
+| Column that matches no table in the from tree fails with a named error | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs`, `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `a_column_naming_no_table_in_the_from_tree_fails_naming_the_column_and_the_reference`, `unresolvable_column_named_in_error` |
+
+`vs-adapter/type-mapping`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| DECIMAL beyond Exasol's maximum precision is unmapped | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs`, `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `oversize_decimal_unmapped`, `oversize_numeric_is_unmapped` |
+| Column nullability carries through unchanged | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs`, `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `nullability_carries_through`, `nullability_carries_through` |
+| Each technology states its own mapping table | Unit | `crates/adbc-vs-adapter/src/metadata_source_tests.rs` | `each_source_maps_its_own_catalog_row` |
+| A mapped column declares only an Exasol type this release produces | Unit | `crates/adbc-vs-adapter/src/metadata_source_tests.rs` | `every_mapped_type_is_in_the_declarable_set` |
+| Omission records the source type under a source-neutral field | Unit | `crates/adbc-vs-adapter/src/adapter_notes_tests.rs` | `omission_source_type_accepts_legacy_alias` |
 
 `vs-adapter/create-virtual-schema`
 
@@ -369,9 +525,7 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 | Views are exposed alongside base tables | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `views_are_exposed_alongside_base_tables` |
 | Missing required property fails with a named error | Integration + Unit | `crates/adbc-vs-adapter/tests/dispatch_test.rs`, `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs`, `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `missing_property_named_in_error`, `driver_path_is_accepted_and_bypasses_provisioning`, `bucketfs_connection_required_without_driver_path` |
 | Unsupported driver value fails with a named error | Integration | `crates/adbc-vs-adapter/tests/dispatch_test.rs` | `unsupported_driver_value_fails_named` |
-| PostgreSQL driver value is accepted | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `postgresql_driver_value_is_accepted` |
-| PostgreSQL virtual schema exposes the public schema only | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `only_the_public_schema_is_exposed` |
-| PostgreSQL database whose encoding is not UTF8 is rejected at creation | Integration | `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `non_utf8_encoding_is_rejected_named` |
+| Every supported driver value creates a virtual schema | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `every_supported_driver_creates_a_virtual_schema` |
 | DRIVER_PATH is accepted and bypasses driver provisioning | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `driver_path_is_accepted_and_bypasses_provisioning` |
 | DRIVER_PATH naming no readable file fails with a named error | Integration | `crates/adbc-vs-adapter/tests/dispatch_test.rs` | `driver_path_missing_file_names_property_and_path` |
 | Connection address without a database fails with a named error | Unit | `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `address_without_database_fails_for_each_scheme` |
@@ -379,72 +533,7 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 | Columns of unmappable type are omitted and recorded | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `unmappable_columns_are_omitted_and_recorded` |
 | Table with no mappable column is omitted | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `table_with_no_mappable_column_is_omitted` |
 | Empty source database yields an empty table list | Unit | `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `empty_namespace_yields_empty_table_list` |
-| Source server without the required collations is rejected at creation | Unit | `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `mysql_collation_check_binds_mysql_only` |
 | Unreachable source fails creation with a diagnosable message | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `unreachable_source_names_the_address` |
-| PostgreSQL source error surfaces no credential | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `postgres_source_error_surfaces_no_credential` |
-
-`vs-adapter/type-mapping`
-
-| Scenario | Test Type | Test Location | Test Name |
-|----------|-----------|---------------|-----------|
-| PostgreSQL integer types map to DECIMAL with the matching digit count | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `integer_types_map_to_decimal` |
-| PostgreSQL numeric preserves the source precision and scale | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `numeric_preserves_precision_and_scale` |
-| PostgreSQL numeric without a declared precision is unmapped | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `unconstrained_numeric_is_unmapped` |
-| PostgreSQL character varying preserves the declared length and uses UTF8 | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `character_varying_preserves_length` |
-| PostgreSQL character column of a nondeterministic collation is unmapped | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `nondeterministic_collation_is_unmapped` |
-| PostgreSQL character is unmapped because it is blank-padded | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `bpchar_is_unmapped_for_padding` |
-| PostgreSQL temporal and floating-point types map to their Exasol counterparts | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `temporal_and_float_types_map` |
-| Non-core PostgreSQL types are unmapped | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `non_core_types_are_unmapped_named` |
-| PostgreSQL column nullability carries through unchanged | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `nullability_carries_through` |
-| Omission records the source type under a source-neutral field | Unit | `crates/adbc-vs-adapter/src/adapter_notes_tests.rs` | `omission_source_type_accepts_legacy_alias` |
-
-`vs-adapter/pushdown-projection`
-
-| Scenario | Test Type | Test Location | Test Name |
-|----------|-----------|---------------|-----------|
-| Absent select list projects every mapped column | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `absent_select_list_projects_every_column` |
-| Backtick in an identifier is escaped | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `backtick_in_identifier_is_doubled` |
-| Double quote in a PostgreSQL identifier is escaped | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `double_quote_in_identifier_is_doubled` |
-| Pushdown response carries no credential | Integration | `crates/adbc-vs-adapter/tests/dispatch_test.rs` | `pushdown_response_carries_no_credential` |
-| Projection pushdown reaches PostgreSQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `projection_reaches_postgres` |
-
-`vs-adapter/pushdown-filter`
-
-| Scenario | Test Type | Test Location | Test Name |
-|----------|-----------|---------------|-----------|
-| Filter capabilities cover the predicates and literals this release renders | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `filter_capabilities_match_per_dialect` |
-| PostgreSQL collates an ordering comparison and leaves equality bare | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `collation_placement_matrix` |
-| PostgreSQL character comparison reproduces Exasol's case, accent, and code-point order | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `character_comparison_matches_local_exasol_result` |
-| PostgreSQL string literal is rendered as an escape-string constant | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `string_literal_is_escape_string_constant` |
-| PostgreSQL renders LIKE, IS NULL, BETWEEN, and IN in their standard forms | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `standard_predicate_forms_render` |
-| Filter pushdown reaches PostgreSQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `filter_reaches_postgres` |
-
-`vs-adapter/pushdown-aggregation`
-
-| Scenario | Test Type | Test Location | Test Name |
-|----------|-----------|---------------|-----------|
-| Aggregation capabilities cover single-group and column grouping | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `aggregation_capabilities_match_per_dialect` |
-| PostgreSQL renders MIN and MAX over a character column with the C collation | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `min_max_reproduce_code_point_order` |
-| PostgreSQL renders a grouping key and a DISTINCT operand without a collation | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `grouping_and_distinct_render_uncollated` |
-| Delegated PostgreSQL grouping and DISTINCT over case-only variants return Exasol's groups | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `grouping_and_distinct_match_local_exasol_result` |
-| Select-list predicate over the grouped character column fails with a named error | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `grouped_character_predicate_fails_mysql_only` |
-| PostgreSQL delegates a select-list predicate over its grouped character column | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `grouped_character_predicate_delegates_on_postgres` |
-| Aggregate value that overflows its declared type fails rather than truncating | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `overflowing_aggregate_fails_named` |
-| Aggregation pushdown reaches PostgreSQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `aggregation_matches_local_exasol_result` |
-
-`vs-adapter/pushdown-join`
-
-| Scenario | Test Type | Test Location | Test Name |
-|----------|-----------|---------------|-----------|
-| Join capabilities cover inner and one-sided outer joins only | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `mysql_join_capabilities_are_exact` |
-| PostgreSQL join capabilities add the full outer join | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `postgres_join_capabilities_add_full_outer` |
-| PostgreSQL renders and executes a delegated full outer join | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `full_outer_join_matches_local_exasol_result` |
-| Each join type renders its counterpart | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `each_join_type_renders` |
-| Unsupported join type fails with a named error | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `unsupported_join_type_named_per_dialect` |
-| Inner join of two virtual tables renders one statement | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `inner_join_renders_one_statement` |
-| Outer join emits nulls for the unmatched side | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `outer_join_emits_nulls_for_unmatched_side` |
-| Join composes with a delegated filter and aggregation | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `join_composes_with_filter_and_grouping` |
-| Every joined table is aliased and every column is qualified | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `joined_tables_are_aliased_and_qualified` |
 
 `vs-adapter/result-ordering`
 
@@ -462,38 +551,160 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 | Handler failure surfaces to the querying session | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `handler_failure_names_the_driver_failure` |
 | Dropping a virtual schema releases no external resource | Integration | `crates/adbc-vs-adapter/tests/dispatch_test.rs` | `drop_releases_no_driver_library` |
 
-`driver-provisioning/driver-self-install`
+#### Technology — vs-adapter
+
+`vs-adapter/mysql-pushdown`
 
 | Scenario | Test Type | Test Location | Test Name |
 |----------|-----------|---------------|-----------|
-| Already-installed driver short-circuits the fetch | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `installed_driver_short_circuits_per_driver` |
-| Missing driver is fetched and installed | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `missing_driver_is_fetched_per_driver` |
-| Version range resolves to the highest published version satisfying it | Unit | `crates/adbc-vs-adapter/src/registry_index_tests.rs` | `range_resolves_to_highest_published_match` |
-| Range satisfied by no published version fails with a named error | Unit | `crates/adbc-vs-adapter/src/registry_index_tests.rs` | `unsatisfiable_range_names_driver_and_published_versions` |
-| Newer in-range version is installed beside an older installed one | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `newer_in_range_version_is_not_short_circuited` |
-| DRIVER_PATH skips self-install entirely | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `driver_path_skips_self_install_entirely` |
-| DRIVER_PATH naming no readable file fails without falling back | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `driver_path_missing_file_fails_without_fallback` |
-| Two drivers install side by side without collision | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `two_drivers_install_side_by_side` |
-| Archive manifest is checked against the compiled-in filename | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `manifest_filename_checked_per_driver` |
-| Unreachable registry names the offline fallback | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `offline_fallback_names_the_drivers_own_path` |
-| Missing platform package fails with a named error | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `missing_platform_names_driver_and_version` |
-| Release artifact bundles no driver binary | Integration | `crates/adbc-vs-adapter/tests/artifact_test.rs` | `release_artifact_bundles_no_driver_binary` |
+| Capability set advertises the fragments this dialect renders | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `mysql_capability_set_is_exact` |
+| Filter capabilities cover the predicates and literals this release renders | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `filter_capabilities_match_per_dialect` |
+| Aggregation capabilities cover single-group and column grouping | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `aggregation_capabilities_match_per_dialect` |
+| Join capabilities cover inner and one-sided outer joins only | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `mysql_join_capabilities_are_exact` |
+| Backtick in an identifier is escaped | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `backtick_is_doubled` |
+| String literal is rendered as a hex literal | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `string_literal_renders_as_hex`, `like_renders_pattern_and_escape` |
+| Temporal literals are rendered as typed literals | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `temporal_literals_render_typed` |
+| Projection pushdown reaches MySQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `projection_reaches_mysql` |
+| Filter pushdown reaches MySQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `filter_matches_local_exasol_result` |
+| Aggregation pushdown reaches MySQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `aggregation_matches_local_exasol_result` |
 
-`scan-udf/arrow-scan`
+`vs-adapter/mysql-collation`
 
 | Scenario | Test Type | Test Location | Test Name |
 |----------|-----------|---------------|-----------|
-| Scan connects using credentials resolved at run time | Unit | `crates/adbc-vs-scan/src/connection_tests.rs` | `credential_options_differ_per_driver` |
-| PostgreSQL connection string is built from the address and escapes every credential byte | Unit | `crates/adbc-vs-scan/src/connection_tests.rs` | `conninfo_escapes_every_credential_byte` |
-| PostgreSQL credential never appears in any surfaced text | Integration | `crates/adbc-vs-scan/tests/postgres_it_test.rs` | `credential_never_appears_in_surfaced_text` |
+| Character comparison reproduces Exasol's case and accent sensitivity | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `filter_matches_local_exasol_result` |
+| A LIKE operand, an IN comparison, and a select-list predicate carry the comparison collation | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `like_renders_pattern_and_escape`, `between_and_in_keep_operand_order`, `a_select_list_predicate_renders_where_the_query_groups_by_nothing` |
+| Grouped character columns carry the comparison collation in both the grouping list and the select list | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `grouped_character_column_carries_the_comparison_collation_in_both_clauses` |
+| Only a grouped character column carries the grouping collation | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `numeric_grouping_key_carries_no_collation`, `ungrouped_projection_carries_no_collation` |
+| A DISTINCT aggregate over a character column carries the comparison collation | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `distinct_character_operand_carries_the_comparison_collation` |
+| Delegated grouping and DISTINCT over case-only variants return Exasol's groups | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `grouping_over_character_variants_matches_local_exasol_result` |
+| MIN and MAX over a character column reproduce Exasol's code-point order | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `aggregation_matches_local_exasol_result` |
+| Select-list predicate over the grouped character column fails with a named error | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `grouped_character_predicate_fails_mysql_only` |
+| Select-list predicate shapes that stay delegated | Unit | `crates/adbc-vs-adapter/src/mysql_dialect_tests.rs` | `a_select_list_predicate_over_a_numeric_grouping_key_renders`, `a_select_list_predicate_over_an_aggregate_renders`, `a_select_list_predicate_renders_where_the_query_groups_by_nothing` |
+| Grouped-column select-list predicate fails before reaching MySQL | Integration | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `select_list_predicate_over_grouped_character_column_fails` |
+
+`vs-adapter/mysql-type-mapping`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Signed integer types map to DECIMAL with the matching digit count | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `signed_integers_map_to_decimal` |
+| DECIMAL preserves the source precision and scale | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `decimal_preserves_precision_and_scale` |
+| Character types preserve the declared length and use UTF8 | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `character_types_preserve_length` |
+| Character column of a non-utf8mb4 character set is unmapped | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `non_utf8mb4_character_columns_unmapped` |
+| Temporal and floating-point types map to their Exasol counterparts | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `temporal_and_double_map` |
+| Unsigned integer columns are unmapped | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `unsigned_integers_unmapped` |
+| Non-core MySQL types are unmapped | Unit | `crates/adbc-vs-adapter/src/mysql_type_mapping_tests.rs` | `non_core_types_unmapped` |
+| Source server without the required collations is rejected at creation | Unit | `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `mysql_collation_check_binds_mysql_only` |
+
+`vs-adapter/postgresql-pushdown`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Capability set advertises the fragments this dialect renders | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `postgres_capability_set_is_exact` |
+| Join capabilities add the full outer join | Unit | `crates/adbc-vs-adapter/src/capabilities_tests.rs` | `postgres_join_capabilities_add_full_outer` |
+| Double quote in an identifier is escaped | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `double_quote_in_identifier_is_doubled` |
+| String literal is rendered as an escape-string constant | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `string_literal_is_escape_string_constant` |
+| LIKE, IS NULL, BETWEEN, and IN render in their standard forms | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `standard_predicate_forms_render` |
+| Delegated full outer join is rendered and executed | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `full_outer_join_matches_local_exasol_result` |
+| Projection pushdown reaches PostgreSQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `projection_reaches_postgres` |
+| Filter pushdown reaches PostgreSQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `filter_reaches_postgres` |
+| Aggregation pushdown reaches PostgreSQL rather than Exasol | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `aggregation_matches_local_exasol_result` |
+
+`vs-adapter/postgresql-collation`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| An ordering comparison is collated and equality is left bare | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `collation_placement_matrix` |
+| Character comparison reproduces Exasol's case, accent, and code-point order | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `character_comparison_matches_local_exasol_result` |
+| MIN and MAX over a character column render the C collation | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `min_max_reproduce_code_point_order` |
+| A grouping key and a DISTINCT operand render without a collation | Unit | `crates/adbc-vs-adapter/src/postgres_dialect_tests.rs` | `grouping_and_distinct_render_uncollated` |
+| Delegated grouping and DISTINCT over case-only variants return Exasol's groups | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `grouping_and_distinct_match_local_exasol_result` |
+| A select-list predicate over the grouped character column is delegated | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `grouped_character_predicate_delegates_on_postgres` |
+
+`vs-adapter/postgresql-type-mapping`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Integer types map to DECIMAL with the matching digit count | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `integer_types_map_to_decimal` |
+| numeric preserves the source precision and scale | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `numeric_preserves_precision_and_scale` |
+| numeric without a declared precision is unmapped | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `unconstrained_numeric_is_unmapped` |
+| character varying preserves the declared length and uses UTF8 | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `character_varying_preserves_length` |
+| Character column of a nondeterministic collation is unmapped | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `nondeterministic_collation_is_unmapped` |
+| character is unmapped because it is blank-padded | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `bpchar_is_unmapped_for_padding` |
+| Temporal and floating-point types map to their Exasol counterparts | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `temporal_and_float_types_map` |
+| Non-core types are unmapped | Unit | `crates/adbc-vs-adapter/src/postgres_type_mapping_tests.rs` | `non_core_types_are_unmapped_named` |
+| Database whose encoding is not UTF8 is rejected at creation | Unit | `crates/adbc-vs-adapter/src/create_schema_tests.rs` | `non_utf8_encoding_is_rejected_named` |
+| Virtual schema exposes the public schema only | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `only_the_public_schema_is_exposed` |
+
+#### scan-udf
+
+`scan-udf/arrow-scan` (framework)
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Scan connects using credentials resolved at run time | Unit | `crates/adbc-vs-scan/src/connection_tests.rs` | `credentials_are_resolved_per_open_and_never_persisted` |
 | Provisioned driver loads inside the UDF sandbox | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `provisioned_driver_loads_in_udf_sandbox` |
 | Decimal width variation is normalized | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `decimal_width_variation_is_normalized` |
-| Non-finite PostgreSQL numeric fails with a named error | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `non_finite_numeric_fails_named` |
 | Timestamp unit variation is normalized | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `timestamp_unit_variation_is_normalized` |
 | Source failure surfaces the driver's own diagnosis | Integration | `crates/adbc-vs-scan/tests/postgres_it_test.rs` | `source_failure_surfaces_adbc_status` |
 | Missing driver library fails with a named error | Integration | `crates/adbc-vs-scan/tests/postgres_it_test.rs` | `missing_driver_library_names_path_and_driver` |
 | Scan streams every result batch to Exasol | Integration | `crates/adbc-vs-scan/tests/postgres_it_test.rs` | `scan_streams_every_batch` |
 | Declared BOOLEAN column emits every representation the driver returns | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `declared_boolean_accepts_bool_and_integer` |
+
+`scan-udf/mysql-scan` (technology)
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Credentials pass as separate driver options | Unit | `crates/adbc-vs-scan/src/connection_tests.rs` | `mysql_passes_credentials_as_separate_options` |
+| Connection string carries no credential | Unit | `crates/adbc-vs-scan/src/connection_tests.rs` | `mysql_connection_string_carries_no_credential` |
+
+`scan-udf/postgresql-scan` (technology)
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Connection string is built from the address and escapes every credential byte | Unit | `crates/adbc-vs-scan/src/connection_tests.rs` | `conninfo_escapes_every_credential_byte` |
+| Credential never appears in any surfaced text | Integration | `crates/adbc-vs-scan/tests/postgres_it_test.rs` | `credential_never_appears_in_surfaced_text` |
+| Adapter-side source error surfaces no credential | Integration | `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` | `postgres_source_error_surfaces_no_credential` |
+| A numeric arriving as a string is coerced into its declared DECIMAL | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `string_form_numeric_coerces_to_declared_decimal` |
+| Non-finite numeric fails with a named error | Unit | `crates/adbc-vs-scan/src/coerce_tests.rs` | `non_finite_numeric_fails_named` |
+
+#### driver-provisioning
+
+All three features are framework, with no technology sibling, per decisions `[25]` and `[26]`.
+
+`driver-provisioning/driver-self-install`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Missing driver is fetched and installed | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `missing_driver_is_fetched_per_driver` |
+| Two drivers install side by side without collision | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `two_drivers_install_side_by_side` |
+| Archive manifest is checked against the compiled-in filename | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `manifest_filename_checked_per_driver` |
+| Registry client always verifies the server certificate | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `registry_client_rejects_untrusted_certificate` |
+| BucketFS client accepts the cluster's own certificate | E2E | `crates/adbc-vs-adapter/tests/e2e_mysql_test.rs` | `bucketfs_put_accepts_self_signed_certificate` |
+| BucketFS write failure surfaces rather than being retried silently | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `bucketfs_write_failure_hides_credential` |
+| Locked BucketFS object is waited out rather than surfaced | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `locked_bucketfs_path_is_retried_until_the_lock_clears` |
+| Driver visibility wait is bounded | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `visibility_wait_times_out` |
+| Release artifact bundles no driver binary | Integration | `crates/adbc-vs-adapter/tests/artifact_test.rs` | `release_artifact_bundles_no_driver_binary` |
+
+The five transport and BucketFS rows carry forward from the library untouched by any delta, and their tests already exist under the names release 0.1 gave them. They are listed because the split moves the feature's other scenarios out from around them, and a coverage audit reads this table rather than the merged file. No task in this plan renames or rewrites those five tests.
+
+`driver-provisioning/driver-version-resolution`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| Version range resolves to the highest published version satisfying it | Unit | `crates/adbc-vs-adapter/src/registry_index_tests.rs` | `range_resolves_to_highest_published_match` |
+| Range satisfied by no published version fails with a named error | Unit | `crates/adbc-vs-adapter/src/registry_index_tests.rs` | `unsatisfiable_range_names_driver_and_published_versions` |
+| Missing platform package fails with a named error | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `missing_platform_names_driver_and_version` |
+| Already-installed driver short-circuits the fetch | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `installed_driver_short_circuits_per_driver` |
+| Newer in-range version is installed beside an older installed one | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `newer_in_range_version_is_not_short_circuited` |
+| Unreachable registry names the offline fallback | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `offline_fallback_names_the_drivers_own_path` |
+
+`driver-provisioning/driver-path-override`
+
+| Scenario | Test Type | Test Location | Test Name |
+|----------|-----------|---------------|-----------|
+| DRIVER_PATH skips self-install entirely | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `driver_path_skips_self_install_entirely` |
+| DRIVER_PATH naming no readable file fails without falling back | Integration | `crates/adbc-vs-adapter/tests/provisioning_test.rs` | `driver_path_missing_file_fails_without_fallback` |
 
 ### Manual Testing
 
@@ -502,19 +713,20 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 | driver-selection | `exapump sql --dsn "$EXASOL_DSN" "CREATE VIRTUAL SCHEMA pgvs USING ADBC_VS.ADBC_ADAPTER WITH DRIVER = 'snowflake' CONNECTION_NAME = 'PG_CONN' BUCKETFS_CONNECTION = 'BFS_CONN'"` | Fails naming `snowflake` and listing `mysql` and `postgresql` |
 | create-virtual-schema | `exapump sql --dsn "$EXASOL_DSN" "CREATE VIRTUAL SCHEMA pgvs USING ADBC_VS.ADBC_ADAPTER WITH DRIVER = 'postgresql' CONNECTION_NAME = 'PG_CONN' BUCKETFS_CONNECTION = 'BFS_CONN'"` | Succeeds; `SELECT * FROM SYS.EXA_ALL_VIRTUAL_TABLES WHERE TABLE_SCHEMA='PGVS'` lists the `public` tables |
 | driver-self-install | `exapump bfs ls --dsn "$BFS_DSN" --recursive /adbc-drivers/` | Lists `mysql/<version>/libadbc_driver_mysql.so` and `postgresql/<version>/libadbc_driver_postgresql.so`, each under its own driver and resolved-version segments |
-| driver-self-install | `exapump sql --dsn "$EXASOL_DSN" "SELECT ADAPTER_NOTES FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS WHERE SCHEMA_NAME='PGVS'"` | `driverVersion` reports the version the range resolved to, and `driverPath` carries the driver and version segments |
-| driver-self-install | `exapump sql --dsn "$EXASOL_DSN" "CREATE VIRTUAL SCHEMA pgvs2 USING ADBC_VS.ADBC_ADAPTER WITH DRIVER = 'postgresql' CONNECTION_NAME = 'PG_CONN' DRIVER_PATH = '/buckets/bfsdefault/default/custom/pg-driver.so'"` | Succeeds with no `BUCKETFS_CONNECTION` and no registry access; querying the schema loads the operator-supplied library |
-| driver-self-install | The same statement with `DRIVER_PATH` naming a path holding no file | Fails naming `DRIVER_PATH`, the path, and `postgresql`; does not fall back to the registry |
+| driver-version-resolution | `exapump sql --dsn "$EXASOL_DSN" "SELECT ADAPTER_NOTES FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS WHERE SCHEMA_NAME='PGVS'"` | `driverVersion` reports the version the range resolved to, and `driverPath` carries the driver and version segments |
+| driver-path-override | `exapump sql --dsn "$EXASOL_DSN" "CREATE VIRTUAL SCHEMA pgvs2 USING ADBC_VS.ADBC_ADAPTER WITH DRIVER = 'postgresql' CONNECTION_NAME = 'PG_CONN' DRIVER_PATH = '/buckets/bfsdefault/default/custom/pg-driver.so'"` | Succeeds with no `BUCKETFS_CONNECTION` and no registry access; querying the schema loads the operator-supplied library |
+| driver-path-override | The same statement with `DRIVER_PATH` naming a path holding no file | Fails naming `DRIVER_PATH`, the path, and `postgresql`; does not fall back to the registry |
 | pushdown-dialect | `exapump sql --dsn "$EXASOL_DSN" "SELECT PUSHDOWN_SQL FROM (EXPLAIN VIRTUAL SELECT * FROM pgvs.\"orders\" o FULL OUTER JOIN pgvs.\"customers\" c ON o.\"cid\" = c.\"id\")"`, then the same shape over the MySQL virtual schema | The PostgreSQL schema's generated statement carries `FULL OUTER JOIN`; the MySQL schema's carries no join, so its two table scans are pushed down separately |
-| pushdown-projection | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\", \"note\" FROM pgvs.\"orders\""` | Generated statement projects only `"id"` and `"note"`, every identifier double-quoted |
-| pushdown-filter | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\" FROM pgvs.\"orders\" WHERE \"note\" < 'm'"` | `WHERE` clause carries `COLLATE "C"` on the column operand and an `E'...'` literal |
-| pushdown-filter | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\" FROM pgvs.\"orders\" WHERE \"note\" = 'Widget'"` | `WHERE` clause carries no collation suffix |
-| pushdown-aggregation | `exapump sql --dsn "$EXASOL_DSN" "SELECT \"note\", COUNT(*) FROM pgvs.\"orders\" GROUP BY \"note\""` | One group per distinct value including case-only variants; generated `GROUP BY` carries no collation suffix |
-| pushdown-join | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT * FROM pgvs.\"orders\" o FULL OUTER JOIN pgvs.\"customers\" c ON o.\"cid\" = c.\"id\""` | Generated statement renders `FULL OUTER JOIN` |
+| postgresql-pushdown | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\", \"note\" FROM pgvs.\"orders\""` | Generated statement projects only `"id"` and `"note"`, every identifier double-quoted |
+| postgresql-collation | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\" FROM pgvs.\"orders\" WHERE \"note\" < 'm'"` | `WHERE` clause carries `COLLATE "C"` on the column operand and an `E'...'` literal |
+| postgresql-collation | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\" FROM pgvs.\"orders\" WHERE \"note\" = 'Widget'"` | `WHERE` clause carries no collation suffix |
+| postgresql-collation | `exapump sql --dsn "$EXASOL_DSN" "SELECT \"note\", COUNT(*) FROM pgvs.\"orders\" GROUP BY \"note\""` | One group per distinct value including case-only variants; generated `GROUP BY` carries no collation suffix |
+| postgresql-pushdown | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT * FROM pgvs.\"orders\" o FULL OUTER JOIN pgvs.\"customers\" c ON o.\"cid\" = c.\"id\""` | Generated statement renders `FULL OUTER JOIN` |
+| mysql-collation | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \`id\` FROM myvs.\`orders\` WHERE \`note\` = 'Widget'"` | `WHERE` clause carries MySQL's comparison collation suffix on the column operand, where the PostgreSQL step above carries none — the two technologies' collation rules read side by side |
 | result-ordering | `exapump sql --dsn "$EXASOL_DSN" "EXPLAIN VIRTUAL SELECT \"id\" FROM pgvs.\"orders\" ORDER BY \"id\" LIMIT 5"` | Generated statement carries no `ORDER BY`, `LIMIT`, or `OFFSET` |
-| type-mapping | `exapump sql --dsn "$EXASOL_DSN" "SELECT ADAPTER_NOTES FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS WHERE SCHEMA_NAME='PGVS'"` | `omitted` lists the `boolean`, `text`, `character`, `jsonb`, and unconstrained-`numeric` columns, each under `sourceType` with a reason |
-| arrow-scan | `exapump sql --dsn "$EXASOL_DSN" "SELECT \"amount\" FROM pgvs.\"orders\""` | Returns the seeded `numeric(12,4)` values with scale intact, having arrived from the driver as strings |
-| arrow-scan | Point `PG_CONN` at a wrong password, then `exapump sql --dsn "$EXASOL_DSN" "SELECT * FROM pgvs.\"orders\""` | Fails naming the host and database, with the password absent from the message |
+| postgresql-type-mapping | `exapump sql --dsn "$EXASOL_DSN" "SELECT ADAPTER_NOTES FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS WHERE SCHEMA_NAME='PGVS'"` | `omitted` lists the `boolean`, `text`, `character`, `jsonb`, and unconstrained-`numeric` columns, each under `sourceType` with a reason |
+| postgresql-scan | `exapump sql --dsn "$EXASOL_DSN" "SELECT \"amount\" FROM pgvs.\"orders\""` | Returns the seeded `numeric(12,4)` values with scale intact, having arrived from the driver as strings |
+| postgresql-scan | Point `PG_CONN` at a wrong password, then `exapump sql --dsn "$EXASOL_DSN" "SELECT * FROM pgvs.\"orders\""` | Fails naming the host and database, with the password absent from the message |
 | adapter-request-dispatch | `exapump sql --dsn "$EXASOL_DSN" "ALTER VIRTUAL SCHEMA pgvs REFRESH"` | Succeeds and re-discovers through the PostgreSQL metadata source |
 
 ### Checklist
@@ -531,7 +743,22 @@ The foundational work that both MySQL and PostgreSQL build on — the driver ide
 | Lint | `make lint` | 0 warnings |
 | Format | `make fmt-check` | No changes |
 | Spec validation | `speq plan validate add-postgresql-support` and `speq feature validate` | Pass |
+| Recorded Backgrounds | § Recording notes' post-record check, under `bash`, after `/speq:record` merges | `ok` for all eleven features; exit 0. A `FAIL` means the merge dropped that feature's Background or description line and § Recording notes' manual step was skipped |
 
-Recording this plan trips `/speq:spec-merge`'s more-than-10-scenarios-per-spec threshold on `vs-adapter/pushdown-aggregation`, `vs-adapter/type-mapping`, `vs-adapter/create-virtual-schema`, `vs-adapter/driver-selection`, and `driver-provisioning/driver-self-install`, so `/speq:record` halts and returns for a decision before archiving. This revision added the last two to the list: `driver-selection` gained three TOML-mechanism scenarios, and `driver-self-install` gained six for range resolution and `DRIVER_PATH` while losing its checksum-mismatch scenario. Whether to split those specs is a user decision at record time, not an implementation task in this plan.
+### Library organization after recording
 
-**Every open question this plan escalated is now answered.** Decision `[22]` settles the integrity model — TLS only, uniformly for both drivers — so no task is blocked on a pending decision and the plan is ready to implement in full. Three measurement gates remain, as designed: gates 2.1, 2.2b, and 2.3 can each falsify a design assumption, and each names the re-planning its failure forces.
+Recording this plan leaves the library at 22 features. `/speq:spec-merge`'s feature-count threshold still trips on `vs-adapter`, and a human has accepted that count as the standing shape rather than a defect to fix. Decisions `[25]` and `[26]` record both halves; nothing here is left for `/speq:record` to escalate. Recording does owe one manual step, unrelated to these thresholds: see § Recording notes at the top of this section.
+
+| Domain | Features | Threshold | Over-10 spec files |
+|--------|----------|-----------|--------------------|
+| `vs-adapter` | 16 | 8 | `pushdown-dialect` 13, `pushdown-aggregation` 13, `create-virtual-schema` 14, `driver-selection` 14 |
+| `scan-udf` | 3 | 8 | `arrow-scan` 13 |
+| `driver-provisioning` | 3 | 8 | none |
+
+The two thresholds were **already jointly unsatisfiable for `vs-adapter` before this plan**: it held 9 features and roughly 96 scenarios, and 96 scenarios need at least ten files at ten scenarios each. Only a new top-level domain resolves that, and this repo's spec governance forbids one. The restructuring improves both numbers rather than worsening them — `pushdown-aggregation` drops from 23 scenarios to 13, and `type-mapping` from a merged 19 to 5 — but it cannot bring `vs-adapter` under 8 features while also keeping files under 10 scenarios.
+
+**`vs-adapter`'s 16 features are the accepted shape, not a backlog item.** A human read the arithmetic above and chose to accept the count rather than revisit the no-new-domain rule. The count is the direct, intended result of separating framework from technology, so re-consolidating features to satisfy the generic guideline would undo exactly what this plan was instructed to do. `CLAUDE.md`'s Spec governance section now says so, so a later planner or auditor reads the acceptance rather than re-deriving the question.
+
+**`driver-self-install`'s 17 scenarios split three ways**, on the same human decision, along the framework-internal axis decision `[25]` predicted: `driver-self-install` at 9, `driver-version-resolution` at 6, `driver-path-override` at 2. That clears the ten-scenario threshold for the whole domain. Four `vs-adapter` files and one `scan-udf` file stay above it. Each is a single coherent feature whose scenario count reflects how much behavior it owns, and none was raised as a candidate for a further split.
+
+**Every open question this plan escalated is now answered.** Decision `[22]` settles the integrity model — TLS only, uniformly for both drivers. Decision `[26]` settles the library's organization. No task is blocked on a pending decision and the plan is ready to implement in full. Three measurement gates remain, as designed: gates 2.1, 2.2b, and 2.3 can each falsify a design assumption, and each names the re-planning its failure forces.
