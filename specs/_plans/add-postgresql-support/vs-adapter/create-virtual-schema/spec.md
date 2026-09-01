@@ -5,21 +5,17 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 ## Background
 
 <!-- DELTA:CHANGED -->
-- The statement takes three required properties — `DRIVER`, `CONNECTION_NAME`, and `BUCKETFS_CONNECTION` — and one optional property, `DRIVER_PATH`. This release accepts `mysql` and `postgresql` for `DRIVER`; `vs-adapter/driver-selection` owns the accepted set, the case-insensitive match, and the error that names every accepted value. The property is `CONNECTION_NAME` rather than `CONNECTION` because Exasol's parser reserves `CONNECTION` inside a `WITH` clause and rejects a quoted property name, so a virtual schema carrying that property name can never be created.
+- The statement takes three required properties — `DRIVER`, `CONNECTION_NAME`, and `BUCKETFS_CONNECTION` — and one optional property, `DRIVER_PATH`. `vs-adapter/driver-selection` owns the accepted `DRIVER` set, the case-insensitive match, and the error that names every accepted value. The property is `CONNECTION_NAME` rather than `CONNECTION` because Exasol's parser reserves `CONNECTION` inside a `WITH` clause and rejects a quoted property name, so a virtual schema carrying that property name can never be created.
 - `DRIVER_PATH` names a BucketFS path holding the ADBC driver shared library for the named driver. When it is set, the adapter uses exactly that file and skips driver self-install entirely, per `driver-provisioning/driver-self-install`. It applies to every driver technology rather than to one. It exists because the adapter cannot derive the answer: only the operator of an air-gapped cluster knows where the driver was placed. That is the test a property has to pass here — the source namespace and the identifier case stay derived precisely because the adapter *can* derive them, and no property selects a driver version because the version range supersedes the question.
 - `BUCKETFS_CONNECTION` is required only when the adapter may need to write to BucketFS. When `DRIVER_PATH` is set no write happens, so the property becomes optional; the driver is read through the read-only mount every UDF already sees.
 - `DRIVER_PATH` is supplied once, at `CREATE`. The adapter records it in `adapterNotes`, so `refresh` reuses the recorded value without the property being supplied again, and `setProperties` may change it.
-- `CONNECTION_NAME` names an Exasol `CONNECTION` object whose address is the source's own driver URI — `mysql://host:port/database` or `postgresql://host:port/database` — with the source user and password in the object's user and password fields. The adapter reads it through the UDF SDK's connection accessor, so no credential is ever written into SQL text, into `adapterNotes`, or into a log line. The address's scheme MUST match the named driver, per `vs-adapter/driver-selection`.
+- `CONNECTION_NAME` names an Exasol `CONNECTION` object whose address is the source's own driver URI, `<scheme>://host:port/database`, with the source user and password in the object's user and password fields. The adapter reads it through the UDF SDK's connection accessor, so no credential is ever written into SQL text, into `adapterNotes`, or into a log line. The address's scheme MUST match the named driver, per `vs-adapter/driver-selection`.
 - `BUCKETFS_CONNECTION` names an Exasol `CONNECTION` object holding the BucketFS write endpoint and its write credentials, which the driver self-install needs.
-- The source namespace the virtual schema exposes is derived, not configured, and what it is derived from differs by driver because the two sources nest their objects differently. For MySQL it is the database in the address's path component, which is also MySQL's SQL qualifier and its `information_schema.tables.table_schema` value. For PostgreSQL the address's path component names a database, which is not a SQL qualifier; the exposed namespace is the `public` schema, which is both PostgreSQL's SQL qualifier and its `information_schema` filter value. Both drivers therefore need the address to carry a database path component, and both record one namespace string in `adapterNotes` under the field an earlier release already wrote, so notes written before this release parse unchanged.
-- Exposing only PostgreSQL's `public` schema is this release's boundary. A PostgreSQL database holds many schemas, and a virtual schema per source schema is the shape that needs no new property; naming another schema is future work rather than an omission.
-- Source identifiers keep their original case, and quoting is what preserves it. Exasol folds unquoted identifiers to upper case and PostgreSQL folds them to lower case, so a source name reaches the generated statement quoted for either driver and is returned to Exasol character for character. No case-conversion property is offered in this release.
-- Metadata discovery reads the source's `information_schema` over the ADBC connection, for both drivers, because it is the only source that reports exact character lengths and exact `DECIMAL` precision and scale — ADBC's own `GetTableSchema` reports a character column as Arrow `Utf8` with no length. The two drivers read different column names from it, so one metadata source exists per driver and each maps its own catalog rows, per `vs-adapter/type-mapping`. Both expose `BASE TABLE` and `VIEW` entries.
+- The source namespace the virtual schema exposes is derived, not configured, and what it is derived from is a per-technology fact stated by that technology's own feature — `vs-adapter/mysql-type-mapping` for MySQL, `vs-adapter/postgresql-type-mapping` for PostgreSQL — because the two sources nest their objects differently. What is framework is the shape: every driver needs the address to carry a database path component, and every driver records one namespace string in `adapterNotes` under the field an earlier release already wrote, so notes written before this release parse unchanged.
+- Source identifiers keep their original case, and quoting is what preserves it. Exasol folds unquoted identifiers to upper case and a source may fold them to its own case, so a source name reaches the generated statement quoted for every driver and is returned to Exasol character for character. No case-conversion property is offered in this release.
+- Metadata discovery reads the source's `information_schema` over the ADBC connection, for every driver, because it is the only source that reports exact character lengths and exact `DECIMAL` precision and scale — ADBC's own `GetTableSchema` reports a character column as Arrow `Utf8` with no length. One metadata source exists per driver, each reading its own catalog's column names and mapping its own rows, per `vs-adapter/type-mapping` and that driver's own mapping feature. Every driver exposes `BASE TABLE` and `VIEW` entries.
 - Exasol 2025.2.1 discards a `schemaMetadata.properties` object returned by an adapter. State the adapter needs back at pushdown time therefore travels in `schemaMetadata.adapterNotes` as a stringified JSON object, which Exasol persists and returns. It carries the driver identity every later request resolves its dialect from.
-- Every source has preconditions its dialect's rendering depends on, and the check is per driver because the requirement is. The requirement is stated by the dialect that renders it rather than by a second list, and it is verified by the metadata source, which is the module that already speaks the source's SQL. Both drivers run their check before any table is discovered, and on every request that resolves the source `CONNECTION` — `refresh` and `setProperties` as well as `createVirtualSchema` — because `setProperties` can point an existing virtual schema at a different server and `refresh` re-discovers against whatever the connection resolves to now.
-- MySQL's precondition is two named collations, `utf8mb4_0900_as_cs` on every character comparison operand and `utf8mb4_0900_bin` on a character operand of `MIN` or `MAX`. MySQL added the UCA 9.0.0 `utf8mb4_0900_*` collations in 8.0.1 and `utf8mb4_0900_bin` in 8.0.17, so 8.0.17 is the source-server floor MySQL requires. MariaDB implements none of the `utf8mb4_0900_*` collations and rejects one with error 1273, `Unknown collation`. `DRIVER = 'mysql'` reaches whatever endpoint the resolved `adbc-drivers/mysql` driver connects to, and that driver's own published matrix names MariaDB, so a server missing a required collation is reachable and every delegated character predicate against it would fail at query time rather than at creation time.
-- PostgreSQL's precondition is the database encoding, and it is one check rather than two because PostgreSQL declares an encoding per database where MySQL declares a character set per column. The mapping produces Exasol `VARCHAR` with character set `UTF8`, and the ordering collation the PostgreSQL dialect renders for `MIN` and `MAX` reproduces Exasol's code-point order only while the server compares UTF-8 bytes, so a database of another encoding is refused at creation.
-- PostgreSQL needs no server-version floor from the rendering, unlike MySQL. The collation the PostgreSQL dialect renders for `MIN` and `MAX` is a built-in collation present in every PostgreSQL cluster rather than one a release added, so no version check can be justified by what the dialect renders. A floor the ADBC driver itself imposes surfaces as the driver's own connection error, and the adapter does not restate it.
+- Every source has preconditions its dialect's rendering depends on, and which precondition a technology has is stated by that technology's own feature: `vs-adapter/mysql-type-mapping` states MySQL's required collations, `vs-adapter/postgresql-type-mapping` states PostgreSQL's database encoding. What is framework is when the check runs and what it may not do. It runs before any table is discovered, and on every request that resolves the source `CONNECTION` — `refresh` and `setProperties` as well as `createVirtualSchema` — because `setProperties` can point an existing virtual schema at a different server and `refresh` re-discovers against whatever the connection resolves to now. Each requirement is stated by the dialect that renders it rather than by a second list, and executed by the metadata source, which is the module that already speaks the source's SQL. No check runs for a driver whose dialect does not render the thing it requires.
 <!-- /DELTA:CHANGED -->
 
 ## Scenarios
@@ -42,7 +38,7 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 * *WHEN* the virtual schema is created
 * *THEN* the returned table and column names MUST match the source names character for character, including case
 * *AND* the adapter MUST NOT fold any identifier to upper case
-* *AND* a mixed-case PostgreSQL table name MUST be returned with its case intact, because PostgreSQL preserves the case of a quoted identifier and the adapter quotes every one
+* *AND* a mixed-case source table name MUST be returned with its case intact, because the adapter quotes every identifier it renders
 <!-- /DELTA:CHANGED -->
 
 <!-- DELTA:CHANGED -->
@@ -77,36 +73,13 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 <!-- /DELTA:CHANGED -->
 
 <!-- DELTA:NEW -->
-### Scenario: PostgreSQL driver value is accepted
+### Scenario: Every supported driver value creates a virtual schema
 
-* *GIVEN* a `CREATE VIRTUAL SCHEMA` statement setting `DRIVER` to `postgresql` against a reachable PostgreSQL database
-* *WHEN* the adapter handles the request
-* *THEN* the statement MUST succeed
-* *AND* the returned `schemaMetadata` MUST list the tables of the source's `public` schema
-* *AND* `adapterNotes` MUST record the driver as `postgresql`
-* *AND* the value `PostgreSQL` in any letter case MUST be accepted identically
-<!-- /DELTA:NEW -->
-
-<!-- DELTA:NEW -->
-### Scenario: PostgreSQL virtual schema exposes the public schema only
-
-* *GIVEN* a PostgreSQL database holding one table in `public` and one table in a second schema
-* *WHEN* the virtual schema is created
-* *THEN* the returned `schemaMetadata` MUST list the `public` table
-* *AND* it MUST NOT list the table of the second schema
-* *AND* `adapterNotes` MUST record `public` as the source namespace
-* *AND* the generated pushdown statement MUST qualify a table with that namespace rather than with the database the connection address names
-<!-- /DELTA:NEW -->
-
-<!-- DELTA:NEW -->
-### Scenario: PostgreSQL database whose encoding is not UTF8 is rejected at creation
-
-* *GIVEN* a reachable PostgreSQL database whose server encoding is not `UTF8`
-* *WHEN* `CREATE VIRTUAL SCHEMA` runs against it with `DRIVER = 'postgresql'`
-* *THEN* the adapter MUST return an error
-* *AND* the error message MUST name the encoding the database reported and `UTF8` as the encoding this release requires
-* *AND* the adapter MUST NOT create the virtual schema, because the mapping declares every character column `UTF8` and the ordering collation the dialect renders reproduces Exasol's code-point order only over UTF-8 bytes
-* *AND* the check MUST run before any table is discovered, and on every request that resolves the source `CONNECTION` — `refresh` and `setProperties` as well as `createVirtualSchema`
+* *GIVEN* a reachable source database for each driver value this release supports, each addressed by an Exasol `CONNECTION` carrying that driver's own URI scheme
+* *WHEN* `CREATE VIRTUAL SCHEMA` runs once per supported driver value
+* *THEN* every statement MUST succeed, and each returned `schemaMetadata` MUST list the tables of that source's namespace
+* *AND* each virtual schema's `adapterNotes` MUST record its driver in the canonical lower-case spelling, whatever letter case the statement used
+* *AND* the driver values MUST be enumerated from the supported set rather than listed one by one, so a release adding a driver extends this coverage without editing it
 <!-- /DELTA:NEW -->
 
 <!-- DELTA:NEW -->
@@ -184,18 +157,18 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 * *AND* the adapter MUST NOT return an error
 <!-- /DELTA:CHANGED -->
 
-<!-- DELTA:CHANGED -->
+<!-- DELTA:REMOVED -->
 ### Scenario: Source server without the required collations is rejected at creation
 
-* *GIVEN* a reachable MySQL server whose `information_schema.COLLATIONS` omits `utf8mb4_0900_bin`, or omits `utf8mb4_0900_as_cs`, as MariaDB and every MySQL older than 8.0.17 do
-* *WHEN* `CREATE VIRTUAL SCHEMA` runs against it with `DRIVER = 'mysql'`
+* *GIVEN* a reachable source server whose `information_schema.COLLATIONS` omits `utf8mb4_0900_bin`, or omits `utf8mb4_0900_as_cs`, as MariaDB and every MySQL older than 8.0.17 do
+* *WHEN* `CREATE VIRTUAL SCHEMA` runs against it
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST name whichever of the two collations it did not find, the server version string the source reported, and `8.0.17` as the minimum MySQL version this release supports
 * *AND* the adapter MUST NOT create the virtual schema, because its advertised capabilities would make Exasol delegate a character fragment the source cannot execute
 * *AND* a server listing both collations MUST be accepted, and MUST NOT be rejected on its version string alone, so that a fork reporting an unexpected version but supplying the collations still works
-* *AND* the check MUST refuse the source before any table is discovered, MUST run on `refresh` and `setProperties` as well as `createVirtualSchema`, and MUST require the collation names the MySQL dialect renders rather than a second list of its own
-* *AND* the check MUST NOT run for a PostgreSQL source, because the collations it names are MySQL's and the requirement is stated by the dialect that renders them
-<!-- /DELTA:CHANGED -->
+* *AND* every request that resolves the source `CONNECTION` MUST perform the check — `refresh` and `setProperties` as well as `createVirtualSchema` — because `setProperties` can point an existing virtual schema at a different server and `refresh` re-discovers against whatever the connection resolves to now
+* *AND* the check MUST refuse the source before any table is discovered from it, and the collation names it requires MUST be the ones the dialect renders rather than a second list of its own
+<!-- /DELTA:REMOVED -->
 
 <!-- DELTA:CHANGED -->
 ### Scenario: Unreachable source fails creation with a diagnosable message
@@ -206,14 +179,3 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 * *AND* the error surfaced to the querying session MUST name the address it could not reach
 * *AND* the adapter MUST NOT create the virtual schema
 <!-- /DELTA:CHANGED -->
-
-<!-- DELTA:NEW -->
-### Scenario: PostgreSQL source error surfaces no credential
-
-* *GIVEN* an Exasol `CONNECTION` addressing a PostgreSQL database, whose password field holds a value
-* *WHEN* `createVirtualSchema`, `refresh`, or `setProperties` fails against that source, once with a wrong password and once against a host and port nothing listens on
-* *THEN* every error surfaced to the querying session MUST NOT contain the source password, in any encoding or escaping
-* *AND* it MUST NOT contain the libpq connection string the adapter built, because that string carries the password verbatim
-* *AND* it MUST still name the host and the database it addressed, so the failure stays diagnosable
-* *AND* the redaction MUST apply to the subject the adapter names as well as to text the driver or libpq produced, and MUST hold for every caller of the shared connection-open path rather than for the scan alone, because the adapter opens the source connection through that same path
-<!-- /DELTA:NEW -->
