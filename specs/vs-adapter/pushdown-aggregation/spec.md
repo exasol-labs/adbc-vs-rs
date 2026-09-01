@@ -26,15 +26,6 @@ Delegates a single-group or `GROUP BY` aggregation to the source, declaring for 
 
 ## Scenarios
 
-### Scenario: Aggregation capabilities cover single-group and column grouping
-
-* *GIVEN* a virtual schema backed by MySQL
-* *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, and `SELECTLIST_EXPRESSIONS`, without which Exasol delegates no aggregate at all
-* *AND* it MUST contain `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT`, `FN_AGG_MIN`, and `FN_AGG_MAX`, which are the aggregates this release delegates
-* *AND* it MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, or `AGGREGATE_HAVING`
-* *AND* it MUST NOT contain `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT`, `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, or any other `FN_AGG_` capability the dialect does not render: no rendering of `AVG` reproduces the value Exasol's own `AVG` returns, and no rendering of `SUM` over a `DOUBLE` column does either. The two `SUM` capabilities MUST be withheld whole rather than advertised behind a render-time operand-type check, because a capability is advertised once per session and Exasol does not compute a delegated fragment itself after the adapter errors
-
 ### Scenario: Request carrying a having element fails rather than dropping it
 
 * *GIVEN* a `pushdown` request carrying a `having` element, which Exasol sends only when `AGGREGATE_HAVING` was advertised
@@ -59,39 +50,6 @@ Delegates a single-group or `GROUP BY` aggregation to the source, declaring for 
 * *AND* the select list MUST render in the order the `selectList` gives it, which need not match the `groupBy` order
 * *AND* the `EMITS` clause MUST declare one positionally named column per select-list entry
 * *AND* this requirement MUST be verified by a unit test over a constructed request rather than end to end, because this release withholds `AGGREGATE_GROUP_BY_TUPLE` and Exasol therefore sends no `groupBy` naming more than one column
-
-### Scenario: Grouped character columns carry the comparison collation in both the grouping list and the select list
-
-* *GIVEN* a `pushdown` request whose `aggregationType` is `group_by`, whose `groupBy` names one character column and one numeric column, and whose select list projects both grouping columns beside a `MIN` over the same character column
-* *WHEN* the dialect renders the statement
-* *THEN* the character grouping column MUST carry `COLLATE utf8mb4_0900_as_cs` in the `GROUP BY` clause
-* *AND* the same suffix MUST appear on that column's bare select-list occurrence, because MySQL rejects the statement with error 1055 under `ONLY_FULL_GROUP_BY` when the two occurrences carry different collations
-* *AND* the `MIN` over the character column MUST keep `COLLATE utf8mb4_0900_bin`, because an aggregate is not subject to `ONLY_FULL_GROUP_BY` and the value `MIN` returns is chosen by order rather than by equality
-
-### Scenario: Only a grouped character column carries the grouping collation
-
-* *GIVEN* a `pushdown` request whose `groupBy` names a numeric column, and a second request carrying no `aggregationType` whose select list projects a character column
-* *WHEN* the dialect renders each statement
-* *THEN* the numeric grouping column MUST render with no collation suffix in the `GROUP BY` clause and none in the select list
-* *AND* the character column of the second request MUST render with no collation suffix, so a projection-only statement is byte-identical to what this release renders before the grouping rule exists
-* *AND* the collation MUST therefore read off both the operand's declared type and whether the query groups by that column, never off the type alone
-
-### Scenario: A DISTINCT aggregate over a character column carries the comparison collation
-
-* *GIVEN* a `function_aggregate` whose `distinct` field is true over a character column, the shape `COUNT(DISTINCT "name")` arrives in
-* *WHEN* the dialect renders it
-* *THEN* the operand MUST carry `COLLATE utf8mb4_0900_as_cs`, because `DISTINCT` reduces values by equality and MySQL's default collation equates values Exasol keeps apart
-* *AND* the same aggregate carrying no `distinct` field MUST render its operand with no collation suffix, because `COUNT` over a character column reads neither equality nor order
-* *AND* a character operand of `MIN` or `MAX` MUST carry `COLLATE utf8mb4_0900_bin` whatever its `distinct` field holds, because the value those two return is chosen by order
-
-### Scenario: Delegated grouping and DISTINCT over case-only variants return Exasol's groups
-
-* *GIVEN* a virtual table and a local Exasol table holding identical character values, two of which differ only by case and two only by an accent
-* *WHEN* the same `GROUP BY` over that column, and the same `COUNT(DISTINCT)` over it, are run over each
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement whose `GROUP BY` key and whose projected grouping column both carry `COLLATE utf8mb4_0900_as_cs`
-* *AND* the virtual `GROUP BY` MUST return exactly the groups the local query returns, so no two values Exasol keeps apart are collapsed into one group
-* *AND* the virtual `COUNT(DISTINCT)` MUST return the value the local query returns
-* *AND* the query MUST execute at the source rather than failing with MySQL error 1055
 
 ### Scenario: Each aggregate declares the type the request supplies for it
 
@@ -131,15 +89,6 @@ Delegates a single-group or `GROUP BY` aggregation to the source, declaring for 
 * *THEN* the rendered aggregate MUST carry `DISTINCT` before its argument
 * *AND* a `function_aggregate` carrying no `distinct` field MUST render without `DISTINCT`
 
-### Scenario: MIN and MAX over a character column reproduce Exasol's code-point order
-
-* *GIVEN* a MySQL `VARCHAR` column of collation `utf8mb4_0900_ai_ci` holding the values `B`, `a`, and `C`
-* *WHEN* Exasol pushes down `MIN` and `MAX` over that column
-* *THEN* the rendered operand MUST carry `COLLATE utf8mb4_0900_bin`
-* *AND* the query MUST return `B` for `MIN` and `a` for `MAX`, matching what Exasol returns for the same aggregate over the same values
-* *AND* `MIN` over a column holding two values that differ only by a trailing space MUST return the value Exasol returns for the same aggregate over the same values, so the collation MUST NOT be one that pads
-* *AND* a numeric or temporal operand MUST render without a collation suffix
-
 ### Scenario: Aggregate function name case does not change the rendered statement
 
 * *GIVEN* two `pushdown` requests differing only in the case of their `function_aggregate` names, one carrying `min` and one carrying `MIN`
@@ -155,41 +104,15 @@ Delegates a single-group or `GROUP BY` aggregation to the source, declaring for 
 * *THEN* the generated statement MUST project the predicate over the rendered aggregate
 * *AND* the `EMITS` clause MUST declare that column `BOOLEAN`
 * *AND* the aggregate MUST be rendered by the same aggregate renderer a bare aggregate entry uses
-* *AND* a character-typed aggregate operand of that predicate MUST carry `COLLATE utf8mb4_0900_as_cs`, as a character column operand does, so `MIN("name") = 'x'` compares the way Exasol compares
-
-### Scenario: Select-list predicate over the grouped character column fails with a named error
-
-* *GIVEN* a `pushdown` request whose `aggregationType` is `group_by`, whose `groupBy` names one character column, and whose select list carries a predicate reading that same column outside any aggregate
-* *WHEN* the dialect renders the statement
-* *THEN* the dialect MUST return an error naming that column
-* *AND* the dialect MUST NOT emit a MySQL statement, because MySQL rejects every rendering of this shape with error 1055 under `ONLY_FULL_GROUP_BY` whatever collation the operand carries
-* *AND* the same MUST hold for each of the five measured predicate kinds `predicate_less`, `predicate_is_null`, `predicate_like`, `predicate_in_constlist`, and `predicate_between`
-* *AND* the same MUST hold for a request whose select list does not project the grouping column at all, because the grouping key is still a collated expression the predicate reads a sub-expression of
-
-### Scenario: Select-list predicate shapes that stay delegated
-
-* *GIVEN* three `pushdown` requests each carrying a select-list predicate: one whose `groupBy` names a numeric column that the predicate reads, one whose `groupBy` names a character column that the predicate reads only through a `MIN` over it, and one carrying no `group_by` aggregation whose predicate reads a character column
-* *WHEN* the dialect renders each
-* *THEN* each MUST produce a MySQL statement rather than an error
-* *AND* the predicate over the `MIN` MUST carry `COLLATE utf8mb4_0900_as_cs` on the aggregate and `COLLATE utf8mb4_0900_bin` on the aggregate's own argument, the composition measured valid on MySQL 8.4 beside a collated grouping key
-* *AND* the numeric grouping column MUST carry no collation suffix in either its `GROUP BY` occurrence or its predicate occurrence
-* *AND* a predicate over `COUNT(*)` MUST carry no collation suffix at all
-
-### Scenario: Grouped-column select-list predicate fails before reaching MySQL
-
-* *GIVEN* a virtual table whose character column holds values differing only by case and only by accent
-* *WHEN* Exasol runs a `SELECT` projecting a comparison over that column while grouping by it
-* *THEN* the query MUST fail with an error naming that column
-* *AND* the error MUST come from the adapter rather than from MySQL, so no generated statement reaches the source
-* *AND* the same query projecting a comparison over `COUNT(*)` instead MUST succeed and MUST return the values the local Exasol mirror returns
+* *AND* a character-typed aggregate operand of that predicate MUST carry whatever suffix its dialect renders for an equality operand, so `MIN("name") = 'x'` compares the way Exasol compares
 
 ### Scenario: AVG and SUM are computed by Exasol rather than delegated
 
-* *GIVEN* a virtual schema backed by MySQL, a query averaging a mapped numeric column, and a query summing one
+* *GIVEN* a virtual schema, a query averaging a mapped numeric column, and a query summing one, for each driver this release supports
 * *WHEN* Exasol plans each query
-* *THEN* each generated statement MUST carry no `AVG` and no `SUM`, because neither function's capabilities are advertised and Exasol withdraws an aggregation it cannot delegate whole
+* *THEN* each generated statement MUST carry no `AVG` and no `SUM`, because no dialect advertises either function's capabilities and Exasol withdraws an aggregation it cannot delegate whole
 * *AND* each query MUST return the value Exasol's own `AVG` or `SUM` returns, so withholding the four capabilities MUST change no answer an operator reads, for any operand type
-* *AND* a `SUM` over a `DOUBLE` column MUST return that same value rather than an adapter error, because the capability is withheld rather than advertised and refused at render time
+* *AND* a `SUM` over a floating-point column MUST return that same value rather than an adapter error, because the capability is withheld rather than advertised and refused at render time
 * *AND* a `pushdown` request nonetheless carrying an `AVG` or a `SUM` MUST fail with an error naming that function, so the withheld capabilities and the renderer cannot disagree
 
 ### Scenario: Unrenderable aggregate function fails with a named error
@@ -202,16 +125,8 @@ Delegates a single-group or `GROUP BY` aggregation to the source, declaring for 
 
 ### Scenario: Aggregate value that overflows its declared type fails rather than truncating
 
-* *GIVEN* a delegated aggregate whose MySQL result exceeds the precision the adapter declared for it
+* *GIVEN* a delegated aggregate whose source result exceeds the precision the adapter declared for it
 * *WHEN* the scan coerces that value to the declared Exasol type
 * *THEN* the scan MUST fail with an error naming the declared type and the value that did not fit
 * *AND* the scan MUST NOT emit a truncated or rounded value
-
-### Scenario: Aggregation pushdown reaches MySQL rather than Exasol
-
-* *GIVEN* a virtual schema over a MySQL table holding rows across two groups
-* *WHEN* Exasol runs a `SELECT` grouping by one column and counting another
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement carrying the aggregate and the `GROUP BY` clause
-* *AND* the query MUST return one row per group with the correct count
-* *AND* the returned values MUST equal what Exasol returns for the same aggregation executed locally over the same data, unqualified: `COUNT`, `MIN`, and `MAX` are the aggregates this release delegates and each is exact over every operand type, `DOUBLE` included, because none of them sums. No aggregate whose value depends on summation order is delegated at all
-* *AND* the same query grouping by two columns MUST produce a generated statement carrying no `GROUP BY` clause and MUST still return the correct rows, because Exasol withdraws that aggregation and groups it itself
+* *AND* the same MUST hold when the source returns the value as a decimal, as an integer, or as a string, because the PostgreSQL driver returns every `numeric` as a string and a `COUNT` as a 64-bit integer

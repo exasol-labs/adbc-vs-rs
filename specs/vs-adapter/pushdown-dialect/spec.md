@@ -30,25 +30,16 @@ Separates the query fragment Exasol delegates from the target dialect's SQL text
 
 ### Scenario: Every advertised capability has a rendering path
 
-* *GIVEN* the capability set the adapter advertises
-* *WHEN* each capability in that set is rendered through the MySQL dialect against a request fragment that exercises it
-* *THEN* every capability MUST produce a MySQL statement
-* *AND* no capability MUST reach a fallback that drops the fragment, ignores it, or returns the request unchanged
-* *AND* the test MUST be read as proving that each advertised capability has one rendering path, not that every composition of two capabilities renders: a select-list predicate over a collated `GROUP BY` key is the one composed shape the dialect rejects, so that rule needs its own test in the feature that owns it
-* *AND* an aggregate this release cannot render for every operand type its capability would admit MUST be absent from the set the test reads, rather than present with a render-time operand-type check, so the test's per-capability arms need no per-operand-type variants
-
-### Scenario: Capability set advertises the fragments this release renders
-
-* *GIVEN* a virtual schema backed by MySQL
-* *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, and `JOIN_CONDITION_EQUI`
-* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, `AGGREGATE_HAVING`, `JOIN_TYPE_FULL_OUTER`, or `JOIN_CONDITION_ALL`
-* *AND* the array MUST NOT contain `ORDER_BY_COLUMN`, `ORDER_BY_EXPRESSION`, `LIMIT`, or `LIMIT_WITH_OFFSET`
-* *AND* every entry MUST be a `MainCapability` constant, or carry the prefix `FN_PRED_`, `FN_AGG_`, or `LITERAL_`
+* *GIVEN* the capability set a dialect advertises, for each dialect this release supports
+* *WHEN* each capability in that dialect's set is rendered through that same dialect against a request fragment that exercises it
+* *THEN* every capability MUST produce a statement in that dialect's target SQL
+* *AND* no capability MUST reach a fallback that drops the fragment, ignores it, or returns the request unchanged, and the dialects the test covers MUST be enumerated from the driver identities rather than named in the test
+* *AND* the test MUST be read as proving that each advertised capability has one rendering path in its own dialect, not that every composition of two capabilities renders, so a composed shape a dialect rejects needs its own test in the feature that owns it
+* *AND* an aggregate a dialect cannot render for every operand type its capability would admit MUST be absent from that dialect's set, rather than present with a render-time operand-type check, so the test's per-capability arms need no per-operand-type variants
 
 ### Scenario: Unrepresentable request fragment fails rather than returning wrong rows
 
-* *GIVEN* a `pushdown` request carrying a fragment the MySQL dialect cannot render
+* *GIVEN* a `pushdown` request carrying a fragment the resolved dialect cannot render, for each dialect this release supports
 * *WHEN* the adapter builds the response
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST name the protocol element type it could not render
@@ -121,13 +112,22 @@ Separates the query fragment Exasol delegates from the target dialect's SQL text
 ### Scenario: Comparison operands are read by position, not by assumed role
 
 * *GIVEN* a `predicate_less` whose `left` operand is a literal and whose `right` operand is a column, as Exasol emits for `column > literal`
-* *WHEN* the dialect renders that predicate
-* *THEN* the rendered MySQL comparison MUST keep the operands in the order the request gave them
+* *WHEN* each dialect renders that predicate
+* *THEN* the rendered comparison MUST keep the operands in the order the request gave them
 * *AND* the adapter MUST NOT assume the `left` operand is a column reference
 
 ### Scenario: Generated statement is deterministic for a given request
 
-* *GIVEN* the same `pushdown` request rendered twice
+* *GIVEN* the same `pushdown` request rendered twice through one dialect
 * *WHEN* the adapter builds each response
-* *THEN* both generated MySQL statements MUST be byte-for-byte identical
+* *THEN* both generated statements MUST be byte-for-byte identical
 * *AND* the ordering of rendered select-list columns, filter operands, and join operands MUST follow the request's own ordering rather than an iteration order of a hash container
+* *AND* the same MUST hold for each dialect this release supports
+
+### Scenario: The two dialects' capability sets differ only where their SQL differs
+
+* *GIVEN* the capability set each dialect this release supports advertises
+* *WHEN* the sets are compared
+* *THEN* each set MUST be stated by its own dialect rather than derived from another by addition or removal, because a derived set makes one dialect's withholding silently govern another's
+* *AND* a capability present in one set and absent from another MUST be read as a difference between the targets' SQL rather than as a defect
+* *AND* the one such difference in this release MUST be `JOIN_TYPE_FULL_OUTER`, advertised by the PostgreSQL dialect and withheld by the MySQL dialect, which is what makes the invariant observable

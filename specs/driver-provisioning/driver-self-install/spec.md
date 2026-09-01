@@ -22,48 +22,14 @@ Installs the ADBC driver a virtual schema names into BucketFS by downloading it 
 
 ## Scenarios
 
-### Scenario: Already-installed driver short-circuits the fetch
-
-* *GIVEN* the pinned driver's shared library already present at its BucketFS path
-* *WHEN* the adapter provisions the driver
-* *THEN* the adapter MUST return that BucketFS path
-* *AND* the adapter MUST NOT request the registry index
-* *AND* the adapter MUST NOT write to BucketFS
-
-### Scenario: Missing driver is fetched, verified, and installed
-
-* *GIVEN* no driver shared library at the BucketFS path
-* *AND* a reachable registry and a reachable BucketFS write endpoint
-* *WHEN* the adapter provisions the driver
-* *THEN* the adapter MUST read the registry index and select the `linux_amd64` package of the pinned version
-* *AND* it MUST resolve that package's relative `url` against the registry base URL
-* *AND* it MUST verify the downloaded archive against the compiled-in SHA-256 digest before extracting it
-
 ### Scenario: Archive manifest is checked against the compiled-in filename
 
-* *GIVEN* a verified driver archive extracted by the adapter
+* *GIVEN* a driver archive the adapter downloaded and extracted
 * *WHEN* the adapter installs the driver into BucketFS
-* *THEN* it MUST verify that the archive's `MANIFEST` `[Files] driver` key equals the compiled-in shared-library filename
-* *AND* it MUST fail with an error naming both filenames when they differ, because a divergence would make the presence check miss forever
-* *AND* it MUST upload that shared library to BucketFS over HTTPS using the `BUCKETFS_CONNECTION` credentials
+* *THEN* it MUST verify that the archive's `MANIFEST` `[Files] driver` key equals the shared-library filename compiled in for that driver
+* *AND* it MUST fail with an error naming the driver and both filenames when they differ, because a divergence would make the presence check miss forever
+* *AND* it MUST upload that shared library, and only it, to BucketFS over HTTPS using the `BUCKETFS_CONNECTION` credentials, so a package's license or signature files are never installed
 * *AND* it MUST return the BucketFS path only after the file is readable on the adapter's own mount
-
-### Scenario: Checksum mismatch aborts the install
-
-* *GIVEN* a downloaded archive whose SHA-256 digest differs from the compiled-in digest
-* *WHEN* the adapter provisions the driver
-* *THEN* the adapter MUST return an error
-* *AND* the error message MUST report both the expected and the computed digest
-* *AND* the adapter MUST NOT extract the archive
-* *AND* the adapter MUST NOT write anything to BucketFS
-
-### Scenario: Unreachable registry names the offline fallback
-
-* *GIVEN* a cluster whose UDFs have no outbound HTTPS egress
-* *WHEN* the adapter provisions the driver
-* *THEN* the adapter MUST return an error
-* *AND* the error message MUST name the registry host it could not reach
-* *AND* the error message MUST state the exact BucketFS path at which an operator places the shared library ahead of time
 
 ### Scenario: Registry client always verifies the server certificate
 
@@ -80,13 +46,6 @@ Installs the ADBC driver a virtual schema names into BucketFS by downloading it 
 * *THEN* the BucketFS client MUST complete the `PUT`
 * *AND* that relaxation MUST apply to the BucketFS client alone
 * *AND* the registry client MUST keep verifying certificates in the same process
-
-### Scenario: Missing platform package fails with a named error
-
-* *GIVEN* a registry index whose pinned MySQL version publishes no `linux_amd64` package
-* *WHEN* the adapter provisions the driver
-* *THEN* the adapter MUST return an error
-* *AND* the error message MUST name the platform tuple it looked for and the version it looked in
 
 ### Scenario: BucketFS write failure surfaces rather than being retried silently
 
@@ -116,5 +75,24 @@ Installs the ADBC driver a virtual schema names into BucketFS by downloading it 
 
 * *GIVEN* the adbc-vs repository and its build output
 * *WHEN* the tracked files and the release artifact are inspected
-* *THEN* neither MUST contain an ADBC driver shared library
+* *THEN* neither MUST contain an ADBC driver shared library, for any supported driver
 * *AND* the only shared library the build produces MUST be adbc-vs's own UDF object
+
+### Scenario: Missing driver is fetched and installed
+
+* *GIVEN* no shared library at the BucketFS path of the driver a request names, for each driver this release supports
+* *AND* a reachable registry and a reachable BucketFS write endpoint
+* *WHEN* the adapter provisions that driver
+* *THEN* the adapter MUST download the package that `driver-provisioning/driver-version-resolution` resolved for that driver, from the absolute URL the resolution produced rather than from a URL built out of the version
+* *AND* the download's server-certificate verification MUST be its only integrity check, so the adapter MUST NOT verify a checksum or a signature of the package, the registry publishing neither and no compiled-in digest being able to describe a version the range has yet to resolve to
+* *AND* it MUST install the library at `<mount>/adbc-drivers/<driver>/<version>/<library>`, carrying that driver and the resolved version
+
+### Scenario: Two drivers install side by side without collision
+
+* *GIVEN* a BucketFS mount holding no driver
+* *WHEN* one virtual schema provisions the MySQL driver and a second provisions the PostgreSQL driver
+* *THEN* both shared libraries MUST be present on the mount afterwards, under install paths that differ in their driver segment
+* *AND* provisioning the second driver MUST NOT overwrite, delete, or re-upload the first
+* *AND* the presence check for either driver MUST NOT be satisfied by the other driver's library
+* *AND* the install paths MUST be pairwise distinct across every supported driver, asserted over the driver identities rather than over a written list
+* *AND* the shared-library filenames MUST also be pairwise distinct, so that a path collision is not the only thing keeping the two apart
