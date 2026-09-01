@@ -11,13 +11,34 @@
 //! the agreement, so an invariant test that renders every advertised
 //! capability is what establishes it.
 //!
-//! The trait exists for the second driver rather than for this one:
-//! mission.md's v1 driver set names PostgreSQL, Snowflake, Databricks, and
-//! DuckDB, and each adds an implementation rather than editing a renderer.
+//! The trait has one implementation per technology, MySQL and PostgreSQL
+//! today: mission.md's v1 driver set also names Snowflake, Databricks, and
+//! DuckDB, and each remaining one adds its own implementation rather than
+//! editing an existing renderer.
 
 use std::fmt;
 
+use adbc_vs_scan::driver::Driver;
+
+use crate::mysql_dialect::MySqlDialect;
+use crate::postgres_dialect::PostgresDialect;
 use crate::pushdown_query::Query;
+
+/// The dialect that renders for a driver, and advertises what that rendering
+/// covers.
+///
+/// One table, matched exhaustively, so a driver added to the identity fails
+/// the build here rather than falling through to whichever dialect a call site
+/// happened to name. It is the only place that names a concrete dialect: both
+/// the capability response and the pushdown response resolve through it, from
+/// the same recorded identity, which is what stops the adapter advertising one
+/// dialect's set and rendering another's statement.
+pub fn dialect_for(driver: Driver) -> &'static dyn SqlDialect {
+    match driver {
+        Driver::MySql => &MySqlDialect,
+        Driver::Postgres => &PostgresDialect,
+    }
+}
 
 /// A query fragment the dialect cannot express in its target SQL.
 ///

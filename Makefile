@@ -35,6 +35,12 @@ CARGO_TOOLS_BIN := /usr/local/cargo/registry/tools/bin
 
 ADAPTER_SRCS := $(shell find crates/adbc-vs-adapter/src -type f 2>/dev/null)
 SCAN_SRCS := $(shell find crates/adbc-vs-scan/src -type f 2>/dev/null)
+
+# adbc-vs-scan's build script and the driver declarations it generates the
+# compiled-in tables from. They sit outside src/ and are not manifests, so
+# without this a version-range or capability-list edit would leave the .so
+# untouched and every tier that consumes it certifying the previous binary.
+SCAN_BUILD_INPUTS := crates/adbc-vs-scan/build.rs $(shell find crates/adbc-vs-scan/drivers -type f 2>/dev/null)
 WORKSPACE_MANIFESTS := \
 	Cargo.toml \
 	Cargo.lock \
@@ -51,7 +57,7 @@ CARGO_RUN := docker run --rm \
 	-w /workspace \
 	$(CARGO_IMAGE)
 
-$(SO_FILE): $(ADAPTER_SRCS) $(SCAN_SRCS) $(WORKSPACE_MANIFESTS)
+$(SO_FILE): $(ADAPTER_SRCS) $(SCAN_SRCS) $(SCAN_BUILD_INPUTS) $(WORKSPACE_MANIFESTS)
 	docker volume create $(CARGO_REGISTRY_VOLUME) >/dev/null
 	docker run --rm -v $(CARGO_REGISTRY_VOLUME):/usr/local/cargo/registry $(CARGO_IMAGE) \
 		chown -R $(HOST_UID):$(HOST_GID) /usr/local/cargo/registry
@@ -94,9 +100,24 @@ test-artifact: cross-udf-build
 test-it: stack-up-mysql
 	cargo test -p adbc-vs-scan --features mysql-it --test mysql_it_test
 
+.PHONY: test-it-postgres
+test-it-postgres: stack-up-postgres
+	cargo test -p adbc-vs-scan --features postgres-it --test postgres_it_test
+
 .PHONY: test-e2e
 test-e2e: cross-udf-build stack-up
 	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_mysql_test -- --test-threads=1
+
+.PHONY: test-e2e-postgres
+test-e2e-postgres: cross-udf-build stack-up
+	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_postgres_test -- --test-threads=1
+
+# Reaches the public driver registry, and is the only target that does. Run
+# by hand when a declared version range is changed or suspected stale; no CI
+# job invokes it, because a CDN outage is not a defect in the commit.
+.PHONY: test-registry-live
+test-registry-live:
+	cargo test -p adbc-vs-adapter --features registry-live --test provisioning_test -- registry_live
 
 .PHONY: bench
 bench: cross-udf-build stack-up
@@ -136,11 +157,15 @@ third-party-licenses:
 stack-up-mysql:
 	$(COMPOSE) up -d --wait mysql
 
+.PHONY: stack-up-postgres
+stack-up-postgres:
+	$(COMPOSE) up -d --wait postgres
+
 EXASOL_DSN ?= exasol://sys:exasol@localhost:8563?validateservercertificate=0
 EXASOL_WAIT_TIMEOUT ?= 300
 
 .PHONY: stack-up
-stack-up: stack-up-mysql
+stack-up: stack-up-mysql stack-up-postgres
 	$(COMPOSE) up -d exasol
 	SECONDS=0; \
 	until exapump sql --dsn "$(EXASOL_DSN)" "SELECT 1" >/dev/null 2>&1; do \

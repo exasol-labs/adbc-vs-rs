@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use adbc_vs_adapter::dispatch::adapter_call;
+use adbc_vs_scan::driver::Driver;
 use exasol_udf_sdk::connect_back::ConnectionObject;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
@@ -71,9 +72,9 @@ fn create_request(properties: serde_json::Value) -> String {
     .to_string()
 }
 
-/// The `schemaMetadataInfo.adapterNotes` every pushdown fixture below needs:
-/// `createVirtualSchema` must run before a pushdown can be built, and this
-/// is the state it would have recorded.
+/// The `schemaMetadataInfo.adapterNotes` every fixture below needs:
+/// `createVirtualSchema` must run before a pushdown or a capability response
+/// can be built, and this is the state it would have recorded.
 fn adapter_notes_json() -> String {
     json!({
         "driver": "mysql",
@@ -84,6 +85,140 @@ fn adapter_notes_json() -> String {
         "omitted": [],
     })
     .to_string()
+}
+
+fn capabilities_request(schema_metadata_info: serde_json::Value) -> String {
+    json!({
+        "type": "getCapabilities",
+        "schemaMetadataInfo": schema_metadata_info,
+    })
+    .to_string()
+}
+
+/// `vs-adapter/driver-selection`: the capability response is built for the
+/// driver the request's own notes record, not for a driver this arm picked.
+#[test]
+fn capabilities_follow_the_driver_in_adapter_notes() {
+    let mut ctx = FakeCtx::new();
+    let request = capabilities_request(json!({"adapterNotes": adapter_notes_json()}));
+
+    let response = adapter_call(&mut ctx, &request).expect("getCapabilities must succeed");
+
+    let value: serde_json::Value = serde_json::from_str(&response).expect("response must be JSON");
+    assert_eq!(value["type"], "getCapabilities");
+    let capabilities = value["capabilities"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the response must carry a capability array: {value}"));
+    assert!(
+        capabilities
+            .iter()
+            .any(|entry| entry == "SELECTLIST_PROJECTION"),
+        "the resolved dialect's own set must be advertised: {value}"
+    );
+}
+
+/// Erroring rather than defaulting is safe only because no `getCapabilities`
+/// can precede the `createVirtualSchema` that writes the notes: gate 2.1
+/// measured that `CREATE VIRTUAL SCHEMA`, `ALTER ... REFRESH`, and
+/// `ALTER ... SET` all succeed against an adapter whose `getCapabilities`
+/// always fails, so Exasol sends it only at query-compile time. Defaulting
+/// instead would advertise one dialect's set over another's source, which
+/// Exasol answers with wrong rows rather than an error.
+#[test]
+fn capabilities_without_adapter_notes_fails_named() {
+    let mut ctx = FakeCtx::new();
+
+    let error = adapter_call(&mut ctx, &capabilities_request(json!({})))
+        .expect_err("a request recording no driver must not be answered for a guessed one");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("adapterNotes"),
+        "the error must name the field it could not read: {message}"
+    );
+}
+
+/// `vs-adapter/driver-selection`: both dialect-reading arms read the driver
+/// out of one field. Driven through a driver neither can serve, so each has to
+/// have read the field to fail on it — and neither can have fallen back to a
+/// dialect of its own.
+#[test]
+fn capabilities_and_pushdown_resolve_one_field() {
+    let notes = json!({
+        "driver": "snowflake",
+        "driverVersion": "v1.0.0",
+        "driverPath": "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_snowflake.so",
+        "connection": "MY_CONNECTION",
+        "database": "shop",
+        "omitted": [],
+    })
+    .to_string();
+    let pushdown = json!({
+        "type": "pushdown",
+        "pushdownRequest": {"type": "select", "from": {"type": "table", "name": "orders"}},
+        "involvedTables": [{
+            "name": "orders",
+            "columns": [
+                {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+            ],
+        }],
+        "schemaMetadataInfo": {"adapterNotes": notes.clone()},
+    })
+    .to_string();
+
+    for (request_type, request) in [
+        (
+            "getCapabilities",
+            capabilities_request(json!({"adapterNotes": notes})),
+        ),
+        ("pushdown", pushdown),
+    ] {
+        let mut ctx = FakeCtx::new();
+
+        let error = adapter_call(&mut ctx, &request)
+            .expect_err("a request recording a driver this release does not ship must fail")
+            .to_string();
+
+        assert!(
+            error.contains("snowflake"),
+            "`{request_type}` must resolve its driver from the notes, and name what it read: \
+             {error}"
+        );
+    }
+}
+
+/// `vs-adapter/driver-selection`: the address is passed to the driver
+/// unchanged, so a mismatch caught here is a property mismatch named as one
+/// rather than a connection failure reported from inside the wrong driver.
+#[test]
+fn connection_scheme_must_match_named_driver() {
+    let mut ctx = FakeCtx::new().with_connection(
+        "MY_SOURCE_CONNECTION",
+        ConnectionObject {
+            kind: "postgresql".to_string(),
+            address: "postgresql://172.28.5.11:5432/shop".to_string(),
+            user: "postgres".to_string(),
+            password: "secret".to_string(),
+        },
+    );
+    let request = create_request(json!({
+        "DRIVER": "mysql",
+        "CONNECTION_NAME": "MY_SOURCE_CONNECTION",
+        "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
+    }));
+
+    let error =
+        adapter_call(&mut ctx, &request).expect_err("a mismatched address scheme must fail");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("mysql"),
+        "the error must name the driver the statement asked for: {message}"
+    );
+    assert!(
+        message.contains("postgresql"),
+        "the error must name the scheme the address carries: {message}"
+    );
 }
 
 #[test]
@@ -124,28 +259,85 @@ fn malformed_json_reports_parse_failure() {
     );
 }
 
+/// `vs-adapter/create-virtual-schema`: a property the statement has to carry is
+/// named when it is left out, and `BUCKETFS_CONNECTION` is one of those only
+/// while self-install is the route — a statement supplying its own driver
+/// library through `DRIVER_PATH` writes nothing and so needs no write
+/// credential.
+///
+/// The `DRIVER_PATH` case asserts a negative, which is the strongest claim this
+/// tier can make: property validation passing means the request goes on to open
+/// the source and discover its tables, which needs a live connection this test
+/// has none of. That it fails for some *other* reason is exactly the point —
+/// the missing-property refusal is gone. The success half is
+/// `e2e_postgres_test.rs::driver_path_is_accepted_and_bypasses_provisioning`.
 #[test]
 fn missing_property_named_in_error() {
-    let mut ctx = FakeCtx::new();
-    let request = create_request(json!({
-        "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
-        "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
-    }));
+    for (missing, properties) in [
+        (
+            "DRIVER",
+            json!({
+                "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
+                "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
+            }),
+        ),
+        (
+            "CONNECTION_NAME",
+            json!({
+                "DRIVER": "mysql",
+                "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
+            }),
+        ),
+        (
+            "BUCKETFS_CONNECTION",
+            json!({
+                "DRIVER": "mysql",
+                "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
+            }),
+        ),
+    ] {
+        let mut ctx = FakeCtx::new();
 
-    let error = adapter_call(&mut ctx, &request).expect_err("a missing DRIVER must fail");
+        let error = adapter_call(&mut ctx, &create_request(properties))
+            .expect_err(&format!("a missing {missing} must fail"));
 
-    assert!(
-        error.to_string().contains("DRIVER"),
-        "the error must name the missing property: {error}"
-    );
+        assert!(
+            error.to_string().contains(missing),
+            "the error must name the missing property `{missing}`: {error}"
+        );
+    }
 }
 
 #[test]
-fn unsupported_driver_named_in_error() {
+fn bucketfs_connection_is_not_missing_when_a_driver_path_is_supplied() {
     let mut ctx = FakeCtx::new();
     let request = create_request(json!({
-        "DRIVER": "postgresql",
+        "DRIVER": "mysql",
         "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
+        "DRIVER_PATH": "/buckets/bfsdefault/default/mine/libadbc_driver_mysql.so",
+    }));
+
+    let error = adapter_call(&mut ctx, &request)
+        .expect_err("this context resolves no CONNECTION, so the request cannot succeed")
+        .to_string();
+
+    assert!(
+        !error.contains("BUCKETFS_CONNECTION"),
+        "a statement supplying its own driver library must not be refused for the write \
+         credential self-install would have needed: {error}"
+    );
+}
+
+/// `vs-adapter/create-virtual-schema`, `vs-adapter/driver-selection`: the
+/// accepted set is read off the identities rather than written into the
+/// message, so a release adding a driver cannot leave the refusal naming fewer
+/// drivers than it supports — and cannot name any one driver as the only one.
+#[test]
+fn unsupported_driver_value_fails_named() {
+    let mut ctx = FakeCtx::new();
+    let request = create_request(json!({
+        "DRIVER": "snowflake",
+        "CONNECTION_NAME": "MY_SOURCE_CONNECTION",
         "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
     }));
 
@@ -153,13 +345,16 @@ fn unsupported_driver_named_in_error() {
 
     let message = error.to_string();
     assert!(
-        message.contains("postgresql"),
-        "must name the value received: {message}"
+        message.contains("snowflake"),
+        "the error must name the value it received: {message}"
     );
-    assert!(
-        message.contains("mysql"),
-        "must name the only supported driver: {message}"
-    );
+    for driver in Driver::ALL {
+        assert!(
+            message.contains(driver.as_str()),
+            "the error must list supported driver `{}`: {message}",
+            driver.as_str()
+        );
+    }
 }
 
 #[test]

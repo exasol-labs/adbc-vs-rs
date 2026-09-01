@@ -11,7 +11,7 @@ States how the scan reaches a PostgreSQL source, passes its credentials, and coe
 - The connection-open path is shared, so the redaction binds every caller rather than the scan alone. The adapter opens the source connection through the same path for `createVirtualSchema`, `refresh`, and `setProperties`.
 - This is the plan's one deliberate narrowing of a security property, forced by the driver's API rather than chosen between designs; decision `[6]` records it. What is narrowed is that a credential now passes through a connection string for this driver; what is unchanged is that it is never persisted and never disclosed.
 - The driver returns every `numeric` — constrained or not — as a UTF-8 string, documented as the only lossless representation. A column declared `DECIMAL(p,s)` therefore arrives as text and is parsed rather than cast from a decimal, which makes the string form the ordinary case for this driver rather than a fallback the coercion falls back to.
-- PostgreSQL `numeric` legitimately holds `NaN`, `Infinity`, and `-Infinity`, none of which any Exasol `DECIMAL` can represent. Those values reach the scan as the strings the driver produces, so they are a failure the coercion names rather than a cast that silently yields a zero, a null, or a saturated value.
+- PostgreSQL `numeric` legitimately holds `NaN`, `Infinity`, and `-Infinity`, none of which any Exasol `DECIMAL` can represent — but the driver spells them on the wire as the lowercase strings `nan`, `inf`, and `-inf`, never PostgreSQL's own `NaN`/`Infinity`/`-Infinity`, so the coercion must match the driver's spellings rather than the source's. A constrained `numeric(p,s)` column — the only shape this release maps — can hold `nan` but not `inf` or `-inf`: PostgreSQL itself rejects an infinite value into a bounded `numeric` with a numeric field overflow error, so `inf`/`-inf` are reachable only through an unconstrained `numeric`, which this release leaves unmapped regardless. Whichever spelling does reach the scan, it is a failure the coercion names rather than a cast that silently yields a zero, a null, or a saturated value.
 
 ## Scenarios
 
@@ -52,7 +52,7 @@ States how the scan reaches a PostgreSQL source, passes its credentials, and coe
 
 ### Scenario: Non-finite numeric fails with a named error
 
-* *GIVEN* a PostgreSQL `numeric(12,4)` column declared in Exasol as `DECIMAL(12,4)`, holding the values `NaN`, `Infinity`, and `-Infinity`
+* *GIVEN* a PostgreSQL `numeric(12,4)` column declared in Exasol as `DECIMAL(12,4)`, and a batch arriving with the driver's own spellings `nan`, `inf`, and `-inf` — `nan` reachable from a value the column actually stores, `inf`/`-inf` only from strings built for the test, since PostgreSQL itself refuses to store an infinite value in a constrained `numeric`
 * *WHEN* the scan coerces that batch
 * *THEN* each value MUST fail with an error naming the value it received and the declared Exasol type
 * *AND* the scan MUST NOT emit a zero, a null, or a saturated value in its place

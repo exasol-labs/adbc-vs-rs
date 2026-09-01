@@ -6,6 +6,11 @@ pub mod emit_type;
 pub mod exa_type;
 pub mod metadata;
 pub mod mysql_dialect;
+pub mod mysql_source;
+pub mod mysql_type_mapping;
+pub mod postgres_dialect;
+pub mod postgres_source;
+pub mod postgres_type_mapping;
 pub mod provisioning;
 pub mod pushdown;
 pub mod pushdown_query;
@@ -14,6 +19,11 @@ pub mod scan_entry;
 pub mod scan_spec;
 pub mod sql_dialect;
 pub mod type_mapping;
+
+/// The rules that bind the driver identity's three tables, which belong to no
+/// one of them.
+#[cfg(test)]
+mod driver_selection_tests;
 
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;

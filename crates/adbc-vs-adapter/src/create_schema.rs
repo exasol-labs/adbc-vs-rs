@@ -1,34 +1,50 @@
 //! Handles `createVirtualSchema`, `refresh`, and `setProperties`: all three
-//! validate the same three properties, provision the driver, refuse a source
-//! server missing a collation pushdown rendering emits, discover MySQL
-//! metadata, map it to Exasol column definitions, and record the state
+//! validate the same properties, resolve the driver identity, make that
+//! driver's library readable, refuse a source its dialect cannot render
+//! against, discover the source's already-mapped tables, and record the state
 //! `pushdown` needs in `schemaMetadata.adapterNotes`.
+//!
+//! Every property the statement carries is validated before any `CONNECTION` is
+//! resolved, so a statement that could never provision is refused without
+//! reaching anything outside the process.
+//!
+//! Nothing here names a technology. Which catalog is read, which of its types
+//! map, and what the source must supply are all answered behind
+//! [`MetadataSource`], so this module assembles the same response whatever the
+//! `DRIVER` property said.
 //!
 //! `dropVirtualSchema` needs none of this — it lives in [`crate::dispatch`]
 //! as the bare response it always is.
 
 use std::fmt;
+use std::path::PathBuf;
 
+use adbc_vs_scan::driver::{Driver, UnsupportedDriver};
 use exasol_udf_sdk::connect_back::ConnectionObject;
 use exasol_udf_sdk::context::UdfContext;
 use serde_json::Value;
 
 use crate::adapter_notes::{AdapterNotes, Omission};
 use crate::exa_type;
-use crate::metadata::{
-    AdbcMetadataSource, DiscoveredTable, MetadataError, MetadataSource, SourceCollations,
+use crate::metadata::{self, DiscoveredTable, MetadataError, MetadataSource};
+use crate::provisioning::{
+    self, Bucket, Credentials, InstalledDriver, ProvisioningError, Registry, DRIVER_PATH_PROPERTY,
 };
-use crate::mysql_dialect;
-use crate::provisioning::{self, Bucket, Credentials, ProvisioningError, Registry};
-use crate::type_mapping::{self, MappedColumn};
+use crate::type_mapping::MappedColumn;
 
 /// The bucket-relative mount every UDF sees BucketFS's `default` bucket at.
 const BUCKETFS_MOUNT: &str = "/buckets/bfsdefault/default";
 
-/// The only `DRIVER` property value this release supports.
-const SUPPORTED_DRIVER: &str = "mysql";
+/// The property naming the Exasol `CONNECTION` object holding the BucketFS
+/// write credentials driver self-install needs.
+///
+/// Required only while self-install is the route: a statement that supplies its
+/// own driver library through `DRIVER_PATH` writes nothing, and reads it back
+/// through the read-only mount every UDF already sees.
+const BUCKETFS_CONNECTION_PROPERTY: &str = "BUCKETFS_CONNECTION";
 
-/// The property naming the Exasol `CONNECTION` object that addresses MySQL.
+/// The property naming the Exasol `CONNECTION` object that addresses the
+/// source.
 ///
 /// It cannot be spelled `CONNECTION`: Exasol's parser reserves that word
 /// inside a `CREATE VIRTUAL SCHEMA ... WITH` clause and rejects a quoted
@@ -36,48 +52,28 @@ const SUPPORTED_DRIVER: &str = "mysql";
 /// created.
 const CONNECTION_PROPERTY: &str = "CONNECTION_NAME";
 
-/// The collations pushdown rendering requires at the source: an explicit
-/// comparison collation for every character predicate, and a `NO PAD`
-/// collation for a character operand of `MIN` or `MAX`.
-///
-/// Both names come from the dialect that emits them rather than being spelled
-/// again here. The check and the renderer MUST agree: validating a source
-/// against a collation the renderer no longer emits would pass a server that
-/// then fails every delegated character predicate with MySQL error 1273 at
-/// query time — the outcome this check exists to replace with a rejection an
-/// operator can act on.
-const REQUIRED_COLLATIONS: [&str; 2] = [
-    mysql_dialect::COMPARISON_COLLATION,
-    mysql_dialect::ORDERING_COLLATION,
-];
-
-/// The oldest MySQL version that reports both [`REQUIRED_COLLATIONS`], named
-/// in the rejection error rather than compared against: a fork could report
-/// an unrelated version string while still supplying the collations.
-const MINIMUM_MYSQL_VERSION: &str = "8.0.17";
-
 /// Everything that stops `createVirtualSchema`, `refresh`, or
 /// `setProperties` from producing a `schemaMetadata` response.
 #[derive(Debug)]
 pub enum SchemaError {
     MissingProperty(&'static str),
-    UnsupportedDriver(String),
+    UnsupportedDriver(UnsupportedDriver),
     ConnectionResolution {
         name: String,
         cause: String,
     },
     ConnectionAddressMissingDatabase(String),
+    ConnectionAddressMissingScheme {
+        driver: &'static str,
+        address: String,
+    },
+    ConnectionSchemeMismatch {
+        driver: &'static str,
+        scheme: String,
+    },
     Provisioning(ProvisioningError),
     ScanConnection(adbc_vs_scan::connection::ConnectError),
     Metadata(MetadataError),
-    MissingCollation {
-        collation: String,
-        server_version: String,
-    },
-    UnsafeDatabaseName {
-        database: String,
-        character: char,
-    },
 }
 
 impl fmt::Display for SchemaError {
@@ -87,40 +83,31 @@ impl fmt::Display for SchemaError {
                 f,
                 "the CREATE VIRTUAL SCHEMA statement is missing required property `{name}`"
             ),
-            Self::UnsupportedDriver(value) => write!(
-                f,
-                "DRIVER `{value}` is not supported by adbc-vs 0.1; the only supported driver is \
-                 `{SUPPORTED_DRIVER}`"
-            ),
+            Self::UnsupportedDriver(error) => write!(f, "{error}"),
             Self::ConnectionResolution { name, cause } => {
                 write!(f, "resolving CONNECTION `{name}`: {cause}")
             }
             Self::ConnectionAddressMissingDatabase(address) => write!(
                 f,
                 "connection address `{address}` has no database path component; expected \
-                 mysql://host:port/database"
+                 <driver>://host:port/database"
+            ),
+            Self::ConnectionAddressMissingScheme { driver, address } => write!(
+                f,
+                "the {CONNECTION_PROPERTY} connection's address `{address}` carries no URI \
+                 scheme; DRIVER `{driver}` requires an address of the form \
+                 {driver}://host:port/database"
+            ),
+            Self::ConnectionSchemeMismatch { driver, scheme } => write!(
+                f,
+                "the {CONNECTION_PROPERTY} connection's address carries the `{scheme}` scheme, \
+                 but the statement names DRIVER `{driver}`; adbc-vs hands the address to that \
+                 driver unchanged, so the mismatch would surface as a source connection failure \
+                 rather than as the property mismatch it is"
             ),
             Self::Provisioning(error) => write!(f, "{error}"),
             Self::ScanConnection(error) => write!(f, "{error}"),
             Self::Metadata(error) => write!(f, "{error}"),
-            Self::MissingCollation {
-                collation,
-                server_version,
-            } => write!(
-                f,
-                "the MySQL source server (reported version {server_version}) is missing \
-                 collation `{collation}`, which adbc-vs 0.1's pushdown rendering requires; the \
-                 minimum supported MySQL version is {MINIMUM_MYSQL_VERSION}"
-            ),
-            Self::UnsafeDatabaseName {
-                database,
-                character,
-            } => write!(
-                f,
-                "the database name `{database}`, resolved from the {CONNECTION_PROPERTY} \
-                 connection's address, contains `{character}`, which the information_schema \
-                 queries built from it cannot safely quote"
-            ),
         }
     }
 }
@@ -166,17 +153,117 @@ pub fn set_properties(ctx: &mut dyn UdfContext, request: &Value) -> Result<Value
 fn open(
     ctx: &mut dyn UdfContext,
     request: &Value,
-) -> Result<(AdapterNotes, AdbcMetadataSource), SchemaError> {
+) -> Result<(AdapterNotes, Box<dyn MetadataSource>), SchemaError> {
     let properties = read_properties(request);
-    let driver = required_property(&properties, "DRIVER")?;
-    validate_driver(driver)?;
+    let driver = resolve_driver(&properties)?;
     let connection_name = required_property(&properties, CONNECTION_PROPERTY)?.to_string();
-    let bucketfs_connection_name = required_property(&properties, "BUCKETFS_CONNECTION")?;
+    let source = driver_source(&properties)?;
 
-    let mysql_connection_object = resolve_connection(ctx, &connection_name)?;
-    let database = parse_database(&mysql_connection_object.address)?;
-    reject_unsafe_database_name(&database)?;
+    let source_connection_object = resolve_connection(ctx, &connection_name)?;
+    check_connection_scheme(&source_connection_object.address, driver)?;
+    let database = parse_database(&source_connection_object.address)?;
 
+    let library = open_driver_library(ctx, &source, driver)?;
+
+    let source_connection = adbc_vs_scan::connection::SourceConnection {
+        uri: source_connection_object.address,
+        username: source_connection_object.user,
+        password: source_connection_object.password,
+    };
+    let adbc_connection = adbc_vs_scan::connection::open(driver, &library.path, &source_connection)
+        .map_err(SchemaError::ScanConnection)?;
+    let metadata_source = metadata::source_for(driver, adbc_connection, &database);
+
+    let notes = AdapterNotes {
+        driver: driver.as_str().to_string(),
+        driver_version: library.version,
+        driver_path: library.path,
+        connection: connection_name,
+        database: metadata_source.namespace().to_string(),
+        omitted: vec![],
+    };
+    Ok((notes, metadata_source))
+}
+
+/// Where this statement's driver library comes from.
+///
+/// The two routes are read off the properties once and acted on later, so a
+/// statement that cannot provision is refused before any `CONNECTION` is
+/// resolved, and so nothing downstream has to re-derive which route it is on
+/// from a pair of optional properties.
+#[derive(Debug)]
+enum DriverSource {
+    /// A library the operator placed themselves, named by `DRIVER_PATH`.
+    Supplied(String),
+    /// The `BUCKETFS_CONNECTION` self-install writes the fetched driver
+    /// through.
+    SelfInstall(String),
+}
+
+/// The driver library this virtual schema loads, in the spellings its notes
+/// record.
+///
+/// The version is what separates the two routes: resolution selected one for a
+/// provisioned driver, and there is none to report for a supplied one.
+#[derive(Debug)]
+struct DriverLibrary {
+    path: String,
+    version: Option<String>,
+}
+
+impl DriverLibrary {
+    fn provisioned(installed: InstalledDriver) -> Self {
+        Self {
+            path: installed.path.to_string_lossy().into_owned(),
+            version: Some(installed.version.to_string()),
+        }
+    }
+
+    fn supplied(path: PathBuf) -> Self {
+        Self {
+            path: path.to_string_lossy().into_owned(),
+            version: None,
+        }
+    }
+}
+
+/// Reads which of the two driver routes the statement asked for.
+///
+/// `DRIVER_PATH` decides it: an operator who names a library has supplied it,
+/// and `BUCKETFS_CONNECTION` — whose only purpose is the write credential
+/// self-install needs — is then not a property the statement has to carry.
+fn driver_source(properties: &serde_json::Map<String, Value>) -> Result<DriverSource, SchemaError> {
+    match optional_property(properties, DRIVER_PATH_PROPERTY) {
+        Some(path) => Ok(DriverSource::Supplied(path.to_string())),
+        None => Ok(DriverSource::SelfInstall(
+            required_property(properties, BUCKETFS_CONNECTION_PROPERTY)?.to_string(),
+        )),
+    }
+}
+
+/// Makes the driver library readable, by whichever route the statement chose.
+fn open_driver_library(
+    ctx: &mut dyn UdfContext,
+    source: &DriverSource,
+    driver: Driver,
+) -> Result<DriverLibrary, SchemaError> {
+    match source {
+        DriverSource::Supplied(path) => provisioning::supplied_driver(path, driver)
+            .map(DriverLibrary::supplied)
+            .map_err(SchemaError::Provisioning),
+        DriverSource::SelfInstall(connection_name) => {
+            self_install_driver(ctx, connection_name, driver)
+        }
+    }
+}
+
+/// Provisions the driver from the registry into the bucket
+/// `bucketfs_connection_name` addresses.
+fn self_install_driver(
+    ctx: &mut dyn UdfContext,
+    bucketfs_connection_name: &str,
+    driver: Driver,
+) -> Result<DriverLibrary, SchemaError> {
     let bucketfs_connection_object = resolve_connection(ctx, bucketfs_connection_name)?;
     let bucket = Bucket::new(
         &bucketfs_connection_object.address,
@@ -186,56 +273,31 @@ fn open(
             &bucketfs_connection_object.password,
         ),
     );
-    let driver_path = provisioning::ensure_driver(&Registry::pinned(), &bucket)
-        .map_err(SchemaError::Provisioning)?;
-    let driver_path = driver_path.to_string_lossy().into_owned();
-
-    let mysql_connection = adbc_vs_scan::connection::MysqlConnection {
-        uri: mysql_connection_object.address,
-        username: mysql_connection_object.user,
-        password: mysql_connection_object.password,
-    };
-    let adbc_connection =
-        adbc_vs_scan::connection::open_mysql_connection(&driver_path, &mysql_connection)
-            .map_err(SchemaError::ScanConnection)?;
-    let metadata_source = AdbcMetadataSource::new(adbc_connection);
-
-    let notes = AdapterNotes {
-        driver: SUPPORTED_DRIVER.to_string(),
-        driver_version: provisioning::DRIVER_VERSION.to_string(),
-        driver_path,
-        connection: connection_name,
-        database,
-        omitted: vec![],
-    };
-    Ok((notes, metadata_source))
+    provisioning::ensure_driver(&Registry::public(driver), &bucket)
+        .map(DriverLibrary::provisioned)
+        .map_err(SchemaError::Provisioning)
 }
 
 /// Everything the response needs from outside this process: [`open`]'s
 /// connection and notes, plus the source's own tables discovered over it.
 ///
 /// All three handlers answer through here, so all three check the source
-/// server's collations. `createVirtualSchema` is not the only path that
+/// before reading it. `createVirtualSchema` is not the only path that
 /// resolves the `CONNECTION`: `setProperties` can point an existing virtual
-/// schema at a different MySQL server, and `refresh` re-discovers against
-/// whatever its `CONNECTION` resolves to now, so a schema created against a
-/// supported server can end up reading one that supports nothing the dialect
-/// renders.
+/// schema at a different server, and `refresh` re-discovers against whatever
+/// its `CONNECTION` resolves to now, so a schema created against a supported
+/// server can end up reading one that supports nothing its dialect renders.
 fn discover(
     ctx: &mut dyn UdfContext,
     request: &Value,
 ) -> Result<(AdapterNotes, Vec<DiscoveredTable>), SchemaError> {
     let (notes, mut metadata_source) = open(ctx, request)?;
-    let collations = metadata_source
-        .discover_collations()
-        .map_err(SchemaError::Metadata)?;
-    let tables = discover_supported_source(collations, &mut metadata_source, &notes.database)?;
+    let tables = discover_supported_source(metadata_source.as_mut())?;
     Ok((notes, tables))
 }
 
-/// Discovers `database`'s tables over `source`, unless `collations` — what
-/// that same source reported — is missing a collation pushdown rendering
-/// emits.
+/// Discovers the tables of `source`'s own namespace, unless `source` reports
+/// that it does not meet the precondition its own dialect states.
 ///
 /// The check runs first and returns rather than discovering anything, so a
 /// source this release cannot render against is refused at the moment an
@@ -243,29 +305,10 @@ fn discover(
 /// it. Composing the two steps in one function is what leaves no path that
 /// discovers tables from an unchecked source.
 fn discover_supported_source(
-    collations: SourceCollations,
     source: &mut dyn MetadataSource,
-    database: &str,
 ) -> Result<Vec<DiscoveredTable>, SchemaError> {
-    check_required_collations(&collations)?;
-    source
-        .discover_tables(database)
-        .map_err(SchemaError::Metadata)
-}
-
-/// Fails with [`SchemaError::MissingCollation`] naming the first of the
-/// collations pushdown rendering requires that `collations` did not report,
-/// and the server version `collations` reported alongside them.
-fn check_required_collations(collations: &SourceCollations) -> Result<(), SchemaError> {
-    for required in REQUIRED_COLLATIONS {
-        if !collations.names.iter().any(|name| name == required) {
-            return Err(SchemaError::MissingCollation {
-                collation: required.to_string(),
-                server_version: collations.server_version.clone(),
-            });
-        }
-    }
-    Ok(())
+    source.check_source().map_err(SchemaError::Metadata)?;
+    source.discover_tables().map_err(SchemaError::Metadata)
 }
 
 /// Assembles the `schemaMetadata` response every discovery answers with.
@@ -280,7 +323,7 @@ fn schema_response(
     mut notes: AdapterNotes,
     tables: Vec<DiscoveredTable>,
 ) -> Value {
-    let (table_values, omitted) = map_tables(tables);
+    let (table_values, omitted) = exposed_tables(tables);
     notes.omitted = omitted;
 
     serde_json::json!({
@@ -330,23 +373,36 @@ fn read_properties(request: &Value) -> serde_json::Map<String, Value> {
     properties
 }
 
-fn required_property<'a>(
+/// A property the statement may carry, absent when it does not.
+///
+/// A property set to the empty string reads as absent: Exasol carries no way to
+/// distinguish "set to nothing" from "not set", so treating the two alike is
+/// what keeps an optional property optional and a required one named as
+/// missing.
+fn optional_property<'a>(
     properties: &'a serde_json::Map<String, Value>,
-    name: &'static str,
-) -> Result<&'a str, SchemaError> {
+    name: &str,
+) -> Option<&'a str> {
     properties
         .get(name)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or(SchemaError::MissingProperty(name))
 }
 
-fn validate_driver(driver: &str) -> Result<(), SchemaError> {
-    if driver.eq_ignore_ascii_case(SUPPORTED_DRIVER) {
-        Ok(())
-    } else {
-        Err(SchemaError::UnsupportedDriver(driver.to_string()))
-    }
+fn required_property<'a>(
+    properties: &'a serde_json::Map<String, Value>,
+    name: &'static str,
+) -> Result<&'a str, SchemaError> {
+    optional_property(properties, name).ok_or(SchemaError::MissingProperty(name))
+}
+
+/// The technology this virtual schema's `DRIVER` property names.
+///
+/// Every later decision follows from it — which package to provision, which
+/// library to load, which dialect renders its pushdowns — so it is resolved to
+/// an identity once, here, rather than re-read as a string at each of them.
+fn resolve_driver(properties: &serde_json::Map<String, Value>) -> Result<Driver, SchemaError> {
+    Driver::parse(required_property(properties, "DRIVER")?).map_err(SchemaError::UnsupportedDriver)
 }
 
 fn resolve_connection(
@@ -360,10 +416,36 @@ fn resolve_connection(
         })
 }
 
-/// The database name is the path component of a MySQL `CONNECTION`
-/// address (`mysql://host:port/database`) — the live spike found the
-/// address must already be a full driver URI, so the database can only
-/// come from here, never from a separate property.
+/// Refuses a `CONNECTION` address that is not addressed at the driver the
+/// statement named.
+///
+/// The address is handed to the driver as its connection target unchanged, so
+/// without this the mismatch is reported from inside the wrong driver, as a
+/// source connection failure rather than as the property mismatch an operator
+/// can act on. The scheme compared against is the driver's own canonical
+/// name — the one spelling `DRIVER`, the registry, and the source's own URI
+/// all use for a technology — so this stays a reading of the identity rather
+/// than a fourth per-driver table beside the three that are keyed on it.
+fn check_connection_scheme(address: &str, driver: Driver) -> Result<(), SchemaError> {
+    let Some((scheme, _)) = address.split_once("://") else {
+        return Err(SchemaError::ConnectionAddressMissingScheme {
+            driver: driver.as_str(),
+            address: address.to_string(),
+        });
+    };
+    if scheme.eq_ignore_ascii_case(driver.as_str()) {
+        return Ok(());
+    }
+    Err(SchemaError::ConnectionSchemeMismatch {
+        driver: driver.as_str(),
+        scheme: scheme.to_string(),
+    })
+}
+
+/// The database name is the path component of the source `CONNECTION`
+/// address (`<driver>://host:port/database`), because the address must
+/// already be a full driver URI, so the database can only come from here,
+/// never from a separate property.
 fn parse_database(address: &str) -> Result<String, SchemaError> {
     let missing = || SchemaError::ConnectionAddressMissingDatabase(address.to_string());
 
@@ -376,59 +458,34 @@ fn parse_database(address: &str) -> Result<String, SchemaError> {
     Ok(database.to_string())
 }
 
-/// Refuses a resolved database name carrying a single quote or a backslash.
+/// Splits the discovered tables into the ones the virtual schema exposes and
+/// the full list of omissions.
 ///
-/// `metadata::quote_string_literal` escapes both for the
-/// `information_schema` queries built from `database`, so a name carrying
-/// either is not itself unsafe to query; this rejects it anyway, because
-/// `crate::metadata`'s own escaper uses the backslash-escaping rule
-/// `mysql_dialect.rs` documents as unsafe under `NO_BACKSLASH_ESCAPES` — the
-/// same rule this dialect refuses to rely on for every other string it
-/// renders.
-fn reject_unsafe_database_name(database: &str) -> Result<(), SchemaError> {
-    match database
-        .chars()
-        .find(|character| matches!(character, '\'' | '\\'))
-    {
-        Some(character) => Err(SchemaError::UnsafeDatabaseName {
-            database: database.to_string(),
-            character,
-        }),
-        None => Ok(()),
-    }
-}
-
-/// Maps every discovered table's columns, returning the tables that kept at
-/// least one mappable column and the full list of omissions — a column
-/// whose type does not map, and a table left with no mappable column at
-/// all.
-fn map_tables(tables: Vec<DiscoveredTable>) -> (Vec<Value>, Vec<Omission>) {
+/// The source already decided which columns map and why the rest did not.
+/// What is left is the one rule that belongs to the schema rather than to any
+/// technology: a table no column of which maps is not exposed at all, and is
+/// recorded as an omission of its own beside its columns'.
+fn exposed_tables(tables: Vec<DiscoveredTable>) -> (Vec<Value>, Vec<Omission>) {
     let mut table_values = Vec::new();
     let mut omitted = Vec::new();
 
     for table in tables {
-        let mut columns = Vec::new();
-        for column in table.columns {
-            match type_mapping::map_column(&column.mysql) {
-                Ok(mapped) => columns.push(column_json(&column.name, mapped)),
-                Err(reason) => omitted.push(Omission {
-                    table: table.name.clone(),
-                    column: Some(column.name),
-                    mysql_type: Some(column.mysql.data_type),
-                    reason,
-                }),
-            }
-        }
-
-        if columns.is_empty() {
+        omitted.extend(table.omissions);
+        if table.columns.is_empty() {
             omitted.push(Omission {
                 table: table.name,
                 column: None,
-                mysql_type: None,
+                source_type: None,
                 reason: "no column of this table maps to a supported Exasol type".to_string(),
             });
             continue;
         }
+
+        let columns: Vec<Value> = table
+            .columns
+            .iter()
+            .map(|column| column_json(&column.name, column.mapped))
+            .collect();
         table_values.push(serde_json::json!({"name": table.name, "columns": columns}));
     }
 
