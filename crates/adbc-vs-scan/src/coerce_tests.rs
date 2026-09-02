@@ -610,6 +610,100 @@ fn aggregate_overflow_fails_rather_than_truncating() {
     }
 }
 
+/// The PostgreSQL driver returns `numeric` as an Arrow string rather than a
+/// decimal-typed array, and that string form is the primary case this scan
+/// must coerce, not a fallback below some other representation. This pins
+/// the source precision and scale carrying through unchanged, the same
+/// guarantee the decimal-width cases above already hold for a driver's
+/// native decimal representations.
+#[test]
+fn string_form_numeric_coerces_to_declared_decimal() {
+    let source: ArrayRef = Arc::new(StringArray::from(vec!["12345.67"]));
+    let declared_type = DeclaredType::Decimal {
+        precision: 10,
+        scale: 2,
+    };
+
+    let coerced = expect_coerced(source, declared_type);
+
+    assert_eq!(coerced.data_type(), &DataType::Decimal128(10, 2));
+    assert_eq!(
+        &coerced,
+        &(Arc::new(
+            Decimal128Array::from(vec![1_234_567])
+                .with_precision_and_scale(10, 2)
+                .expect("the fixture value fits the declared DECIMAL(10,2)")
+        ) as ArrayRef)
+    );
+}
+
+/// The PostgreSQL driver spells `numeric`'s non-finite values `nan`, `inf`,
+/// and `-inf` on the wire — lowercase, never the PostgreSQL-literal
+/// `NaN`/`Infinity`/`-Infinity` spellings. Both sets are covered here: the
+/// lowercase ones because they are what a real column can produce (a `NaN`
+/// stored in a constrained `numeric(p,s)` column reads back as `nan`), the
+/// capitalized ones as defense in depth against a value arriving unexpected.
+/// None of Exasol's `DECIMAL` values can hold a non-finite value, so every
+/// spelling must fail rather than coerce, and the failure must name the
+/// exact value it rejected alongside the declared type.
+#[test]
+fn non_finite_string_form_numeric_fails_naming_the_value_and_declared_type() {
+    let declared_type = DeclaredType::Decimal {
+        precision: 12,
+        scale: 4,
+    };
+
+    for spelling in ["nan", "inf", "-inf", "NaN", "Infinity", "-Infinity"] {
+        let source: ArrayRef = Arc::new(StringArray::from(vec![spelling]));
+
+        let message = coerce_one(source, declared_type)
+            .expect_err(&format!("{spelling:?} must not coerce to a DECIMAL"));
+
+        assert!(
+            message.contains(spelling),
+            "error message {message:?} does not cite the offending value {spelling:?}"
+        );
+        assert!(
+            message.contains("DECIMAL(12,4)"),
+            "error message {message:?} does not name the declared type"
+        );
+    }
+}
+
+/// A non-finite value must be refused per value, not per column: rejecting
+/// one batch's `nan` must not leave the declared column unable to coerce a
+/// later batch whose value is finite. The same [`Coercion`] is reused across
+/// both calls here so a column-level memoization bug — refusing every future
+/// batch once one bad value was seen — would fail this test.
+#[test]
+fn a_finite_value_coerces_after_a_non_finite_value_in_the_same_column() {
+    let declared_type = DeclaredType::Decimal {
+        precision: 10,
+        scale: 2,
+    };
+    let columns = vec![declared("value", declared_type)];
+    let coercion = Coercion::for_columns(&columns).expect("the declaration is representable");
+
+    let non_finite_batch = batch_of("source", Arc::new(StringArray::from(vec!["nan"])));
+    coercion
+        .apply(&non_finite_batch)
+        .expect_err("a non-finite string must not coerce");
+
+    let finite_batch = batch_of("source", Arc::new(StringArray::from(vec!["1234.56"])));
+    let coerced = coercion
+        .apply(&finite_batch)
+        .expect("a finite value must still coerce after an earlier batch's non-finite value");
+
+    assert_eq!(
+        coerced.column(0),
+        &(Arc::new(
+            Decimal128Array::from(vec![123_456])
+                .with_precision_and_scale(10, 2)
+                .expect("the fixture value fits the declared DECIMAL(10,2)")
+        ) as ArrayRef)
+    );
+}
+
 #[test]
 fn a_scale_zero_decimal_beyond_eighteen_digits_emits_as_a_decimal() {
     let source: ArrayRef = Arc::new(Int64Array::from(vec![9_000_000_001]));

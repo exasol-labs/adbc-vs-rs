@@ -11,37 +11,26 @@
 
 #![cfg(feature = "mysql-it")]
 
+mod common;
+
 use std::fs;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use adbc_driver_manager::ManagedConnection;
 use adbc_vs_scan::coerce::{DeclaredColumn, DeclaredType};
-use adbc_vs_scan::connection::{open_mysql_connection, MysqlConnection};
-use adbc_vs_scan::driver::{
-    DRIVER_LIBRARY, DRIVER_VERSION, PACKAGE_SHA256, PLATFORM, REGISTRY_BASE_URL,
-    REGISTRY_DRIVER_PATH,
-};
+use adbc_vs_scan::connection::{open, SourceConnection};
+use adbc_vs_scan::driver::Driver;
 use adbc_vs_scan::error::ScanError;
 use adbc_vs_scan::scan::{execute_scan, BatchStream, ScanRequest};
 use arrow::array::{Array, Decimal128Array, StringArray, TimestampMicrosecondArray};
 use arrow::datatypes::{DataType, TimeUnit};
+use common::driver_fetch::fetch_driver_library;
 
 /// The `mysql` service as `docker-compose.yml` publishes it to the host.
 const MYSQL_URI: &str = "mysql://127.0.0.1:3306/adbc_vs";
 const MYSQL_USER: &str = "adbc_vs";
 const MYSQL_PASSWORD: &str = "adbc_vs_password";
-
-/// Where the pinned driver package is published, assembled from the same
-/// identity `adbc-vs-adapter`'s provisioning installs into BucketFS, so this
-/// tier cannot certify a driver the product no longer installs.
-fn package_url() -> String {
-    format!(
-        "{REGISTRY_BASE_URL}/{REGISTRY_DRIVER_PATH}/{DRIVER_VERSION}\
-         /{REGISTRY_DRIVER_PATH}_{PLATFORM}_{DRIVER_VERSION}.tar.gz"
-    )
-}
 
 /// How many rows [`wide_result_sql`] projects: enough that holding every
 /// batch would be unmistakable in the process's resident size (at roughly
@@ -78,69 +67,14 @@ fn serialized() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-static DRIVER: LazyLock<PathBuf> = LazyLock::new(install_driver);
+/// Fetched, resolved, and cached once per process — under the system
+/// temporary directory, never under `target/`, which the artifact assertions
+/// scan for exactly this kind of binary — through the same registry
+/// resolution and `MANIFEST` read the product's own provisioning performs.
+static DRIVER: LazyLock<PathBuf> = LazyLock::new(|| fetch_driver_library(Driver::MySql));
 
-/// Fetches, verifies, and extracts the pinned driver package into a cache
-/// under the system temporary directory — never under `target/`, which the
-/// artifact assertions scan for exactly this kind of binary.
-fn install_driver() -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("adbc-vs-driver-cache/{PACKAGE_SHA256}"));
-    let installed = directory.join(DRIVER_LIBRARY);
-    if installed.is_file() {
-        return installed;
-    }
-    fs::create_dir_all(&directory).expect("the driver cache directory is creatable");
-
-    let url = package_url();
-    let package = download(&url);
-    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&package));
-    assert_eq!(
-        digest, PACKAGE_SHA256,
-        "the driver package at {url} does not match the pinned digest"
-    );
-
-    let staged = directory.join(format!("{DRIVER_LIBRARY}.{}", std::process::id()));
-    fs::write(&staged, extract_library(&package)).expect("the extracted driver is writable");
-    fs::rename(&staged, &installed).expect("the extracted driver moves into the cache");
-    installed
-}
-
-fn download(url: &str) -> Vec<u8> {
-    let response = reqwest::blocking::get(url)
-        .unwrap_or_else(|error| panic!("fetching the pinned driver package from {url}: {error}"));
-    let response = response
-        .error_for_status()
-        .unwrap_or_else(|error| panic!("fetching the pinned driver package from {url}: {error}"));
-    response
-        .bytes()
-        .unwrap_or_else(|error| panic!("reading the driver package from {url}: {error}"))
-        .to_vec()
-}
-
-fn extract_library(package: &[u8]) -> Vec<u8> {
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(package));
-    for entry in archive
-        .entries()
-        .expect("the driver package is a readable tar archive")
-    {
-        let mut entry = entry.expect("every driver package member is readable");
-        let path = entry.path().expect("every member has a path").into_owned();
-        if path == Path::new(DRIVER_LIBRARY) {
-            let mut library = Vec::new();
-            entry
-                .read_to_end(&mut library)
-                .expect("the driver library is readable");
-            return library;
-        }
-    }
-    panic!(
-        "the driver package at {} declares no {DRIVER_LIBRARY}",
-        package_url()
-    );
-}
-
-fn mysql() -> MysqlConnection {
-    MysqlConnection {
+fn mysql() -> SourceConnection {
+    SourceConnection {
         uri: MYSQL_URI.to_string(),
         username: MYSQL_USER.to_string(),
         password: MYSQL_PASSWORD.to_string(),
@@ -148,8 +82,12 @@ fn mysql() -> MysqlConnection {
 }
 
 fn connect() -> ManagedConnection {
-    open_mysql_connection(DRIVER.to_str().expect("the cache path is UTF-8"), &mysql())
-        .expect("the mysql service in docker-compose.yml accepts an ADBC connection")
+    open(
+        Driver::MySql,
+        DRIVER.to_str().expect("the cache path is UTF-8"),
+        &mysql(),
+    )
+    .expect("the mysql service in docker-compose.yml accepts an ADBC connection")
 }
 
 fn scan(
@@ -414,11 +352,14 @@ fn missing_driver_path_named_in_error() {
     let _guard = serialized();
     let missing = std::env::temp_dir().join("adbc-vs-no-such-driver.so");
 
-    let message =
-        match open_mysql_connection(missing.to_str().expect("the path is UTF-8"), &mysql()) {
-            Ok(_) => panic!("a driver path that does not exist must fail to load"),
-            Err(error) => error.to_string(),
-        };
+    let message = match open(
+        Driver::MySql,
+        missing.to_str().expect("the path is UTF-8"),
+        &mysql(),
+    ) {
+        Ok(_) => panic!("a driver path that does not exist must fail to load"),
+        Err(error) => error.to_string(),
+    };
     assert!(
         message.contains(missing.to_str().expect("the path is UTF-8")),
         "error message {message:?} does not name the path it tried to load"

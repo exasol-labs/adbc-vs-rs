@@ -21,7 +21,7 @@ ADBC gives every backend a uniform C API and an Arrow-native result format. One 
 2. **Self-installing drivers** — on first use, the adapter checks BucketFS for the requested driver; if absent, it fetches the matching platform tarball from the `dbc` ADBC driver registry (`dbc-cdn.columnar.tech/index.yaml`) and writes it into the BucketFS mount path itself, with no external CLI step. When outbound HTTPS is blocked (air-gapped clusters), the operator uploads the driver tarball with `exapump` ahead of time, and the adapter uses it in place.
 3. **SQL pushdown** — projection, filter predicates, aggregation (single-group and `GROUP BY`), and equi/outer joins are rewritten into the target dialect's SQL behind the adapter's own `SqlDialect` trait and executed by the ADBC driver at the source. `ORDER BY` and `LIMIT`/`OFFSET` are not pushed down; see Constraints.
 4. **Arrow-native scan path** — the scan UDF opens an ADBC connection, executes the pushed-down statement, and streams the driver's Arrow record batches back to Exasol without a row-by-row marshaling step.
-5. **Multi-backend driver support** — PostgreSQL, Snowflake, Databricks, and DuckDB/SQLite are the v1 driver set; additional ADBC drivers are added as the project matures, without adapter code changes.
+5. **Multi-backend driver support** — MySQL and PostgreSQL are shipped drivers; Snowflake, Databricks, and DuckDB/SQLite remain the aspirational v1 driver set, added as the project matures, without adapter code changes.
 
 ## Out of Scope
 
@@ -51,7 +51,7 @@ ADBC gives every backend a uniform C API and an Arrow-native result format. One 
 |-------|------------|---------|
 | Language | Rust | Adapter script + scan UDF implementation |
 | Data access | ADBC (Rust ADBC bindings over `arrow-adbc`) | Uniform driver interface to Postgres, Snowflake, Databricks, DuckDB |
-| SQL transpilation | Adapter's own `SqlDialect` trait (e.g. `MySqlDialect`) | Rewrites pushed-down Exasol query fragments into the target dialect's SQL |
+| SQL transpilation | Adapter's own `SqlDialect` trait (`MySqlDialect`, `PostgresDialect`) | Rewrites pushed-down Exasol query fragments into the target dialect's SQL |
 | Driver distribution | `dbc` ADBC driver registry (`dbc-cdn.columnar.tech/index.yaml`), fetched directly via HTTPS | Source of driver tarballs for self-install; no dependency on the `dbc` Go binary |
 | UDF runtime | `exasol-udf-sdk`, `exasol-udf-macros`, `language-container-rs` Rust SLC | UDF ABI, connect-back SQL session, same conventions as `lakehouse-engine-rs` |
 | Build | `rust:1.94-trixie` (glibc 2.41) in Docker | Builds the `.so` matching the SLC; never built on host |
@@ -104,7 +104,8 @@ Data flows one direction per query: Exasol → Adapter Script (plan + rewrite) �
 - **Business**: adbc-vs MUST NOT bundle any ADBC driver binary in its own release artifact — drivers come only from the registry fetch or an operator upload.
 - **Performance**: data MUST move as Arrow record batches from the ADBC driver through the UDF to Exasol with no row-by-row marshaling step. No numeric throughput target is set yet; a benchmark against `postgresql-virtual-schema` is future work.
 - **Technical**: a scan UDF's `EMITS` clause is spliced into the pushed-down query as a script-emitted derived table, which carries no ordering guarantee. `ORDER BY` and `LIMIT`/`OFFSET` are therefore never pushed down; Exasol applies both itself over the emitted rows.
-- **Technical**: the source MySQL server MUST be 8.0.17 or newer. The renderer's character predicates and `MIN`/`MAX` depend on the `utf8mb4_0900_as_cs` and `utf8mb4_0900_bin` collations, which exist only from that version; MariaDB implements neither and is not supported.
+- **Technical**: each driver's dialect states its own source-server precondition, checked before any table is discovered and on every request that resolves the source `CONNECTION`. MySQL's precondition: the source server MUST be 8.0.17 or newer, because the renderer's character predicates and `MIN`/`MAX` depend on the `utf8mb4_0900_as_cs` and `utf8mb4_0900_bin` collations, which exist only from that version; MariaDB implements neither and is not supported. PostgreSQL's precondition: the source database MUST use the `UTF8` encoding, because the mapping declares every character column `UTF8` and the ordering collation renders `COLLATE "C"`, which reproduces Exasol's code-point order only over UTF-8 bytes.
+- **Security**: credentials do not reach the driver the same way for every technology. MySQL's ADBC driver accepts `username` and `password` as options distinct from `uri`, so no credential ever passes through a connection string. PostgreSQL's ADBC driver accepts only a `uri` option, so its credential travels instead in an escaped libpq keyword/value connection string built in memory at connect time; the string is never persisted, never logged, and stripped from surfaced driver errors, but the separate-option protection MySQL gets does not extend to it.
 
 ## External Dependencies
 

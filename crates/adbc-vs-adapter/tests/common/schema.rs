@@ -1,19 +1,23 @@
-//! The Exasol objects a virtual schema over MySQL needs: the two `CONNECTION`
-//! objects it resolves at run time, and the virtual schema itself.
+//! The Exasol objects a virtual schema needs, whatever technology it is over:
+//! the two `CONNECTION` objects it resolves at run time, and the virtual schema
+//! itself.
 //!
 //! Property names are the adapter's own (`DRIVER`, `CONNECTION_NAME`,
-//! `BUCKETFS_CONNECTION`) and are spelled once, here.
+//! `BUCKETFS_CONNECTION`, `DRIVER_PATH`) and are spelled once, here. The
+//! `DRIVER` value is never spelled here at all: it comes from [`Driver`], the
+//! same identity the adapter resolves the statement's property back into, so a
+//! test enumerating the supported technologies and the statement it generates
+//! cannot disagree about how one is spelled.
+
+use adbc_vs_scan::driver::Driver;
 
 use super::exasol::{Exasol, BUCKETFS_WRITE_USER};
-use super::mysql;
 use super::udf::ADAPTER_SCRIPT;
+use super::{mysql, postgres};
 
 /// The `CONNECTION` object holding BucketFS write credentials, which driver
 /// self-install needs.
 pub const BUCKETFS_CONNECTION: &str = "ADBC_VS_BUCKETFS";
-
-/// The one driver value this release supports.
-const DRIVER: &str = "mysql";
 
 /// The name, address, and credentials a `CONNECTION` object is created from.
 pub struct ConnectionSpec<'a> {
@@ -23,12 +27,20 @@ pub struct ConnectionSpec<'a> {
     pub password: &'a str,
 }
 
-/// The schema and the two `CONNECTION` objects a `CREATE VIRTUAL SCHEMA`
-/// statement is built from.
+/// The schema, the technology, the `CONNECTION` objects, and the optional
+/// driver library a `CREATE VIRTUAL SCHEMA` statement is built from.
 pub struct VirtualSchemaSpec<'a> {
     pub schema: &'a str,
+    /// The technology the statement's `DRIVER` property names.
+    pub driver: Driver,
     pub connection: &'a str,
-    pub bucketfs_connection: &'a str,
+    /// The `CONNECTION` self-install writes the driver through, or nothing for
+    /// a statement that supplies its own library and so needs no write
+    /// credential.
+    pub bucketfs_connection: Option<&'a str>,
+    /// A driver shared library the operator placed themselves, which skips
+    /// self-install entirely.
+    pub driver_path: Option<&'a str>,
 }
 
 /// Creates the `CONNECTION` object the adapter writes the driver through.
@@ -57,15 +69,28 @@ pub fn create_connection_to(exasol: &Exasol, name: &str, address: &str) {
     }));
 }
 
-/// Creates a virtual schema over the MySQL database `connection` addresses,
+/// Creates a `CONNECTION` object addressing `database` in the stack's
+/// PostgreSQL.
+pub fn create_postgres_connection(exasol: &Exasol, name: &str, database: &str) {
+    exasol.execute(&connection_statement(&ConnectionSpec {
+        name,
+        address: &postgres::driver_uri(database),
+        user: postgres::USER,
+        password: postgres::PASSWORD,
+    }));
+}
+
+/// Creates a virtual schema over the source database `connection` addresses,
 /// replacing any schema of the same name left by an earlier run.
-pub fn create_virtual_schema(exasol: &Exasol, schema: &str, connection: &str) {
+pub fn create_virtual_schema(exasol: &Exasol, driver: Driver, schema: &str, connection: &str) {
     create_virtual_schema_through(
         exasol,
         VirtualSchemaSpec {
             schema,
+            driver,
             connection,
-            bucketfs_connection: BUCKETFS_CONNECTION,
+            bucketfs_connection: Some(BUCKETFS_CONNECTION),
+            driver_path: None,
         },
     );
 }
@@ -75,22 +100,25 @@ pub fn create_virtual_schema(exasol: &Exasol, schema: &str, connection: &str) {
 /// provisioning ran at all points somewhere unreachable.
 pub fn create_virtual_schema_through(exasol: &Exasol, spec: VirtualSchemaSpec<'_>) {
     drop_virtual_schema(exasol, spec.schema);
-    exasol.execute(&create_statement(
-        spec.schema,
-        spec.connection,
-        spec.bucketfs_connection,
-    ));
+    exasol.execute(&create_statement(&spec));
 }
 
 /// Creates a virtual schema that is expected to fail, and returns the error
 /// Exasol surfaced to the session.
 pub fn create_virtual_schema_expecting_failure(
     exasol: &Exasol,
+    driver: Driver,
     schema: &str,
     connection: &str,
 ) -> String {
     drop_virtual_schema(exasol, schema);
-    exasol.execute_expecting_failure(&create_statement(schema, connection, BUCKETFS_CONNECTION))
+    exasol.execute_expecting_failure(&create_statement(&VirtualSchemaSpec {
+        schema,
+        driver,
+        connection,
+        bucketfs_connection: Some(BUCKETFS_CONNECTION),
+        driver_path: None,
+    }))
 }
 
 /// Drops a virtual schema and everything Exasol derived from it, if it exists.
@@ -118,19 +146,34 @@ fn connection_statement(spec: &ConnectionSpec<'_>) -> String {
     )
 }
 
-fn create_statement(schema: &str, connection: &str, bucketfs_connection: &str) -> String {
-    format!(
-        "CREATE VIRTUAL SCHEMA {schema} USING {ADAPTER_SCRIPT} WITH \
-         DRIVER = {} CONNECTION_NAME = {} BUCKETFS_CONNECTION = {}",
-        quote_literal(DRIVER),
-        quote_literal(connection),
-        quote_literal(bucketfs_connection)
-    )
+/// The `CREATE VIRTUAL SCHEMA` statement `spec` describes.
+///
+/// Only the properties the spec carries are written: `BUCKETFS_CONNECTION` is
+/// required only while the adapter may need to write, so a statement supplying
+/// its own driver library through `DRIVER_PATH` leaves it out entirely rather
+/// than naming a connection nothing resolves.
+fn create_statement(spec: &VirtualSchemaSpec<'_>) -> String {
+    let mut statement = format!(
+        "CREATE VIRTUAL SCHEMA {} USING {ADAPTER_SCRIPT} WITH DRIVER = {} CONNECTION_NAME = {}",
+        spec.schema,
+        quote_literal(spec.driver.as_str()),
+        quote_literal(spec.connection)
+    );
+    if let Some(bucketfs_connection) = spec.bucketfs_connection {
+        statement.push_str(&format!(
+            " BUCKETFS_CONNECTION = {}",
+            quote_literal(bucketfs_connection)
+        ));
+    }
+    if let Some(driver_path) = spec.driver_path {
+        statement.push_str(&format!(" DRIVER_PATH = {}", quote_literal(driver_path)));
+    }
+    statement
 }
 
 /// Quotes an Exasol string literal, doubling any embedded single quote — a
 /// generated BucketFS write password is arbitrary text.
-fn quote_literal(value: &str) -> String {
+pub fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
@@ -166,26 +209,79 @@ mod tests {
         );
     }
 
+    /// A statement over the given connections, provisioning its driver.
+    fn spec<'a>(schema: &'a str, connection: &'a str, bucketfs: &'a str) -> VirtualSchemaSpec<'a> {
+        VirtualSchemaSpec {
+            schema,
+            driver: Driver::MySql,
+            connection,
+            bucketfs_connection: Some(bucketfs),
+            driver_path: None,
+        }
+    }
+
     #[test]
     fn the_create_statement_names_the_adapter_script_and_all_three_properties() {
         assert_eq!(
-            create_statement("MYSQLVS", "ADBC_VS_MYSQL", BUCKETFS_CONNECTION),
+            create_statement(&spec("MYSQLVS", "ADBC_VS_MYSQL", BUCKETFS_CONNECTION)),
             "CREATE VIRTUAL SCHEMA MYSQLVS USING ADBC_VS.ADBC_ADAPTER WITH \
              DRIVER = 'mysql' CONNECTION_NAME = 'ADBC_VS_MYSQL' \
              BUCKETFS_CONNECTION = 'ADBC_VS_BUCKETFS'"
         );
     }
 
+    /// The `DRIVER` property carries the technology the spec names, and every
+    /// technology this release supports is spelled by [`Driver`] itself rather
+    /// than by this module — a test creating one virtual schema per supported
+    /// driver generates the same value the adapter parses back.
+    #[test]
+    fn the_create_statement_names_the_driver_the_spec_carries() {
+        for driver in Driver::ALL {
+            let statement = create_statement(&VirtualSchemaSpec {
+                schema: "S",
+                driver: *driver,
+                connection: "C",
+                bucketfs_connection: Some(BUCKETFS_CONNECTION),
+                driver_path: None,
+            });
+
+            assert!(
+                statement.contains(&format!("DRIVER = '{}'", driver.as_str())),
+                "the statement must name the technology the spec carries: {statement}"
+            );
+        }
+    }
+
     #[test]
     fn the_create_statement_provisions_through_the_bucketfs_connection_it_is_given() {
-        assert!(
-            create_statement("S", "C", "ELSEWHERE").ends_with("BUCKETFS_CONNECTION = 'ELSEWHERE'")
+        assert!(create_statement(&spec("S", "C", "ELSEWHERE"))
+            .ends_with("BUCKETFS_CONNECTION = 'ELSEWHERE'"));
+    }
+
+    /// A statement supplying its own driver library carries no
+    /// `BUCKETFS_CONNECTION` at all: the property's only purpose is the write
+    /// credential self-install needs, and this statement writes nothing.
+    #[test]
+    fn a_statement_supplying_a_driver_path_names_no_bucketfs_connection() {
+        let statement = create_statement(&VirtualSchemaSpec {
+            schema: "PGVS",
+            driver: Driver::Postgres,
+            connection: "ADBC_VS_PG",
+            bucketfs_connection: None,
+            driver_path: Some("/buckets/bfsdefault/default/mine/libadbc_driver_postgresql.so"),
+        });
+
+        assert_eq!(
+            statement,
+            "CREATE VIRTUAL SCHEMA PGVS USING ADBC_VS.ADBC_ADAPTER WITH \
+             DRIVER = 'postgresql' CONNECTION_NAME = 'ADBC_VS_PG' \
+             DRIVER_PATH = '/buckets/bfsdefault/default/mine/libadbc_driver_postgresql.so'"
         );
     }
 
     #[test]
     fn the_connection_property_is_not_spelled_connection() {
-        let statement = create_statement("S", "C", BUCKETFS_CONNECTION);
+        let statement = create_statement(&spec("S", "C", BUCKETFS_CONNECTION));
         assert!(
             !statement.contains(" CONNECTION = "),
             "Exasol reserves `CONNECTION` as a property name and rejects the statement: \

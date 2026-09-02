@@ -9,4 +9,6 @@ mod coerce_tests;
 #[cfg(test)]
 mod connection_tests;
 #[cfg(test)]
+mod driver_tests;
+#[cfg(test)]
 mod scan_tests;

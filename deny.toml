@@ -2,9 +2,10 @@
 # of CLAUDE.md for the rules this file is checked against (`policy_test.rs`).
 #
 # Scope: this policy governs the Rust crate dependency tree only. The
-# `adbc-drivers/mysql` driver fetched at run time from the Columnar registry
-# is Apache-2.0 and is never bundled into an adbc-vs release artifact, so it
-# falls outside this policy (decision-log [15]).
+# `adbc-drivers/mysql` and `adbc-drivers/postgresql` drivers fetched at run
+# time from the Columnar registry are Apache-2.0 and are never bundled into an
+# adbc-vs release artifact, so they fall outside this policy (decision-log
+# [15]).
 
 [licenses]
 # Permissive-only allow list. No copyleft (GPL/LGPL/AGPL/MPL) and no

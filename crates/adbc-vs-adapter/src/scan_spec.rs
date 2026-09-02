@@ -8,6 +8,7 @@
 //! `connection` itself, at execution time, through the UDF SDK's connection
 //! accessor.
 
+use adbc_vs_scan::driver::Driver;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,6 +26,11 @@ pub struct ScanColumn {
 /// its result in the shape Exasol's dynamic `EMITS` clause declared.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanSpec {
+    /// Which technology's driver the scan loads, and so which ADBC entry
+    /// point it loads `driver_path` through. Recorded rather than derived
+    /// from the library's file name, which is the naming heuristic the scan
+    /// path rejects.
+    pub driver: Driver,
     pub driver_path: String,
     pub connection: String,
     pub sql: String,
@@ -52,6 +58,7 @@ pub fn parse(text: &str) -> Result<ScanSpec, String> {
 /// is written once and read back through one shared encoder.
 #[derive(Serialize, Deserialize)]
 struct Wire {
+    driver: String,
     #[serde(rename = "driverPath")]
     driver_path: String,
     connection: String,
@@ -69,6 +76,7 @@ struct WireColumn {
 impl From<&ScanSpec> for Wire {
     fn from(spec: &ScanSpec) -> Self {
         Wire {
+            driver: spec.driver.as_str().to_owned(),
             driver_path: spec.driver_path.clone(),
             connection: spec.connection.clone(),
             sql: spec.sql.clone(),
@@ -96,7 +104,9 @@ impl Wire {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let driver = Driver::parse(&self.driver).map_err(|error| error.to_string())?;
         Ok(ScanSpec {
+            driver,
             driver_path: self.driver_path,
             connection: self.connection,
             sql: self.sql,

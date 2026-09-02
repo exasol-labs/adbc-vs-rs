@@ -63,6 +63,19 @@ fn oversize_decimal_unmapped() {
         reason.contains("36"),
         "reason must name Exasol's maximum DECIMAL precision of 36, got: {reason}"
     );
+
+    let mut at_maximum = column("DECIMAL");
+    at_maximum.numeric_precision = Some(36);
+    at_maximum.numeric_scale = Some(2);
+    let mapped = map_column(&at_maximum).expect("Exasol's maximum precision itself must map");
+    assert_eq!(
+        mapped.exasol_type,
+        MappedType::Decimal {
+            precision: 36,
+            scale: 2
+        },
+        "the guard must reject only what exceeds the maximum, not the maximum itself"
+    );
 }
 
 fn utf8mb4_column(data_type: &str) -> MySqlColumn {

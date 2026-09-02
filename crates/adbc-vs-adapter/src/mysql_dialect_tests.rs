@@ -1122,7 +1122,7 @@ fn a_literal_select_list_entry_renders_through_the_literal_renderer() {
 /// the statement its own capability contributes, and it travels in the same
 /// arm as the fixture it is true of, so a changed fixture cannot leave behind
 /// a fragment that no longer follows from it.
-fn query_exercising(capability: &str) -> (&'static str, Query) {
+pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
     fn decimal_column() -> pushdown_query::ColumnRef {
         pushdown_query::ColumnRef {
             name: "id".to_string(),
@@ -1475,45 +1475,6 @@ fn query_exercising(capability: &str) -> (&'static str, Query) {
              add one alongside whichever task added the capability"
         ),
     }
-}
-
-/// The invariant decision `[2]` rests on: the advertised set and the renderer
-/// are one decision with one owner, and nothing in the type system enforces
-/// their agreement. Rendering must not only succeed — it must put the
-/// capability's own fragment in the statement, or the capability reached a
-/// path that dropped it and Exasol returns rows for a fragment it believes
-/// was applied.
-#[test]
-fn every_advertised_capability_renders() {
-    for capability in MySqlDialect.capabilities() {
-        let (fragment, query) = query_exercising(capability);
-
-        let sql = MySqlDialect.render(&query).unwrap_or_else(|error| {
-            panic!("capability `{capability}` has no rendering path: {error}")
-        });
-
-        assert!(
-            sql.contains(fragment),
-            "capability `{capability}` rendered a statement carrying no `{fragment}`, so its \
-             fragment reached a path that dropped it: {sql}"
-        );
-    }
-}
-
-/// Alias assignment walks the `from` tree with a running position, the one
-/// piece of mutable state rendering carries, so the fixture is a join: a
-/// single-table query has no such state to falsify determinism against.
-#[test]
-fn same_request_renders_identically_twice() {
-    let (_, query) = query_exercising("JOIN");
-
-    let first = MySqlDialect.render(&query).expect("render must succeed");
-    let second = MySqlDialect.render(&query).expect("render must succeed");
-
-    assert_eq!(
-        first, second,
-        "the same request must render byte-for-byte identically on every call"
-    );
 }
 
 /// A column node as Exasol sends one inside a join: qualified by the

@@ -22,6 +22,7 @@
 
 use std::fmt;
 
+use adbc_vs_scan::driver::Driver;
 use serde_json::Value;
 
 use crate::adapter_notes::AdapterNotes;
@@ -65,7 +66,11 @@ pub fn pushdown_response(
 
     let emitted_columns = emitted_columns(&query);
 
+    let driver =
+        Driver::parse(&adapter_notes.driver).map_err(|error| PushdownError(error.to_string()))?;
+
     let scan_spec = ScanSpec {
+        driver,
         driver_path: adapter_notes.driver_path,
         connection: adapter_notes.connection,
         sql: source_sql,
@@ -82,17 +87,7 @@ pub fn pushdown_response(
 }
 
 fn read_adapter_notes(request: &Value) -> Result<AdapterNotes, PushdownError> {
-    let text = request
-        .pointer("/schemaMetadataInfo/adapterNotes")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            PushdownError(
-                "the pushdown request carries no schemaMetadataInfo.adapterNotes; \
-                 createVirtualSchema must run before a pushdown can be built"
-                    .to_string(),
-            )
-        })?;
-    AdapterNotes::parse(text).map_err(PushdownError)
+    AdapterNotes::read(request).map_err(PushdownError)
 }
 
 /// The columns the scan UDF must emit, in the order the `EMITS` clause

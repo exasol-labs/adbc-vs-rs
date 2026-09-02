@@ -212,17 +212,37 @@ fn policy_and_container_jobs_call_make() {
         "deny must call `make deny`"
     );
 
-    let integration = make_targets_invoked(job(&workflow, "integration-tests"));
-    assert!(
-        integration.iter().any(|t| t == "test-it"),
-        "integration-tests must call `make test-it`"
-    );
+    for (name, target) in [
+        ("integration-tests", "test-it"),
+        ("integration-tests-postgres", "test-it-postgres"),
+        ("e2e", "test-e2e"),
+        ("e2e-postgres", "test-e2e-postgres"),
+    ] {
+        let invoked = make_targets_invoked(job(&workflow, name));
+        assert!(
+            invoked.iter().any(|t| t == target),
+            "the `{name}` job must call `make {target}`, and no other job may: a tier that \
+             shares a job with another runs only while that other one passed, so a red MySQL \
+             tier would leave PostgreSQL with no signal at the moment it is most needed"
+        );
 
-    let e2e = make_targets_invoked(job(&workflow, "e2e"));
-    assert!(
-        e2e.iter().any(|t| t == "test-e2e"),
-        "e2e must call `make test-e2e`"
-    );
+        for (other, other_target) in [
+            ("integration-tests", "test-it"),
+            ("integration-tests-postgres", "test-it-postgres"),
+            ("e2e", "test-e2e"),
+            ("e2e-postgres", "test-e2e-postgres"),
+        ] {
+            if other == name {
+                continue;
+            }
+            assert!(
+                !make_targets_invoked(job(&workflow, other))
+                    .iter()
+                    .any(|t| t == target),
+                "`{other}` runs `{other_target}` and must not also run `{target}`"
+            );
+        }
+    }
 
     for name in job_names(&workflow) {
         let runs_on = job(&workflow, &name)
@@ -287,7 +307,9 @@ fn release_job_is_gated_and_packages_artifacts() {
         "unit-tests",
         "deny",
         "integration-tests",
+        "integration-tests-postgres",
         "e2e",
+        "e2e-postgres",
     ] {
         assert!(
             needs.iter().any(|n| n.as_str() == Some(required)),
@@ -330,47 +352,56 @@ fn release_job_is_gated_and_packages_artifacts() {
     );
 }
 
+/// Every job that starts the Exasol container carries the same runner
+/// preparation, whichever source's end-to-end binary it runs: the sandbox
+/// needs an unprivileged user namespace, and the images do not fit a
+/// GitHub-hosted runner's default free space.
 #[test]
-fn e2e_job_relaxes_apparmor_and_frees_disk() {
+fn every_e2e_job_relaxes_apparmor_and_frees_disk() {
     let workflow = workflow();
-    let e2e = job(&workflow, "e2e");
-    let runs = step_run_strings(e2e);
 
-    let e2e_index = runs
-        .iter()
-        .position(|r| r.contains("make test-e2e"))
-        .expect("e2e job must call `make test-e2e`");
+    for name in ["e2e", "e2e-postgres"] {
+        let e2e = job(&workflow, name);
+        let runs = step_run_strings(e2e);
 
-    let apparmor_index = runs
-        .iter()
-        .position(|r| r.contains("kernel.apparmor_restrict_unprivileged_userns=0"))
-        .expect("e2e job must relax AppArmor for the Exasol UDF sandbox");
-    assert!(
-        apparmor_index < e2e_index,
-        "AppArmor must be relaxed before the Exasol container starts"
-    );
+        let e2e_index = runs
+            .iter()
+            .position(|r| r.contains("make test-e2e"))
+            .unwrap_or_else(|| panic!("the `{name}` job must call an end-to-end make target"));
 
-    let disk_free_index = runs
-        .iter()
-        .position(|r| r.contains("rm -rf") || r.contains("docker image prune"))
-        .expect("e2e job must free runner disk space");
-    assert!(
-        disk_free_index < e2e_index,
-        "disk space must be freed before pulling images"
-    );
+        let apparmor_index = runs
+            .iter()
+            .position(|r| r.contains("kernel.apparmor_restrict_unprivileged_userns=0"))
+            .unwrap_or_else(|| {
+                panic!("the `{name}` job must relax AppArmor for the Exasol UDF sandbox")
+            });
+        assert!(
+            apparmor_index < e2e_index,
+            "`{name}` must relax AppArmor before the Exasol container starts"
+        );
 
-    let steps = e2e
-        .get("steps")
-        .and_then(Value::as_sequence)
-        .expect("e2e job must declare steps");
-    let uploads_log_on_failure = steps.iter().any(|step| {
-        step.get("uses")
-            .and_then(Value::as_str)
-            .is_some_and(|u| u.starts_with("actions/upload-artifact"))
-            && step.get("if").and_then(Value::as_str) == Some("failure()")
-    });
-    assert!(
-        uploads_log_on_failure,
-        "e2e job must upload the Exasol container log as an artifact when it fails"
-    );
+        let disk_free_index = runs
+            .iter()
+            .position(|r| r.contains("rm -rf") || r.contains("docker image prune"))
+            .unwrap_or_else(|| panic!("the `{name}` job must free runner disk space"));
+        assert!(
+            disk_free_index < e2e_index,
+            "`{name}` must free disk space before pulling images"
+        );
+
+        let steps = e2e
+            .get("steps")
+            .and_then(Value::as_sequence)
+            .unwrap_or_else(|| panic!("the `{name}` job must declare steps"));
+        let uploads_log_on_failure = steps.iter().any(|step| {
+            step.get("uses")
+                .and_then(Value::as_str)
+                .is_some_and(|u| u.starts_with("actions/upload-artifact"))
+                && step.get("if").and_then(Value::as_str) == Some("failure()")
+        });
+        assert!(
+            uploads_log_on_failure,
+            "the `{name}` job must upload the Exasol container log as an artifact when it fails"
+        );
+    }
 }

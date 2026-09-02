@@ -12,6 +12,8 @@
 
 use std::sync::OnceLock;
 
+use adbc_vs_scan::driver::Driver;
+
 use super::exasol::Exasol;
 use super::mirror;
 use super::mysql::{self, MySql};
@@ -48,7 +50,7 @@ fn bring_up() -> Stack {
     udf::deploy(&exasol);
     schema::create_bucketfs_connection(&exasol);
     schema::create_mysql_connection(&exasol, MYSQL_CONNECTION, mysql::DATABASE);
-    schema::create_virtual_schema(&exasol, VIRTUAL_SCHEMA, MYSQL_CONNECTION);
+    schema::create_virtual_schema(&exasol, Driver::MySql, VIRTUAL_SCHEMA, MYSQL_CONNECTION);
     mirror::install(&exasol);
 
     Stack { exasol, mysql }

@@ -7,21 +7,32 @@
 //! ignores, and a strict typed deserialization would reject a request over
 //! an unrelated field.
 //!
-//! This is also the one place that names a concrete
-//! [`SqlDialect`](crate::sql_dialect::SqlDialect): the capability response
-//! and the pushdown response both read the same implementation, so the two
-//! can never disagree about what the adapter delegates.
+//! Neither dialect-reading arm names a concrete
+//! [`SqlDialect`](crate::sql_dialect::SqlDialect). Both resolve one from the
+//! driver identity `createVirtualSchema` recorded in the request's own
+//! `adapterNotes`, so the set the adapter advertises and the statement it
+//! renders are always the same virtual schema's — and a request that records
+//! no identity is refused rather than answered for a guessed one.
+//!
+//! That refusal is safe because of a measured property of Exasol 2025.2.1:
+//! `getCapabilities` is sent only at query-compile time. `CREATE VIRTUAL
+//! SCHEMA`, `ALTER VIRTUAL SCHEMA ... REFRESH`, and `ALTER VIRTUAL SCHEMA
+//! ... SET` were each driven against an adapter whose `getCapabilities`
+//! always failed, and all three succeeded, so no `getCapabilities` can
+//! precede the `createVirtualSchema` that writes the notes it reads.
 
 use std::fmt;
 
+use adbc_vs_scan::driver::{Driver, UnsupportedDriver};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use serde_json::Value;
 
+use crate::adapter_notes::AdapterNotes;
 use crate::capabilities;
 use crate::create_schema::{self, SchemaError};
-use crate::mysql_dialect::MySqlDialect;
 use crate::pushdown::{self, PushdownError};
+use crate::sql_dialect::{dialect_for, SqlDialect};
 
 /// Everything that stops a Virtual Schema request from producing its
 /// response.
@@ -30,6 +41,8 @@ pub enum AdapterError {
     MalformedRequest(String),
     MissingRequestType,
     UnsupportedRequestType(String),
+    UnidentifiedSchema(String),
+    UnsupportedDriver(UnsupportedDriver),
     Schema(SchemaError),
     Pushdown(PushdownError),
 }
@@ -50,6 +63,11 @@ impl fmt::Display for AdapterError {
                  createVirtualSchema, refresh, setProperties, dropVirtualSchema, \
                  getCapabilities, pushdown"
             ),
+            Self::UnidentifiedSchema(cause) => write!(
+                f,
+                "cannot tell which driver this virtual schema was created for: {cause}"
+            ),
+            Self::UnsupportedDriver(error) => write!(f, "{error}"),
             Self::Schema(error) => write!(f, "{error}"),
             Self::Pushdown(error) => write!(f, "{error}"),
         }
@@ -88,11 +106,26 @@ fn handle(ctx: &mut dyn UdfContext, request_json: &str) -> Result<Value, Adapter
         Some("refresh") => Ok(create_schema::refresh(ctx, &request)?),
         Some("setProperties") => Ok(create_schema::set_properties(ctx, &request)?),
         Some("dropVirtualSchema") => Ok(drop_virtual_schema()),
-        Some("getCapabilities") => Ok(capabilities::capabilities_response(&MySqlDialect)),
-        Some("pushdown") => Ok(pushdown::pushdown_response(&request, &MySqlDialect)?),
+        Some("getCapabilities") => Ok(capabilities::capabilities_response(dialect_of(&request)?)),
+        Some("pushdown") => Ok(pushdown::pushdown_response(
+            &request,
+            dialect_of(&request)?,
+        )?),
         Some(other) => Err(AdapterError::UnsupportedRequestType(other.to_string())),
         None => Err(AdapterError::MissingRequestType),
     }
+}
+
+/// The dialect the virtual schema this request is about renders through.
+///
+/// Read from `adapterNotes.driver` rather than from the request's properties:
+/// the notes are what `createVirtualSchema` recorded for this schema, and
+/// resolving both dialect-reading arms from the same field is what keeps the
+/// advertised set and the rendered statement talking about one source.
+fn dialect_of(request: &Value) -> Result<&'static dyn SqlDialect, AdapterError> {
+    let notes = AdapterNotes::read(request).map_err(AdapterError::UnidentifiedSchema)?;
+    let driver = Driver::parse(&notes.driver).map_err(AdapterError::UnsupportedDriver)?;
+    Ok(dialect_for(driver))
 }
 
 /// `dropVirtualSchema` releases no external resource: other virtual schemas
