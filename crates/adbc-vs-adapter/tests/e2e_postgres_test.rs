@@ -873,6 +873,147 @@ fn unmapped_items_columns_are_recorded_and_all_unmapped_table_is_absent() {
     );
 }
 
+// --- identifier case, view exposure, and refresh ----------------------------
+
+/// `"MixedCase"` (`docker/postgres/init.sql`) is the one fixture object whose
+/// table name and column names are all mixed case, which is what separates
+/// case *preservation* from case folding: an unquoted identifier folds to
+/// lower case under PostgreSQL's own rules, so a lower-case-only fixture could
+/// not tell the two apart.
+#[test]
+fn identifiers_keep_their_case_through_discovery_and_rendering() {
+    let tables = table_names(VIRTUAL_SCHEMA);
+    assert!(
+        tables.contains(&"items".to_string())
+            && tables.contains(&"orders".to_string())
+            && tables.contains(&"MixedCase".to_string()),
+        "discovery must keep every source identifier's original case: {tables:?}"
+    );
+    assert!(
+        !tables.contains(&"ITEMS".to_string()) && !tables.contains(&"MIXEDCASE".to_string()),
+        "no identifier may be folded to upper case: {tables:?}"
+    );
+
+    assert_eq!(
+        column_names(VIRTUAL_SCHEMA, "MixedCase"),
+        vec!["ItemId".to_string(), "Label".to_string()],
+        "the mixed-case table's own columns must keep their source case and ordinal order"
+    );
+
+    let query = format!(
+        "SELECT \"ItemId\", \"Label\" FROM {VIRTUAL_SCHEMA}.\"MixedCase\" ORDER BY \"ItemId\""
+    );
+    let statement = generated_statement(&query);
+    assert!(
+        statement.contains("\"public\".\"MixedCase\"") && statement.contains("\"ItemId\""),
+        "the generated statement must carry the source's own case for the schema-qualified \
+         table and the ItemId column, which is what separates a correctly rendered identifier \
+         from one the source would have rejected: {statement}"
+    );
+
+    let rows = stack::shared().exasol.query_rows(&query);
+    assert_eq!(
+        rows.len(),
+        2,
+        "docker/postgres/init.sql seeds two rows into \"MixedCase\": {rows:?}"
+    );
+    assert_eq!(cell(&rows[0], "ItemId"), Some("1".to_string()));
+    assert_eq!(cell(&rows[0], "Label"), Some("First".to_string()));
+    assert_eq!(cell(&rows[1], "ItemId"), Some("2".to_string()));
+    assert_eq!(cell(&rows[1], "Label"), Some("Second".to_string()));
+}
+
+/// `order_names` (`docker/postgres/init.sql`) is a view over `orders`,
+/// projecting only mapped columns. `generated_statement` is what tells a view
+/// queried through the pushdown path from one Exasol resolved on its own: a
+/// name the adapter never discovered would leave `EXPLAIN VIRTUAL` reporting
+/// no statement for it at all.
+#[test]
+fn views_are_exposed_alongside_base_tables() {
+    let tables = table_names(VIRTUAL_SCHEMA);
+    assert!(
+        tables.contains(&"order_names".to_string()) && tables.contains(&"orders".to_string()),
+        "the exposed metadata must list both the base table and the view, not the view alone: \
+         {tables:?}"
+    );
+    assert_eq!(
+        column_names(VIRTUAL_SCHEMA, "order_names"),
+        vec!["id".to_string(), "name".to_string()],
+        "the view projects exactly the two mapped columns of orders it selects in \
+         docker/postgres/init.sql"
+    );
+
+    let query =
+        format!("SELECT \"id\", \"name\" FROM {VIRTUAL_SCHEMA}.\"order_names\" ORDER BY \"id\"");
+    let statement = generated_statement(&query);
+    assert!(
+        statement.contains("\"public\".\"order_names\""),
+        "the generated statement must name the view as a table reached through the pushdown \
+         path, not one Exasol resolved itself: {statement}"
+    );
+
+    let rows = stack::shared().exasol.query_rows(&query);
+    assert_eq!(
+        column_values(&rows, "id"),
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "order_names projects every row docker/postgres/init.sql seeds into orders: {rows:?}"
+    );
+    assert_eq!(
+        column_values(&rows, "name"),
+        vec![
+            "Widget".to_string(),
+            "Gadget".to_string(),
+            "Gizmo".to_string()
+        ],
+        "the view's second column must carry the names docker/postgres/init.sql seeds into \
+         orders, in id order: {rows:?}"
+    );
+}
+
+/// `refresh_target` (`docker/postgres/init.sql`) is dedicated to this test's
+/// `ALTER TABLE`, so no other test's fixture is disturbed by it. Columns are
+/// read before the `ADD COLUMN` and asserted only after the `DROP COLUMN` has
+/// restored the source, so a panic between the two leaves no other test
+/// reading a virtual schema that still declares a column the source no
+/// longer has.
+#[test]
+fn refresh_picks_up_a_new_postgresql_column() {
+    let stack = stack::shared();
+    let before = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+
+    stack
+        .postgres
+        .execute("ALTER TABLE refresh_target ADD COLUMN extra NUMERIC(9,3)");
+    stack
+        .exasol
+        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
+    let after_add = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+
+    stack
+        .postgres
+        .execute("ALTER TABLE refresh_target DROP COLUMN extra");
+    stack
+        .exasol
+        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
+    let after_drop = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+
+    assert!(
+        !before.iter().any(|(name, _)| name == "extra"),
+        "the fixture must not already carry the column the refresh is to discover: {before:?}"
+    );
+    assert!(
+        after_add.contains(&("extra".to_string(), "DECIMAL(9,3)".to_string())),
+        "a refresh must re-run discovery and expose the new source column under PostgreSQL's \
+         own numeric mapping, which is what proves discovery ran rather than returning a cached \
+         shape: {after_add:?}"
+    );
+    assert_eq!(
+        after_drop, before,
+        "the second refresh must leave the shared virtual schema declaring exactly the columns \
+         the source still has"
+    );
+}
+
 /// Every error `createVirtualSchema`, `refresh`, and `setProperties` surface
 /// for one broken `CONNECTION`, over the three entry points that all funnel
 /// through `create_schema::open`. `scenario` names the two schemas and
