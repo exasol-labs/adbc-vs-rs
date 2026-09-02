@@ -33,14 +33,22 @@ Routes each Virtual Schema request Exasol sends to the adapter script, and turns
 * *THEN* the adapter MUST return exactly `{"type":"dropVirtualSchema"}`
 * *AND* the adapter MUST NOT delete any driver shared library from BucketFS, because other virtual schemas MAY still reference it, whether or not they name the same driver
 
-### Scenario: Refresh and setProperties re-run metadata discovery
+### Scenario: Refresh re-runs metadata discovery
 
-* *GIVEN* a virtual schema whose source has gained a column since creation
+* *GIVEN* a virtual schema whose source has gained a column since creation, for each driver this release supports
 * *WHEN* the adapter receives a `refresh` request
 * *THEN* the adapter MUST re-run metadata discovery against the source
 * *AND* the discovery MUST run through the metadata source the request's recorded driver resolves to
 * *AND* the returned `schemaMetadata` MUST include the new column
 * *AND* the adapter MUST echo the request's `requestedTables` field when the request carries one
+
+### Scenario: setProperties re-runs metadata discovery
+
+* *GIVEN* a virtual schema whose changed properties name a different source than creation did
+* *WHEN* the adapter receives a `setProperties` request
+* *THEN* the adapter MUST re-run metadata discovery against the source the changed properties name
+* *AND* the discovery MUST run through the metadata source the request's recorded driver resolves to
+* *AND* the returned `schemaMetadata` MUST describe that source rather than the one creation discovered
 
 ### Scenario: Unsupported request type fails with a named error
 
