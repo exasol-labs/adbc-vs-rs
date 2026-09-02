@@ -116,7 +116,7 @@ impl Postgres {
             .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
-    /// Fails loudly when the Compose seed did not create every fixture table,
+    /// Fails loudly when the Compose seed did not create every fixture object,
     /// naming the recovery that recreates the service from the current
     /// `docker/postgres/init.sql`.
     fn check_fixture(&self) {
