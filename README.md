@@ -45,7 +45,7 @@ See [`specs/mission.md`](specs/mission.md) for the full problem statement, archi
 ADBC-backed databases supported today, and the v1 driver set this project is working toward:
 
 - [x] MySQL
-- [ ] PostgreSQL
+- [x] PostgreSQL
 - [ ] Snowflake
 - [ ] Databricks
 - [ ] DuckDB
