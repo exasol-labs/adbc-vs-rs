@@ -156,7 +156,7 @@ fn undeclarable_type_named_in_error() {
 fn boolean_declared_type_reaches_the_emits_clause() {
     let adapter_notes = AdapterNotes {
         driver: "mysql".to_string(),
-        driver_version: "v0.6.0".to_string(),
+        driver_version: Some("v0.6.0".to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
         database: DATABASE.to_string(),

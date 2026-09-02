@@ -1,21 +1,41 @@
-//! Discovers MySQL tables and columns through `information_schema`, behind
-//! an interface the adapter defines in its own vocabulary.
+//! What a virtual schema needs to know about its source, behind an interface
+//! the adapter defines in its own vocabulary.
 //!
-//! `information_schema` is queried rather than ADBC's own catalog calls
-//! (`GetTableSchema`, `GetObjects`) because Exasol must declare an exact
-//! column type at `CREATE VIRTUAL SCHEMA` time: `GetTableSchema` reports
-//! `VARCHAR` as Arrow `Utf8` with no length, and whether this driver
-//! populates `GetObjects`'s `xdbc_*` fields is undocumented.
+//! A source answers two questions and no others: whether it meets the
+//! precondition the dialect that renders for it states, and which tables and
+//! columns it exposes — each column already mapped to the Exasol type its
+//! virtual column declares. Both answers are per technology, and neither
+//! leaks the shape it was read from: no source-catalog column struct crosses
+//! this boundary, so `createVirtualSchema` assembles a response without
+//! knowing which catalog it came from or which types that catalog spells.
 //!
-//! Row assembly ([`assemble_tables`]) is pure and tested without a
-//! database; only the two `information_schema` queries and their Arrow
-//! result parsing touch ADBC.
+//! Mapping belongs behind the interface rather than in front of it because it
+//! is a pure function of one source's own catalog metadata. A shared column
+//! struct wide enough to carry every source's catalog would put every
+//! technology's fields in front of every other technology's mapper.
+//!
+//! Every implementation queries the source's own `information_schema` rather
+//! than ADBC's catalog calls (`GetTableSchema`, `GetObjects`), because Exasol
+//! must declare an exact column type at `CREATE VIRTUAL SCHEMA` time:
+//! `GetTableSchema` reports `VARCHAR` as Arrow `Utf8` with no length, and
+//! whether a driver populates `GetObjects`'s `xdbc_*` fields is undocumented.
+//! Which catalog columns to read and what their values mean is per technology
+//! and stays in that technology's own source; what is shared is running a
+//! statement, reading an Arrow cell out of its result, and grouping the rows
+//! that came back into tables, which is why those live here. Row assembly is
+//! pure and tested without a database; only the queries and their Arrow result
+//! parsing touch ADBC.
+//!
+//! This module holds no technology's source. MySQL's is `mysql_source` and
+//! PostgreSQL's is `postgres_source`; each is reached only through
+//! [`source_for`].
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use adbc_core::{Connection, Statement};
 use adbc_driver_manager::ManagedConnection;
+use adbc_vs_scan::driver::Driver;
 use arrow::array::{
     Array, Decimal128Array, Int16Array, Int32Array, Int64Array, Int8Array, LargeStringArray,
     StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
@@ -23,275 +43,220 @@ use arrow::array::{
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
-use crate::type_mapping::MySqlColumn;
+use crate::adapter_notes::Omission;
+use crate::mysql_source::MySqlSource;
+use crate::postgres_source::PostgresSource;
+use crate::type_mapping::MappedColumn;
 
-/// A MySQL column discovered by [`MetadataSource::discover_tables`], paired
-/// with its name and the fields [`crate::type_mapping::map_column`] needs.
+/// A source column that maps, and the Exasol column definition it maps to.
 pub struct DiscoveredColumn {
     pub name: String,
-    pub mysql: MySqlColumn,
+    pub mapped: MappedColumn,
 }
 
-/// A MySQL base table or view discovered by [`MetadataSource::discover_tables`],
-/// with its columns in `information_schema`'s ordinal position order.
+/// A source table or view discovered for a virtual schema: the columns that
+/// map, in the source's own ordinal order, and the ones that do not, each
+/// already carrying the source type and the reason it was left out.
 pub struct DiscoveredTable {
     pub name: String,
     pub columns: Vec<DiscoveredColumn>,
+    pub omissions: Vec<Omission>,
 }
 
-/// The collations a MySQL source server reports, and the version string it
-/// reports alongside them.
+/// Why a source could not serve a virtual schema.
 ///
-/// `crate::create_schema` checks this at `CREATE VIRTUAL SCHEMA` time: the
-/// two collations pushdown rendering requires arrived at different points in
-/// MySQL's own release history, so the check reads the collation listing
-/// itself rather than trusting a parsed version number.
-pub struct SourceCollations {
-    pub names: Vec<String>,
-    pub server_version: String,
+/// The three are different outcomes for an operator, so they are different
+/// variants: a catalog read that failed may succeed on the next attempt, a
+/// source the rendering cannot be used against is answered by changing the
+/// server, and a namespace this source cannot query for is answered by
+/// changing the `CONNECTION` address.
+#[derive(Debug)]
+pub enum MetadataError {
+    Catalog(String),
+    UnsupportedSource(String),
+    UnsafeDatabaseName { database: String, character: char },
 }
 
-/// Metadata discovery failed: the query it ran and why.
-#[derive(Debug)]
-pub struct MetadataError(String);
+impl MetadataError {
+    pub(crate) fn catalog(cause: impl Into<String>) -> Self {
+        Self::Catalog(cause.into())
+    }
+}
 
 impl fmt::Display for MetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "discovering MySQL metadata: {}", self.0)
+        match self {
+            Self::Catalog(cause) => write!(f, "discovering source metadata: {cause}"),
+            Self::UnsupportedSource(reason) => write!(f, "{reason}"),
+            Self::UnsafeDatabaseName {
+                database,
+                character,
+            } => write!(
+                f,
+                "the MySQL database name `{database}`, taken from the path component of the \
+                 source connection's address, contains `{character}`, which the \
+                 information_schema queries built from it cannot safely quote"
+            ),
+        }
     }
 }
 
 impl std::error::Error for MetadataError {}
 
-/// Discovers the tables and columns of a MySQL database.
-///
-/// The adapter defines this interface in its own vocabulary — a list of
-/// tables, each with its columns in ordinal order — rather than an ADBC or
-/// `information_schema` shape, so a later backend supplies its own
-/// implementation without the adapter changing.
+/// Everything a virtual schema learns from its source.
 pub trait MetadataSource {
-    fn discover_tables(&mut self, database: &str) -> Result<Vec<DiscoveredTable>, MetadataError>;
-}
-
-/// Discovers MySQL metadata over an open ADBC connection.
-pub struct AdbcMetadataSource {
-    connection: ManagedConnection,
-}
-
-impl AdbcMetadataSource {
-    /// Wraps an already-open ADBC connection to the source MySQL database.
-    pub fn new(connection: ManagedConnection) -> Self {
-        Self { connection }
-    }
-
-    /// Reads every collation name the source server knows, and the server's
-    /// own version string.
+    /// The one source namespace this virtual schema exposes, and the value
+    /// `adapterNotes` records as it.
     ///
-    /// This is not part of [`MetadataSource`]: it answers a question specific
-    /// to this release's MySQL pushdown rendering, not the driver-agnostic
-    /// table discovery the trait exists to abstract over.
-    pub fn discover_collations(&mut self) -> Result<SourceCollations, MetadataError> {
-        let names = query_collation_names(&mut self.connection)?;
-        let server_version = query_server_version(&mut self.connection)?;
-        Ok(SourceCollations {
-            names,
-            server_version,
-        })
-    }
+    /// Derived rather than configured, and what it is derived from is the
+    /// source's own business: MySQL's namespace is the database the connection
+    /// address names, because a MySQL database *is* its SQL qualifier, while
+    /// PostgreSQL's is the `public` schema, because a PostgreSQL database is
+    /// not one. Answering it here rather than at the call site is what keeps
+    /// that difference inside the technology that has it — the schema
+    /// assembles the same response whichever answer it gets, and the dialect
+    /// qualifies its tables with whatever was recorded.
+    fn namespace(&self) -> &str;
+
+    /// Refuses a source this release's rendering cannot be used against.
+    ///
+    /// The precondition is stated by the dialect that renders for the source
+    /// rather than by the source itself: MySQL's rendering needs two named
+    /// collations at the server, and another technology's rendering needs
+    /// something else entirely, so each implementation answers only for its
+    /// own.
+    fn check_source(&mut self) -> Result<(), MetadataError>;
+
+    /// Discovers the tables of [`Self::namespace`], every column already
+    /// mapped to the Exasol type its virtual column declares and every
+    /// unmappable column recorded as an omission.
+    ///
+    /// An unmapped column is a normal outcome rather than a failure: the
+    /// virtual table is built from what maps, and what did not is recorded
+    /// for an operator to read back.
+    fn discover_tables(&mut self) -> Result<Vec<DiscoveredTable>, MetadataError>;
 }
 
-impl MetadataSource for AdbcMetadataSource {
-    fn discover_tables(&mut self, database: &str) -> Result<Vec<DiscoveredTable>, MetadataError> {
-        let table_names = query_table_names(&mut self.connection, database)?;
-        let column_rows = query_columns(&mut self.connection, database)?;
-        Ok(assemble_tables(table_names, column_rows))
-    }
-}
-
-/// One row of the `information_schema.columns` query, before it is grouped
-/// into a [`DiscoveredTable`].
-struct ColumnRow {
-    table: String,
-    column: String,
-    ordinal_position: i64,
-    data_type: String,
-    column_type: String,
-    character_maximum_length: Option<i64>,
-    character_set: Option<String>,
-    numeric_precision: Option<i64>,
-    numeric_scale: Option<i64>,
-    is_nullable: bool,
-}
-
-/// Groups `information_schema.columns` rows under their table, in the
-/// table-name order `table_names` gives and the ordinal-position order each
-/// row already carries.
+/// The metadata source that reads `driver`'s catalog, over an already-open
+/// ADBC connection to it.
 ///
-/// A table with no column rows — nothing this release should encounter
-/// against a real MySQL database, but not a failure this function itself
-/// judges — is reported with an empty column list; the caller treats that
-/// the same way it treats a fully unmapped table.
-fn assemble_tables(
-    table_names: Vec<String>,
-    mut column_rows: Vec<ColumnRow>,
-) -> Vec<DiscoveredTable> {
-    column_rows.sort_by_key(|row| (row.table.clone(), row.ordinal_position));
+/// `address_database` is the database component of the `CONNECTION` object's
+/// address. Whether that is also the namespace the virtual schema exposes is
+/// the source's own answer, not this function's: MySQL keeps it, PostgreSQL
+/// exposes `public` and uses the database only as the connection target.
+///
+/// One table, matched exhaustively, so a technology added to the identity has
+/// to bring a source that answers its own catalog — no other implementation
+/// can, and a fallback would answer one catalog's questions against another.
+pub fn source_for(
+    driver: Driver,
+    connection: ManagedConnection,
+    address_database: &str,
+) -> Box<dyn MetadataSource> {
+    match driver {
+        Driver::MySql => Box::new(MySqlSource::new(connection, address_database)),
+        Driver::Postgres => Box::new(PostgresSource::new(connection)),
+    }
+}
 
-    let mut columns_by_table: BTreeMap<String, Vec<DiscoveredColumn>> = BTreeMap::new();
-    for row in column_rows {
-        let is_unsigned = row.column_type.to_ascii_lowercase().contains("unsigned");
-        let column = DiscoveredColumn {
-            name: row.column,
-            mysql: MySqlColumn {
-                data_type: row.data_type,
-                character_length: row
-                    .character_maximum_length
-                    .and_then(|n| u32::try_from(n).ok()),
-                character_set: row.character_set,
-                numeric_precision: row.numeric_precision.and_then(|n| u32::try_from(n).ok()),
-                numeric_scale: row.numeric_scale.and_then(|n| u32::try_from(n).ok()),
-                is_unsigned,
-                is_nullable: row.is_nullable,
-            },
-        };
-        columns_by_table.entry(row.table).or_default().push(column);
+/// The four things [`assemble_tables`] reads off a catalog row, whichever
+/// catalog it came from.
+///
+/// Deliberately not the row itself: everything else a row carries is what its
+/// own mapping reads, and a trait wide enough to expose that would put every
+/// technology's catalog fields in front of every other technology's.
+pub(crate) trait CatalogRow {
+    fn table(&self) -> &str;
+    fn column(&self) -> &str;
+    fn ordinal_position(&self) -> i64;
+    /// The source's own name for this column's type, recorded on an omission
+    /// so an operator reads back the spelling their own catalog uses.
+    fn source_type(&self) -> &str;
+}
+
+/// Groups a source's catalog rows under their table, in the table-name order
+/// `table_names` gives and the ordinal-position order each row already
+/// carries, mapping each row through `map` as it goes.
+///
+/// The rule is the framework's rather than any technology's: which columns a
+/// virtual table declares and in which order, what an omission records, and
+/// what a table with no rows becomes are answers `createVirtualSchema` depends
+/// on being the same whichever source produced them. Only `map` is per
+/// technology, and it is a function rather than a second trait method because
+/// it consumes the row — the mapping reads fields no source shares.
+///
+/// A table with no column rows — nothing this release should encounter against
+/// a real source, but not a failure this function itself judges — is reported
+/// with an empty column list; the caller treats that the same way it treats a
+/// fully unmapped table.
+pub(crate) fn assemble_tables<R: CatalogRow>(
+    table_names: Vec<String>,
+    mut rows: Vec<R>,
+    map: impl Fn(R) -> Result<MappedColumn, String>,
+) -> Vec<DiscoveredTable> {
+    rows.sort_by(|one, other| {
+        one.table()
+            .cmp(other.table())
+            .then(one.ordinal_position().cmp(&other.ordinal_position()))
+    });
+
+    let mut mapped_by_table: BTreeMap<String, Vec<DiscoveredColumn>> = BTreeMap::new();
+    let mut omissions_by_table: BTreeMap<String, Vec<Omission>> = BTreeMap::new();
+    for row in rows {
+        let table = row.table().to_owned();
+        let name = row.column().to_owned();
+        let source_type = row.source_type().to_owned();
+        match map(row) {
+            Ok(mapped) => mapped_by_table
+                .entry(table)
+                .or_default()
+                .push(DiscoveredColumn { name, mapped }),
+            Err(reason) => omissions_by_table
+                .entry(table.clone())
+                .or_default()
+                .push(Omission {
+                    table,
+                    column: Some(name),
+                    source_type: Some(source_type),
+                    reason,
+                }),
+        }
     }
 
     table_names
         .into_iter()
-        .map(|name| {
-            let columns = columns_by_table.remove(&name).unwrap_or_default();
-            DiscoveredTable { name, columns }
+        .map(|name| DiscoveredTable {
+            columns: mapped_by_table.remove(&name).unwrap_or_default(),
+            omissions: omissions_by_table.remove(&name).unwrap_or_default(),
+            name,
         })
         .collect()
 }
 
-/// Quotes a MySQL string literal, escaping a backslash and an embedded quote
-/// so a database name containing either cannot change the shape of a
-/// generated `information_schema` query.
-///
-/// A database name is validated before it ever reaches here:
-/// `create_schema::reject_unsafe_database_name` refuses one carrying a single
-/// quote or a backslash at the point `CONNECTION_NAME`'s address resolves it,
-/// so this escaper's input is never one of those two characters in practice.
-fn quote_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-fn query_table_names(
-    connection: &mut ManagedConnection,
-    database: &str,
-) -> Result<Vec<String>, MetadataError> {
-    let sql = format!(
-        "SELECT TABLE_NAME FROM information_schema.tables \
-         WHERE TABLE_SCHEMA = {} AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
-         ORDER BY TABLE_NAME",
-        quote_string_literal(database)
-    );
-
-    let mut names = Vec::new();
-    for batch in run_query(connection, &sql)? {
-        let column = batch_column(&batch, "TABLE_NAME", &sql)?;
-        for row in 0..batch.num_rows() {
-            names.push(required_string_cell(column, row, "TABLE_NAME")?);
-        }
-    }
-    Ok(names)
-}
-
-fn query_columns(
-    connection: &mut ManagedConnection,
-    database: &str,
-) -> Result<Vec<ColumnRow>, MetadataError> {
-    let sql = format!(
-        "SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE, COLUMN_TYPE, \
-         CHARACTER_MAXIMUM_LENGTH, CHARACTER_SET_NAME, NUMERIC_PRECISION, NUMERIC_SCALE, \
-         IS_NULLABLE \
-         FROM information_schema.columns WHERE TABLE_SCHEMA = {} \
-         ORDER BY TABLE_NAME, ORDINAL_POSITION",
-        quote_string_literal(database)
-    );
-
-    let mut rows = Vec::new();
-    for batch in run_query(connection, &sql)? {
-        let table = batch_column(&batch, "TABLE_NAME", &sql)?;
-        let column = batch_column(&batch, "COLUMN_NAME", &sql)?;
-        let ordinal_position = batch_column(&batch, "ORDINAL_POSITION", &sql)?;
-        let data_type = batch_column(&batch, "DATA_TYPE", &sql)?;
-        let column_type = batch_column(&batch, "COLUMN_TYPE", &sql)?;
-        let character_maximum_length = batch_column(&batch, "CHARACTER_MAXIMUM_LENGTH", &sql)?;
-        let character_set = batch_column(&batch, "CHARACTER_SET_NAME", &sql)?;
-        let numeric_precision = batch_column(&batch, "NUMERIC_PRECISION", &sql)?;
-        let numeric_scale = batch_column(&batch, "NUMERIC_SCALE", &sql)?;
-        let is_nullable = batch_column(&batch, "IS_NULLABLE", &sql)?;
-
-        for row in 0..batch.num_rows() {
-            rows.push(ColumnRow {
-                table: required_string_cell(table, row, "TABLE_NAME")?,
-                column: required_string_cell(column, row, "COLUMN_NAME")?,
-                ordinal_position: required_i64_cell(ordinal_position, row, "ORDINAL_POSITION")?,
-                data_type: required_string_cell(data_type, row, "DATA_TYPE")?,
-                column_type: required_string_cell(column_type, row, "COLUMN_TYPE")?,
-                character_maximum_length: i64_cell(character_maximum_length, row)?,
-                character_set: string_cell(character_set, row)?,
-                numeric_precision: i64_cell(numeric_precision, row)?,
-                numeric_scale: i64_cell(numeric_scale, row)?,
-                is_nullable: required_string_cell(is_nullable, row, "IS_NULLABLE")? == "YES",
-            });
-        }
-    }
-    Ok(rows)
-}
-
-fn query_collation_names(connection: &mut ManagedConnection) -> Result<Vec<String>, MetadataError> {
-    let sql = "SELECT COLLATION_NAME FROM information_schema.COLLATIONS";
-
-    let mut names = Vec::new();
-    for batch in run_query(connection, sql)? {
-        let column = batch_column(&batch, "COLLATION_NAME", sql)?;
-        for row in 0..batch.num_rows() {
-            names.push(required_string_cell(column, row, "COLLATION_NAME")?);
-        }
-    }
-    Ok(names)
-}
-
-fn query_server_version(connection: &mut ManagedConnection) -> Result<String, MetadataError> {
-    let sql = "SELECT VERSION() AS SERVER_VERSION";
-
-    for batch in run_query(connection, sql)? {
-        let column = batch_column(&batch, "SERVER_VERSION", sql)?;
-        if batch.num_rows() > 0 {
-            return required_string_cell(column, 0, "SERVER_VERSION");
-        }
-    }
-    Err(MetadataError(format!("`{sql}` returned no row")))
-}
-
-fn run_query(
+pub(crate) fn run_query(
     connection: &mut ManagedConnection,
     sql: &str,
 ) -> Result<Vec<RecordBatch>, MetadataError> {
     let mut statement = connection
         .new_statement()
-        .map_err(|error| MetadataError(format!("preparing `{sql}`: {error}")))?;
+        .map_err(|error| MetadataError::catalog(format!("preparing `{sql}`: {error}")))?;
     statement
         .set_sql_query(sql)
-        .map_err(|error| MetadataError(format!("setting query `{sql}`: {error}")))?;
+        .map_err(|error| MetadataError::catalog(format!("setting query `{sql}`: {error}")))?;
     let reader = statement
         .execute()
-        .map_err(|error| MetadataError(format!("executing `{sql}`: {error}")))?;
+        .map_err(|error| MetadataError::catalog(format!("executing `{sql}`: {error}")))?;
 
     let mut batches = Vec::new();
     for batch in reader {
         batches.push(batch.map_err(|error| {
-            MetadataError(format!("reading a result batch of `{sql}`: {error}"))
+            MetadataError::catalog(format!("reading a result batch of `{sql}`: {error}"))
         })?);
     }
     Ok(batches)
 }
 
-fn batch_column<'a>(
+pub(crate) fn batch_column<'a>(
     batch: &'a RecordBatch,
     name: &str,
     sql: &str,
@@ -299,10 +264,10 @@ fn batch_column<'a>(
     batch
         .column_by_name(name)
         .map(|array| array.as_ref())
-        .ok_or_else(|| MetadataError(format!("`{sql}` returned no `{name}` column")))
+        .ok_or_else(|| MetadataError::catalog(format!("`{sql}` returned no `{name}` column")))
 }
 
-fn string_cell(array: &dyn Array, row: usize) -> Result<Option<String>, MetadataError> {
+pub(crate) fn string_cell(array: &dyn Array, row: usize) -> Result<Option<String>, MetadataError> {
     if array.is_null(row) {
         return Ok(None);
     }
@@ -311,21 +276,22 @@ fn string_cell(array: &dyn Array, row: usize) -> Result<Option<String>, Metadata
         DataType::LargeUtf8 => Ok(Some(
             downcast::<LargeStringArray>(array)?.value(row).to_string(),
         )),
-        other => Err(MetadataError(format!(
+        other => Err(MetadataError::catalog(format!(
             "expected a string information_schema column, got arrow type {other:?}"
         ))),
     }
 }
 
-fn required_string_cell(
+pub(crate) fn required_string_cell(
     array: &dyn Array,
     row: usize,
     column: &str,
 ) -> Result<String, MetadataError> {
-    string_cell(array, row)?.ok_or_else(|| MetadataError(format!("{column} is unexpectedly NULL")))
+    string_cell(array, row)?
+        .ok_or_else(|| MetadataError::catalog(format!("{column} is unexpectedly NULL")))
 }
 
-fn i64_cell(array: &dyn Array, row: usize) -> Result<Option<i64>, MetadataError> {
+pub(crate) fn i64_cell(array: &dyn Array, row: usize) -> Result<Option<i64>, MetadataError> {
     if array.is_null(row) {
         return Ok(None);
     }
@@ -340,7 +306,7 @@ fn i64_cell(array: &dyn Array, row: usize) -> Result<Option<i64>, MetadataError>
         DataType::UInt64 => {
             let value = downcast::<UInt64Array>(array)?.value(row);
             i64::try_from(value).map_err(|_| {
-                MetadataError(format!(
+                MetadataError::catalog(format!(
                     "{value} overflows i64 in an information_schema column"
                 ))
             })?
@@ -349,7 +315,7 @@ fn i64_cell(array: &dyn Array, row: usize) -> Result<Option<i64>, MetadataError>
             downcast::<Decimal128Array>(array)?.value(row) as i64
         }
         other => {
-            return Err(MetadataError(format!(
+            return Err(MetadataError::catalog(format!(
                 "expected an integer information_schema column, got arrow type {other:?}"
             )))
         }
@@ -357,13 +323,18 @@ fn i64_cell(array: &dyn Array, row: usize) -> Result<Option<i64>, MetadataError>
     Ok(Some(value))
 }
 
-fn required_i64_cell(array: &dyn Array, row: usize, column: &str) -> Result<i64, MetadataError> {
-    i64_cell(array, row)?.ok_or_else(|| MetadataError(format!("{column} is unexpectedly NULL")))
+pub(crate) fn required_i64_cell(
+    array: &dyn Array,
+    row: usize,
+    column: &str,
+) -> Result<i64, MetadataError> {
+    i64_cell(array, row)?
+        .ok_or_else(|| MetadataError::catalog(format!("{column} is unexpectedly NULL")))
 }
 
 fn downcast<T: Array + 'static>(array: &dyn Array) -> Result<&T, MetadataError> {
     array.as_any().downcast_ref::<T>().ok_or_else(|| {
-        MetadataError(format!(
+        MetadataError::catalog(format!(
             "an information_schema column reported type {:?} but did not downcast to it",
             array.data_type()
         ))
@@ -373,3 +344,10 @@ fn downcast<T: Array + 'static>(array: &dyn Array) -> Result<&T, MetadataError> 
 #[cfg(test)]
 #[path = "metadata_tests.rs"]
 mod tests;
+
+/// The rules that bind every source rather than one of them. Attached here
+/// because each source's own catalog shape is what they are driven through,
+/// and this module owns the interface those shapes are reached behind.
+#[cfg(test)]
+#[path = "metadata_source_tests.rs"]
+mod source_tests;

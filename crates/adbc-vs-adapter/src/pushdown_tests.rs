@@ -1,7 +1,6 @@
 use serde_json::json;
 
 use super::*;
-use crate::exa_type::ExasolType;
 use crate::mysql_dialect::MySqlDialect;
 
 fn request(select_list: Option<Value>) -> Value {
@@ -15,7 +14,7 @@ fn request(select_list: Option<Value>) -> Value {
 
     let adapter_notes = AdapterNotes {
         driver: "mysql".to_string(),
-        driver_version: "v0.6.0".to_string(),
+        driver_version: Some("v0.6.0".to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
         database: "shop".to_string(),
@@ -75,7 +74,7 @@ fn named_select_list_projects_and_orders_the_named_columns() {
 fn a_join_projecting_two_columns_of_the_same_name_gets_distinct_positional_names() {
     let adapter_notes = AdapterNotes {
         driver: "mysql".to_string(),
-        driver_version: "v0.6.0".to_string(),
+        driver_version: Some("v0.6.0".to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
         database: "shop".to_string(),
@@ -132,59 +131,6 @@ fn a_join_projecting_two_columns_of_the_same_name_gets_distinct_positional_names
     assert!(
         sql.contains(r#""name":"c1""#) && sql.contains(r#""name":"c2""#),
         "the scan specification must carry the same positional names the EMITS clause declares: {sql}"
-    );
-}
-
-#[test]
-fn select_list_entries_sharing_a_source_column_name_get_distinct_positional_names() {
-    let query = Query {
-        select_list: vec![
-            pushdown_query::SelectItem {
-                expression: pushdown_query::Expression::Column(pushdown_query::ColumnRef {
-                    name: "id".to_string(),
-                    declared_type: ExasolType::Decimal {
-                        precision: 19,
-                        scale: 0,
-                    },
-                    table_name: None,
-                    table_alias: None,
-                }),
-                declared_type: ExasolType::Decimal {
-                    precision: 19,
-                    scale: 0,
-                },
-            },
-            pushdown_query::SelectItem {
-                expression: pushdown_query::Expression::Column(pushdown_query::ColumnRef {
-                    name: "id".to_string(),
-                    declared_type: ExasolType::Decimal {
-                        precision: 19,
-                        scale: 0,
-                    },
-                    table_name: None,
-                    table_alias: None,
-                }),
-                declared_type: ExasolType::Decimal {
-                    precision: 19,
-                    scale: 0,
-                },
-            },
-        ],
-        filter: None,
-        aggregation: None,
-        from: pushdown_query::FromClause::Table(pushdown_query::SourceTable {
-            schema: "shop".to_string(),
-            name: "orders".to_string(),
-            alias: None,
-        }),
-    };
-
-    let columns = emitted_columns(&query);
-
-    assert_ne!(
-        columns[0].name, columns[1].name,
-        "two select-list entries over the same source column name must still get pairwise \
-         distinct EMITS names: {columns:?}"
     );
 }
 

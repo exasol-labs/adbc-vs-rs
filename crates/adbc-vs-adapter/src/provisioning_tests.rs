@@ -9,22 +9,34 @@ use super::*;
 
 const FIXTURE_INDEX: &str = include_str!("../tests/fixtures/index.yaml");
 
-/// The SHA-256 of the empty input, from the algorithm's own test vectors.
-const EMPTY_DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
 /// Builds a gzipped tar archive of `(name, content)` members, the shape the
 /// driver registry publishes packages in.
+fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+    let declared: Vec<(&str, &[u8], u64)> = members
+        .iter()
+        .map(|(name, content)| (*name, *content, content.len() as u64))
+        .collect();
+    archive_declaring(&declared)
+}
+
+/// Builds a gzipped tar archive whose members declare `size` in their headers
+/// rather than the length of the content that follows.
+///
+/// A header is what an unpacker learns a member's size from before it reads a
+/// byte of it, so declaring one larger than the content is how a hostile
+/// archive asks for more than it sends — and the only way to drive the
+/// unpacked-size bound without building a half-gigabyte fixture.
 ///
 /// Member names are written into the header directly, because the builder
 /// refuses to write the `..` an archive would have to carry to attempt a path
 /// traversal.
-fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
+fn archive_declaring(members: &[(&str, &[u8], u64)]) -> Vec<u8> {
     let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
-    for (name, content) in members {
+    for (name, content, size) in members {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
         header.set_mode(0o644);
-        header.set_size(content.len() as u64);
+        header.set_size(*size);
         let raw = &mut header
             .as_gnu_mut()
             .expect("a GNU header must render as one")
@@ -55,19 +67,50 @@ fn package_naming(filename: &str, library: &[u8]) -> Vec<u8> {
 const PACKAGE_URL: &str = "https://registry.invalid/mysql/v0.6.0/mysql_linux_amd64_v0.6.0.tar.gz";
 
 #[test]
-fn selects_the_pinned_platform_package_of_the_pinned_version() {
-    let url = select_package_url(FIXTURE_INDEX, &Registry::pinned())
-        .expect("the fixture index publishes the pinned package");
+fn selects_the_highest_in_range_versions_platform_package() {
+    let resolved = select_package(FIXTURE_INDEX, &Registry::public(Driver::MySql))
+        .expect("the fixture index publishes two mysql versions inside the declared range");
 
     assert_eq!(
-        url,
-        "https://dbc-cdn.columnar.tech/mysql/v0.6.0/mysql_linux_amd64_v0.6.0.tar.gz"
+        resolved.url,
+        "https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_linux_amd64_0.6.1.tar.gz"
+    );
+}
+
+/// The two drivers' ranges are independent data, not one rule applied to both.
+///
+/// MySQL sits below 1.0, where a minor bump is breaking by SemVer convention,
+/// so its declared range stops at the very next minor: `v0.7.0` is published
+/// and excluded. A rule derived from that same "stop at the next minor"
+/// shape would forbid PostgreSQL's own `1.13.0` just as it forbids MySQL's
+/// `v0.7.0` — but PostgreSQL's declared range instead admits every `1.x`
+/// through `<2.0.0`, so `1.13.0` resolves. That only holds because each
+/// driver's range is stated as its own fact in its own `drivers/*.toml`,
+/// never derived from the other's.
+#[test]
+fn ranges_are_independent_rather_than_one_shared_minor_bump_rule() {
+    let mysql = select_package(FIXTURE_INDEX, &Registry::public(Driver::MySql))
+        .expect("the fixture index publishes an in-range mysql version");
+    assert_eq!(
+        mysql.version.to_string(),
+        "0.6.1",
+        "MySQL's declared range excludes the published v0.7.0, the next minor bump"
+    );
+
+    let postgresql = select_package(FIXTURE_INDEX, &Registry::public(Driver::Postgres))
+        .expect("the fixture index publishes an in-range postgresql version");
+    assert_eq!(
+        postgresql.version.to_string(),
+        "1.13.0",
+        "PostgreSQL's declared range admits a minor bump beyond 1.12.0 — the very kind \
+         of bump MySQL's own range excludes — because the two ranges are independent \
+         data rather than one shared rule"
     );
 }
 
 #[test]
 fn unparseable_index_names_the_index_url() {
-    let error = select_package_url("drivers: [", &Registry::pinned())
+    let error = select_package("drivers: [", &Registry::public(Driver::MySql))
         .expect_err("a truncated document must not parse");
 
     assert!(
@@ -80,7 +123,7 @@ fn unparseable_index_names_the_index_url() {
 fn index_without_the_driver_names_the_driver_path() {
     let index = "drivers:\n  - path: postgresql\n    pkginfo: []\n";
 
-    let error = select_package_url(index, &Registry::pinned())
+    let error = select_package(index, &Registry::public(Driver::MySql))
         .expect_err("an index without the mysql driver must fail");
 
     assert!(
@@ -90,17 +133,46 @@ fn index_without_the_driver_names_the_driver_path() {
 }
 
 #[test]
-fn index_without_the_pinned_version_names_that_version() {
-    let index =
-        "drivers:\n  - path: mysql\n    pkginfo:\n      - version: v0.5.0\n        packages: []\n";
+fn unsatisfiable_range_names_driver_and_published_versions() {
+    let index = concat!(
+        "drivers:\n",
+        "  - path: mysql\n",
+        "    pkginfo:\n",
+        "      - version: v0.5.0\n",
+        "        packages: []\n",
+        "      - version: v0.9.0\n",
+        "        packages: []\n",
+    );
 
-    let error = select_package_url(index, &Registry::pinned())
-        .expect_err("an index without the pinned version must fail");
+    let error = select_package(index, &Registry::public(Driver::MySql))
+        .expect_err("an index publishing nothing inside the range must fail");
 
     let message = error.to_string();
     assert!(
-        message.contains("v0.6.0"),
-        "the error must name the version it looked for: {message}"
+        message.contains("mysql"),
+        "the error must name the driver it resolved: {message}"
+    );
+    assert!(
+        message.contains(Driver::MySql.package().version_range),
+        "the error must name the range that went unsatisfied: {message}"
+    );
+    assert!(
+        message.contains("v0.5.0") && message.contains("v0.9.0"),
+        "the error must name every version the index does publish: {message}"
+    );
+}
+
+#[test]
+fn an_index_publishing_no_version_at_all_still_reports_the_range() {
+    let index = "drivers:\n  - path: mysql\n    pkginfo: []\n";
+
+    let error = select_package(index, &Registry::public(Driver::MySql))
+        .expect_err("an index publishing no version of the driver must fail");
+
+    let message = error.to_string();
+    assert!(
+        message.contains(Driver::MySql.package().version_range),
+        "the error must name the range even when there is nothing to compare it to: {message}"
     );
 }
 
@@ -116,7 +188,7 @@ fn version_without_the_platform_package_names_platform_and_version() {
         "            url: mysql/v0.6.0/mysql_darwin_arm64_v0.6.0.tar.gz\n",
     );
 
-    let error = select_package_url(index, &Registry::pinned())
+    let error = select_package(index, &Registry::public(Driver::MySql))
         .expect_err("a version without a linux_amd64 package must fail");
 
     let message = error.to_string();
@@ -125,39 +197,9 @@ fn version_without_the_platform_package_names_platform_and_version() {
         "the error must name the platform it looked for: {message}"
     );
     assert!(
-        message.contains("v0.6.0"),
-        "the error must name the version it looked in: {message}"
-    );
-}
-
-#[test]
-fn digest_of_no_bytes_is_the_published_empty_digest() {
-    assert_eq!(digest_of(&[]), EMPTY_DIGEST);
-}
-
-#[test]
-fn matching_digest_verifies() {
-    verify_digest(
-        b"driver package",
-        &digest_of(b"driver package"),
-        PACKAGE_URL,
-    )
-    .expect("bytes must verify against their own digest");
-}
-
-#[test]
-fn digest_mismatch_reports_both_digests() {
-    let error = verify_digest(b"tampered", EMPTY_DIGEST, PACKAGE_URL)
-        .expect_err("bytes that hash differently must not verify");
-
-    let message = error.to_string();
-    assert!(
-        message.contains(EMPTY_DIGEST),
-        "the error must report the expected digest: {message}"
-    );
-    assert!(
-        message.contains(&digest_of(b"tampered")),
-        "the error must report the computed digest: {message}"
+        message.contains("0.6.0"),
+        "the error must name the version the range resolved to, which is where it \
+         looked: {message}"
     );
 }
 
@@ -226,6 +268,65 @@ fn extraction_without_the_named_library_names_it() {
     );
 }
 
+/// Nothing verifies a driver package before it is unpacked — the registry
+/// publishes no checksum — so what the unpacking step writes is bounded by
+/// what the members declare, and the running total is what is compared:
+/// the `MANIFEST` here is read and counted before the oversize member is
+/// reached.
+#[test]
+fn a_member_past_the_unpacked_bound_names_the_limit_and_the_package() {
+    let package = archive_declaring(&[
+        (
+            "MANIFEST",
+            b"[Files]\ndriver = \"lib.so\"\n".as_slice(),
+            "[Files]\ndriver = \"lib.so\"\n".len() as u64,
+        ),
+        ("lib.so", b"ELF".as_slice(), MAX_UNPACKED_BYTES + 1),
+    ]);
+
+    let error = extract_driver(&package, PACKAGE_URL)
+        .expect_err("a package asking to write more than the bound must not be unpacked");
+
+    let message = error.to_string();
+    assert!(
+        matches!(error, ProvisioningError::PackageTooLarge { .. }),
+        "the refusal must be the size one rather than a truncated read: {message}"
+    );
+    assert!(
+        message.contains(&MAX_UNPACKED_BYTES.to_string()),
+        "the error must name the limit it enforced: {message}"
+    );
+    assert!(
+        message.contains(PACKAGE_URL),
+        "the error must name the package it refused: {message}"
+    );
+}
+
+/// The `MANIFEST` is read into memory rather than written to disk, so it is
+/// bounded by the same total: an archive declaring a gigabyte of TOML would
+/// otherwise exhaust the sandbox's memory before anything looked at it.
+#[test]
+fn a_manifest_past_the_unpacked_bound_names_the_limit() {
+    let package = archive_declaring(&[(
+        "MANIFEST",
+        b"[Files]\ndriver = \"lib.so\"\n".as_slice(),
+        MAX_UNPACKED_BYTES + 1,
+    )]);
+
+    let error = extract_driver(&package, PACKAGE_URL)
+        .expect_err("a MANIFEST larger than the bound must not be read");
+
+    let message = error.to_string();
+    assert!(
+        matches!(error, ProvisioningError::PackageTooLarge { .. }),
+        "the refusal must be the size one: {message}"
+    );
+    assert!(
+        message.contains(&MAX_UNPACKED_BYTES.to_string()),
+        "the error must name the limit it enforced: {message}"
+    );
+}
+
 #[test]
 fn extraction_writes_no_member_outside_its_own_directory() {
     let package = archive(&[
@@ -255,31 +356,92 @@ fn extraction_writes_no_member_outside_its_own_directory() {
 }
 
 #[test]
-fn the_manifest_filename_must_equal_the_compiled_in_filename() {
-    verify_library_filename(DRIVER_LIBRARY).expect("the compiled-in filename must verify");
+fn the_install_path_carries_the_driver_and_the_resolved_version() {
+    assert_eq!(
+        driver_install_path(
+            Path::new("/buckets/bfsdefault/default"),
+            Driver::MySql,
+            &Version::new(0, 6, 1)
+        ),
+        Path::new("/buckets/bfsdefault/default/adbc-drivers/mysql/0.6.1/libadbc_driver_mysql.so")
+    );
 }
 
 #[test]
-fn a_diverging_manifest_filename_names_both_filenames() {
-    let error = verify_library_filename("libadbc_driver_mysql_v2.so")
-        .expect_err("a filename other than the compiled-in one must not verify");
+fn two_versions_of_one_driver_install_at_different_paths() {
+    let mount = Path::new("/buckets/bfsdefault/default");
+
+    assert_ne!(
+        driver_install_path(mount, Driver::MySql, &Version::new(0, 6, 0)),
+        driver_install_path(mount, Driver::MySql, &Version::new(0, 6, 1)),
+        "a newer resolved version must not be installed over the version a running \
+         query may still have mapped"
+    );
+}
+
+/// `driver-provisioning/driver-path-override`: the path is used exactly as
+/// given, neither re-rooted under the mount nor extended with the driver and
+/// version segments self-install computes.
+#[test]
+fn a_supplied_driver_is_used_at_exactly_the_path_given() {
+    let directory = TempDir::new().expect("a temporary directory must be creatable");
+    let supplied = directory.path().join("operators-own-name.so");
+    std::fs::write(&supplied, b"\x7fELF").expect("the fixture library must be writable");
+
+    let path = supplied_driver(
+        supplied.to_str().expect("the fixture path is UTF-8"),
+        Driver::MySql,
+    )
+    .expect("a readable file at the path given must be used as it is");
+
+    assert_eq!(path, supplied);
+}
+
+#[test]
+fn a_supplied_path_holding_no_file_names_the_property_the_path_and_the_driver() {
+    let directory = TempDir::new().expect("a temporary directory must be creatable");
+    let absent = directory.path().join("never-placed.so");
+
+    let error = supplied_driver(
+        absent.to_str().expect("the fixture path is UTF-8"),
+        Driver::Postgres,
+    )
+    .expect_err("a path holding no readable file must refuse the statement");
 
     let message = error.to_string();
     assert!(
-        message.contains("libadbc_driver_mysql_v2.so"),
-        "the error must name the filename the archive declared: {message}"
+        message.contains("DRIVER_PATH"),
+        "the error must name the property that was set: {message}"
     );
     assert!(
-        message.contains(DRIVER_LIBRARY),
-        "the error must name the compiled-in filename: {message}"
+        message.contains(absent.to_str().expect("the fixture path is UTF-8")),
+        "the error must name the path it was given: {message}"
+    );
+    assert!(
+        message.contains("postgresql"),
+        "the error must name the driver it was looking for: {message}"
     );
 }
 
+/// A directory opens without error on Linux, so the check is the file kind
+/// rather than the open alone — a `dlopen` of a directory fails far later and
+/// names nothing an operator set.
 #[test]
-fn the_install_path_is_the_driver_directory_of_the_mount() {
-    assert_eq!(
-        driver_install_path(Path::new("/buckets/bfsdefault/default")),
-        Path::new("/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so")
+fn a_supplied_path_naming_a_directory_is_refused() {
+    let directory = TempDir::new().expect("a temporary directory must be creatable");
+
+    let error = supplied_driver(
+        directory
+            .path()
+            .to_str()
+            .expect("the fixture path is UTF-8"),
+        Driver::MySql,
+    )
+    .expect_err("a directory is not a driver shared library");
+
+    assert!(
+        matches!(error, ProvisioningError::SuppliedDriverUnreadable { .. }),
+        "the refusal must be the supplied-driver one: {error}"
     );
 }
 
@@ -318,16 +480,19 @@ fn credentials_never_print_their_password() {
 
 #[test]
 fn a_bucket_reports_where_its_driver_is_installed() {
+    let mount = "/buckets/bfsdefault/default";
+    let version = Version::new(0, 6, 1);
     let bucket = Bucket::new(
         "https://exasol:2581/default",
-        "/buckets/bfsdefault/default",
+        mount,
         Credentials::new("w", "hunter2"),
     )
     .visible_within(Duration::from_millis(1));
 
     assert_eq!(
-        bucket.driver_path(),
-        Path::new("/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so")
+        bucket.driver_path(Driver::MySql, &version),
+        driver_install_path(Path::new(mount), Driver::MySql, &version),
+        "the bucket must report exactly what the shared path-construction rule computes"
     );
 }
 

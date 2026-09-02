@@ -66,7 +66,12 @@ fn bring_up() -> BenchStack {
     udf::deploy(&exasol);
     schema::create_bucketfs_connection(&exasol);
     schema::create_mysql_connection(&exasol, MYSQL_CONNECTION, mysql::DATABASE);
-    schema::create_virtual_schema(&exasol, ADBC_VIRTUAL_SCHEMA, MYSQL_CONNECTION);
+    schema::create_virtual_schema(
+        &exasol,
+        adbc_vs_scan::driver::Driver::MySql,
+        ADBC_VIRTUAL_SCHEMA,
+        MYSQL_CONNECTION,
+    );
 
     jdbc_vs::install(&exasol, JDBC_VIRTUAL_SCHEMA);
 

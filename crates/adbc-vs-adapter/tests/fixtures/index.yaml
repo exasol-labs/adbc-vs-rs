@@ -1,26 +1,63 @@
+# A registry index in the shape the public `dbc` CDN publishes, holding the
+# cases range resolution has to get right rather than only the ones it meets
+# on a good day.
+#
+# Every driver publishes versions inside and outside its declared range, in
+# both the `v`-prefixed and the bare spelling the real index mixes, and one
+# scalar that is no version at all. No driver's blocks are in version order,
+# so a resolution that took the last matching block rather than the highest
+# one would resolve to the wrong version here.
 drivers:
   - path: mysql
     pkginfo:
-      - version: v0.5.0
-        packages:
-          - platform: linux_amd64
-            url: mysql/v0.5.0/mysql_linux_amd64_v0.5.0.tar.gz
-          - platform: darwin_arm64
-            url: mysql/v0.5.0/mysql_darwin_arm64_v0.5.0.tar.gz
       - version: v0.6.0
         packages:
           - platform: linux_amd64
             url: mysql/v0.6.0/mysql_linux_amd64_v0.6.0.tar.gz
           - platform: darwin_arm64
             url: mysql/v0.6.0/mysql_darwin_arm64_v0.6.0.tar.gz
-  - path: postgresql
-    pkginfo:
-      - version: v1.2.0
+      - version: nightly
         packages:
           - platform: linux_amd64
-            url: postgresql/v1.2.0/postgresql_linux_amd64_v1.2.0.tar.gz
+            url: mysql/nightly/mysql_linux_amd64_nightly.tar.gz
+      - version: 0.6.1
+        packages:
+          - platform: linux_amd64
+            url: mysql/0.6.1/mysql_linux_amd64_0.6.1.tar.gz
           - platform: darwin_arm64
-            url: postgresql/v1.2.0/postgresql_darwin_arm64_v1.2.0.tar.gz
+            url: mysql/0.6.1/mysql_darwin_arm64_0.6.1.tar.gz
+      - version: v0.7.0
+        packages:
+          - platform: linux_amd64
+            url: mysql/v0.7.0/mysql_linux_amd64_v0.7.0.tar.gz
+      - version: v0.5.0
+        packages:
+          - platform: linux_amd64
+            url: mysql/v0.5.0/mysql_linux_amd64_v0.5.0.tar.gz
+  - path: postgresql
+    pkginfo:
+      - version: 2.0.0
+        packages:
+          - platform: linux_amd64
+            url: postgresql/2.0.0/postgresql_linux_amd64_2.0.0.tar.gz
+      - version: 1.13.0
+        packages:
+          - platform: linux_amd64
+            url: postgresql/1.13.0/postgresql_linux_amd64_1.13.0.tar.gz
+          - platform: darwin_arm64
+            url: postgresql/1.13.0/postgresql_darwin_arm64_1.13.0.tar.gz
+      - version: latest
+        packages:
+          - platform: linux_amd64
+            url: postgresql/latest/postgresql_linux_amd64_latest.tar.gz
+      - version: v1.12.0
+        packages:
+          - platform: linux_amd64
+            url: postgresql/v1.12.0/postgresql_linux_amd64_v1.12.0.tar.gz
+      - version: 1.8.0
+        packages:
+          - platform: linux_amd64
+            url: postgresql/1.8.0/postgresql_linux_amd64_1.8.0.tar.gz
   - path: sqlite
     pkginfo:
       - version: v0.3.0
