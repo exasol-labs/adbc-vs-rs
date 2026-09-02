@@ -156,3 +156,40 @@ CREATE TABLE all_unmapped (
 INSERT INTO all_unmapped (id, fixed_code, is_active, notes, small_num, approx, clock_time, clock_time_tz, seen_at, payload, payload_b, raw_data, span, price, tags) VALUES
     ('a1111111-1111-1111-1111-111111111111', 'ABCD', TRUE,  'first row of the all-unmapped fixture',  7,  3.14, '12:00:00', '12:00:00+02', '2026-01-01 00:00:00+00', '{"a": 1}', '{"b": 2}', E'\\xDEADBEEF', '1 day',    19.99, ARRAY['a', 'b']),
     ('a2222222-2222-2222-2222-222222222222', 'WXYZ', FALSE, 'second row of the all-unmapped fixture', 42, 2.71, '18:30:00', '18:30:00-05', '2026-02-02 00:00:00+00', '{"c": 3}', '{"d": 4}', E'\\xC0FFEE',   '2 hours', 5.00,  ARRAY['c']);
+
+-- End-to-end fixture for the PostgreSQL tier. Each object
+-- below is dedicated to exactly one end-to-end test, so no other test's
+-- assertions are disturbed by what that test does to it.
+
+-- `refresh_target` is the source `refresh_picks_up_a_new_postgresql_column`
+-- alters mid-run (`ADD COLUMN` then `DROP COLUMN`). It carries no columns any
+-- other test reads, so that test's DDL cannot poison a differential
+-- comparison another test relies on.
+CREATE TABLE refresh_target (
+    id INTEGER NOT NULL,
+    name VARCHAR(30) NOT NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO refresh_target (id, name) VALUES
+    (1, 'Original');
+
+-- `order_names` is `views_are_exposed_alongside_base_tables`'s subject: a
+-- view over `orders`, projecting only its mapped `id` and `name` columns, so
+-- the exposed table carries exactly two columns and no `omitted` entry.
+CREATE VIEW order_names AS SELECT id, name FROM orders;
+
+-- `"MixedCase"` is `identifiers_keep_their_case_through_discovery_and_rendering`'s
+-- subject. Every identifier — the table name and both column names — is
+-- quoted, because PostgreSQL folds an unquoted identifier to lower case,
+-- which would make the fixture indistinguishable from case folding rather
+-- than proof of case preservation.
+CREATE TABLE "MixedCase" (
+    "ItemId" INTEGER NOT NULL,
+    "Label" VARCHAR(20) NOT NULL,
+    PRIMARY KEY ("ItemId")
+);
+
+INSERT INTO "MixedCase" ("ItemId", "Label") VALUES
+    (1, 'First'),
+    (2, 'Second');
