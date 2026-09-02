@@ -12,7 +12,7 @@ fn sample() -> AdapterNotes {
                 table: "orders".to_string(),
                 column: Some("payload".to_string()),
                 source_type: Some("json".to_string()),
-                reason: "MySQL type JSON is not one of the eight types adbc-vs 0.1 maps"
+                reason: "MySQL type JSON is not one of the eight types this release maps"
                     .to_string(),
             },
             Omission {
