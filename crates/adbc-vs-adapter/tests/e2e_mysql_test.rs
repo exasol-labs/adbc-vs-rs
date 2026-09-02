@@ -18,6 +18,7 @@ use adbc_vs_scan::driver::Driver;
 use common::exasol::cell;
 use common::stack::{self, MYSQL_CONNECTION, VIRTUAL_SCHEMA};
 use common::{items, mirror, mysql, probe, schema};
+use semver::Version;
 
 /// Where the MySQL driver is installed, in the pieces the tests assert
 /// against: the bucket-relative prefix its versions sit under, the library
@@ -61,9 +62,14 @@ const STABILITY_RUN_COUNT: u32 = 3;
 #[test]
 fn first_use_installs_driver_from_registry() {
     let stack = stack::shared();
-    let previously_installed = installed_driver(stack)
-        .expect("the shared setup already installed a driver for this test to delete");
-    stack.exasol.delete_file(&previously_installed);
+    let previously_installed = installed_drivers(stack);
+    assert!(
+        !previously_installed.is_empty(),
+        "the shared setup already installed a driver for this test to delete"
+    );
+    for driver in &previously_installed {
+        stack.exasol.delete_file(driver);
+    }
     let before_install = installed_driver(stack);
 
     schema::create_virtual_schema(&stack.exasol, Driver::MySql, "FIRSTUSE", MYSQL_CONNECTION);
@@ -1400,18 +1406,39 @@ fn generated_statement_carries_no_order_or_limit() {
     }
 }
 
-/// The bucket-relative path of the installed MySQL driver library, whatever
-/// version the range resolved to, or nothing when no version is installed.
-///
-/// The listing is read rather than a path composed, because the version
-/// segment is the registry's answer at run time and no constant in this
-/// repository can state it.
-fn installed_driver(stack: &stack::Stack) -> Option<String> {
+/// The bucket-relative path of every installed MySQL driver library, whatever
+/// versions are present. More than one can legitimately coexist — the
+/// registry can publish a newer in-range version after an older one was
+/// already installed — so callers that need "the" installed driver must
+/// choose deterministically among these rather than assume there is one.
+fn installed_drivers(stack: &stack::Stack) -> Vec<String> {
     stack
         .exasol
         .bucket_entries()
         .into_iter()
-        .find(|entry| entry.starts_with(DRIVER_BUCKET_PREFIX) && entry.ends_with(DRIVER_LIBRARY))
+        .filter(|entry| entry.starts_with(DRIVER_BUCKET_PREFIX) && entry.ends_with(DRIVER_LIBRARY))
+        .collect()
+}
+
+/// The bucket-relative path of the installed MySQL driver library at the
+/// highest resolved version, or nothing when no version is installed.
+///
+/// When multiple versions coexist, the highest semantic version is the one
+/// version resolution would select again today, so picking it (rather than
+/// an arbitrary listing order) is what keeps this in agreement with
+/// `adapterNotes.driverVersion`.
+fn installed_driver(stack: &stack::Stack) -> Option<String> {
+    installed_drivers(stack)
+        .into_iter()
+        .max_by_key(|entry| driver_semver(&installed_version(entry)))
+}
+
+/// Parses a driver's version segment (e.g. `v0.6.0` or `1.12.0`, the two
+/// spellings the registry index mixes) as a comparable semantic version.
+fn driver_semver(version: &str) -> Version {
+    Version::parse(version.strip_prefix('v').unwrap_or(version)).unwrap_or_else(|error| {
+        panic!("installed driver version {version} is not a semantic version: {error}")
+    })
 }
 
 /// The version segment of an installed driver's bucket-relative path, which is

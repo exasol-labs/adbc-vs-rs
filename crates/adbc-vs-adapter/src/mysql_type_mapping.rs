@@ -83,7 +83,7 @@ fn map_data_type(column: &MySqlColumn) -> Result<MappedType, String> {
         "DATETIME" => Ok(MappedType::Timestamp),
         "DOUBLE" => Ok(MappedType::Double),
         other => Err(format!(
-            "MySQL type {other} is not one of the eight types adbc-vs 0.1 maps"
+            "MySQL type {other} is not one of the eight types this release maps"
         )),
     }
 }
@@ -131,7 +131,7 @@ fn require_utf8mb4(character_set: Option<&str>, mysql_type: &str) -> Result<(), 
             Ok(())
         }
         Some(character_set) => Err(format!(
-            "MySQL {mysql_type} column has character set {character_set}, but adbc-vs 0.1 only \
+            "MySQL {mysql_type} column has character set {character_set}, but this release only \
              maps character columns whose character set is {SUPPORTED_CHARACTER_SET}"
         )),
         None => Err(format!(
