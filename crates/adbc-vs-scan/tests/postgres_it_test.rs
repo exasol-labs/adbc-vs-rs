@@ -290,3 +290,39 @@ fn every_mapped_type_coerces_to_its_declared_exasol_representation() {
         "the double precision column lost its value"
     );
 }
+
+/// A statement against a table PostgreSQL rejects must surface the ADBC
+/// status and the driver's own diagnosis, never a swallowed or generic
+/// failure — and never the connection's password. The driver may fail the
+/// statement immediately in `execute_scan`, or defer the failure to the
+/// first batch of the returned stream, so this checks both shapes.
+#[test]
+fn source_failure_reports_adbc_status() {
+    let mut connection = connect();
+    let columns = vec![
+        declared("c1", DeclaredType::Text),
+        declared("c2", DeclaredType::Text),
+    ];
+
+    let statement = "SELECT \"c1\", \"c2\" FROM \"no_such_table\"";
+    let error = match scan(&mut connection, statement, &columns) {
+        Err(error) => error.to_string(),
+        Ok(mut stream) => stream
+            .find_map(|batch| batch.err())
+            .expect("a statement against a table that does not exist must fail")
+            .to_string(),
+    };
+
+    assert!(
+        error.contains("ADBC status"),
+        "error message {error:?} does not carry the ADBC status"
+    );
+    assert!(
+        error.contains("no_such_table"),
+        "error message {error:?} does not carry the driver's own diagnosis"
+    );
+    assert!(
+        !error.contains(POSTGRES_PASSWORD),
+        "error message leaked the password"
+    );
+}

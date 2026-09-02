@@ -37,15 +37,23 @@ pub const PASSWORD: &str = "adbc_vs_password";
 /// The Compose service whose container hosts PostgreSQL.
 const SERVICE: &str = "postgres";
 
-/// The tables `docker/postgres/init.sql` seeds beyond the `orders` table the
+/// The objects `docker/postgres/init.sql` seeds beyond the `orders` table the
 /// integration tier reads, and which the end-to-end tier depends on. A stack
 /// presenting fewer of them is running an older seed.
-const SEEDED_TABLES: &[&str] = &[
+///
+/// `order_names` is a view, not a table, but `information_schema.tables`
+/// lists views alongside base tables with `table_type = 'VIEW'`, so the one
+/// query in [`Postgres::check_fixture`] finds both kinds without a second
+/// check.
+const SEEDED_OBJECTS: &[&str] = &[
     "orders",
     "items",
     "item_notes",
     "numeric_specials",
     "all_unmapped",
+    "refresh_target",
+    "order_names",
+    "MixedCase",
 ];
 
 /// The PostgreSQL instance under test.
@@ -97,11 +105,22 @@ impl Postgres {
         value.to_owned()
     }
 
+    /// Runs one or more statements against `DATABASE`.
+    ///
+    /// `docker/postgres/init.sql` owns the fixture's shape; this method exists
+    /// for the one test that must change the source mid-run. A rejected
+    /// statement panics rather than returning, so a DDL no-op can never read
+    /// as a pass.
+    pub fn execute(&self, sql: &str) {
+        self.client(&format!("executing SQL against PostgreSQL:\n{sql}"), sql)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     /// Fails loudly when the Compose seed did not create every fixture table,
     /// naming the recovery that recreates the service from the current
     /// `docker/postgres/init.sql`.
     fn check_fixture(&self) {
-        let names = SEEDED_TABLES
+        let names = SEEDED_OBJECTS
             .iter()
             .map(|table| format!("'{table}'"))
             .collect::<Vec<_>>()
@@ -113,12 +132,12 @@ impl Postgres {
 
         assert_eq!(
             seeded,
-            SEEDED_TABLES.len().to_string(),
-            "database `{DATABASE}` holds {seeded} of the {} seeded tables {SEEDED_TABLES:?}; the \
-             Compose seed did not run, which happens when the PostgreSQL container outlived a \
-             change to docker/postgres/init.sql. Recreate the service with \
-             `docker compose rm -sfv postgres && make stack-up-postgres`",
-            SEEDED_TABLES.len()
+            SEEDED_OBJECTS.len().to_string(),
+            "database `{DATABASE}` holds {seeded} of the {} seeded fixture objects \
+             {SEEDED_OBJECTS:?}; the Compose seed did not run, which happens when the \
+             PostgreSQL container outlived a change to docker/postgres/init.sql. Recreate the \
+             service with `docker compose rm -sfv postgres && make stack-up-postgres`",
+            SEEDED_OBJECTS.len()
         );
     }
 

@@ -28,7 +28,12 @@
 //! column. `numeric_specials` and `all_unmapped` carry no mirror at all:
 //! `numeric_specials` exists to exercise the coercion failure task 7.1 states
 //! rather than a row comparison, and `all_unmapped` has no mapped column for
-//! a delegated query to reach in the first place.
+//! a delegated query to reach in the first place. `refresh_target`, the
+//! `order_names` view, and `"MixedCase"` are likewise unmirrored: none of the
+//! three is read differentially. `refresh_target` is read for its declared
+//! column set before and after a `REFRESH`, `order_names` for its presence in
+//! the exposed table list, and `"MixedCase"` for identifier case, so a mirror
+//! column for any of them would be compared against nothing.
 //!
 //! There is no Rust module shared between `docker/postgres/init.sql` and this
 //! one the way `super::items` is shared between `super::mysql` and

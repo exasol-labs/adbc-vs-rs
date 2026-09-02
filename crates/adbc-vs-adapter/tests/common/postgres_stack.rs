@@ -49,6 +49,12 @@ pub use super::stack::MYSQL_CONNECTION;
 /// The stack under test, ready to be queried.
 pub struct Stack {
     pub exasol: Exasol,
+    /// The handle a test uses to change the PostgreSQL source mid-run.
+    ///
+    /// Kept on `Stack` rather than reconstructed per call, because
+    /// `Postgres::from_stack` re-runs the readiness wait and the seed check —
+    /// mirrors [`super::stack::Stack::mysql`].
+    pub postgres: Postgres,
 }
 
 /// The stack, brought up on first use.
@@ -60,15 +66,14 @@ pub fn shared() -> &'static Stack {
     STACK.get_or_init(bring_up)
 }
 
-/// Constructing `Postgres` and `MySql` is the contract this function runs
-/// them for, not a value either the caller or [`Stack`] needs to keep:
-/// `Postgres::from_stack` runs the seed check against the PostgreSQL
-/// container, and `MySql::from_stack` installs the MySQL fixtures — both side
-/// effects the virtual schemas created below depend on having already
-/// happened, so neither constructed value outlives this function.
+/// Constructing `MySql` is the contract this function runs it for, not a
+/// value either the caller or [`Stack`] needs to keep: `MySql::from_stack`
+/// installs the MySQL fixtures, a side effect the MySQL virtual schema
+/// created below depends on having already happened, so it does not outlive
+/// this function.
 fn bring_up() -> Stack {
     let exasol = Exasol::from_stack();
-    let _postgres = Postgres::from_stack();
+    let postgres = Postgres::from_stack();
     let _mysql = MySql::from_stack();
 
     slc::install(&exasol);
@@ -93,5 +98,5 @@ fn bring_up() -> Stack {
 
     postgres_mirror::install(&exasol);
 
-    Stack { exasol }
+    Stack { exasol, postgres }
 }
