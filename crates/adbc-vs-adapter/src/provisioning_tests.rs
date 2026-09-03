@@ -367,6 +367,331 @@ fn the_install_path_carries_the_driver_and_the_resolved_version() {
     );
 }
 
+/// `driver-provisioning/driver-path-override`: the operator-owned location
+/// carries the driver and no version, because nothing resolved one on the route
+/// that reads it.
+#[test]
+fn the_default_location_carries_the_driver_and_no_version() {
+    assert_eq!(
+        default_driver_path(Path::new("/buckets/bfsdefault/default"), Driver::MySql),
+        Path::new(
+            "/buckets/bfsdefault/default/adbc-drivers/mysql/supplied/libadbc_driver_mysql.so"
+        )
+    );
+}
+
+/// Two technologies' pre-placed libraries never share a path, so a cluster
+/// running both can pre-place both.
+#[test]
+fn the_default_location_is_distinct_per_driver() {
+    let mount = Path::new("/buckets/bfsdefault/default");
+
+    for (index, driver) in Driver::ALL.iter().enumerate() {
+        for other in &Driver::ALL[index + 1..] {
+            assert_ne!(
+                default_driver_path(mount, *driver),
+                default_driver_path(mount, *other),
+                "`{}` and `{}` must pre-place their libraries at different paths",
+                driver.as_str(),
+                other.as_str()
+            );
+        }
+    }
+}
+
+/// The property the whole last-resort design rests on: the operator-owned tree
+/// and the adapter-owned one are disjoint by construction rather than by
+/// convention, so a pre-placed library can never satisfy the versioned presence
+/// check and self-install can never overwrite a pre-placed library.
+///
+/// Both paths are computed under one mount value, which is what makes the
+/// comparison a statement about the layout rather than about two mounts. The
+/// inequality over a sample of versions is the weaker half: it holds for any
+/// sample. Only `supplied` failing to parse as a version holds for all of them.
+#[test]
+fn no_default_location_can_be_an_install_path() {
+    let mount = Path::new("/buckets/bfsdefault/default");
+
+    assert!(
+        Version::parse(SUPPLIED_DIRECTORY).is_err(),
+        "`{SUPPLIED_DIRECTORY}` must parse as no version at all, which is what makes the \
+         two trees disjoint for every version the registry could ever publish"
+    );
+
+    for driver in Driver::ALL {
+        let supplied = default_driver_path(mount, *driver);
+        for version in [
+            Version::new(0, 0, 0),
+            Version::new(0, 6, 1),
+            Version::new(1, 13, 0),
+            Version::parse("1.0.0-rc.1").expect("a pre-release version parses"),
+            Version::parse("0.6.1+build.5").expect("a build-metadata version parses"),
+        ] {
+            assert_ne!(
+                supplied,
+                driver_install_path(mount, *driver, &version),
+                "the `{}` default location must not be the install path of {version}",
+                driver.as_str()
+            );
+        }
+    }
+}
+
+/// The index URL and the transport cause the one unreachable-registry fixture
+/// is built with, so a test can assert the accessor hands back those two facts
+/// rather than merely answering `Some`.
+const UNREACHABLE_INDEX_URL: &str = "https://dbc-cdn.columnar.tech/index.yaml";
+const UNREACHABLE_TRANSPORT_CAUSE: &str = "error trying to connect: dns error";
+
+/// One constructed value of every [`ProvisioningError`] variant.
+///
+/// Both tests below read this rather than enumerating the taxonomy themselves,
+/// so the enumeration has one owner and two copies cannot drift apart.
+fn every_provisioning_error() -> Vec<ProvisioningError> {
+    vec![
+        ProvisioningError::RegistryUnreachable {
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+            driver: "mysql".to_owned(),
+            cause: UNREACHABLE_TRANSPORT_CAUSE.to_owned(),
+        },
+        ProvisioningError::PackageUnreachable {
+            url: PACKAGE_URL.to_owned(),
+            driver: "mysql".to_owned(),
+            cause: "error trying to connect: connection refused".to_owned(),
+        },
+        ProvisioningError::TransferInterrupted {
+            url: PACKAGE_URL.to_owned(),
+            driver: "mysql".to_owned(),
+            cause: "connection closed before message completed".to_owned(),
+        },
+        ProvisioningError::RegistryMisdirected {
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+            driver: "mysql".to_owned(),
+            cause: "too many redirects".to_owned(),
+        },
+        ProvisioningError::RegistryRejected {
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+            status: 503,
+            driver: "mysql".to_owned(),
+        },
+        ProvisioningError::ResponseTooLarge {
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+            limit: MAX_INDEX_BYTES,
+        },
+        ProvisioningError::PackageTooLarge {
+            url: PACKAGE_URL.to_owned(),
+            limit: MAX_UNPACKED_BYTES,
+        },
+        ProvisioningError::IndexUnreadable {
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+            cause: "invalid utf-8".to_owned(),
+        },
+        ProvisioningError::DriverNotPublished {
+            driver: "mysql".to_owned(),
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+        },
+        ProvisioningError::RangeUnparseable {
+            driver: "mysql".to_owned(),
+            range: "not a range".to_owned(),
+            cause: "unexpected character".to_owned(),
+        },
+        ProvisioningError::RangeNotSatisfied {
+            driver: "mysql".to_owned(),
+            range: ">=0.6.0, <0.7.0".to_owned(),
+            published: vec!["v0.5.0".to_owned()],
+            url: UNREACHABLE_INDEX_URL.to_owned(),
+        },
+        ProvisioningError::PlatformNotPublished {
+            driver: "mysql".to_owned(),
+            platform: PLATFORM.to_owned(),
+            version: "0.6.1".to_owned(),
+        },
+        ProvisioningError::PackageUnreadable {
+            url: PACKAGE_URL.to_owned(),
+            cause: "not a gzip stream".to_owned(),
+        },
+        ProvisioningError::ManifestMissing {
+            url: PACKAGE_URL.to_owned(),
+        },
+        ProvisioningError::ManifestUnreadable {
+            url: PACKAGE_URL.to_owned(),
+            cause: "missing field `driver`".to_owned(),
+        },
+        ProvisioningError::LibraryMissing {
+            url: PACKAGE_URL.to_owned(),
+            filename: "libadbc_driver_mysql.so".to_owned(),
+        },
+        ProvisioningError::LibraryFilenameDiverged {
+            declared: "libadbc_driver_mysql_other.so".to_owned(),
+            expected: "libadbc_driver_mysql.so".to_owned(),
+        },
+        ProvisioningError::BucketFsUnreachable {
+            url: "https://exasol:2581/default".to_owned(),
+            cause: "connection refused".to_owned(),
+        },
+        ProvisioningError::BucketFsRejected {
+            url: "https://exasol:2581/default".to_owned(),
+            status: 403,
+        },
+        ProvisioningError::DriverNotVisible {
+            path: PathBuf::from(
+                "/buckets/bfsdefault/default/adbc-drivers/mysql/0.6.1/libadbc_driver_mysql.so",
+            ),
+            deadline: Duration::from_secs(120),
+        },
+        ProvisioningError::LocalFailure {
+            attempt: "creating a directory to unpack the driver package into".to_owned(),
+            cause: "permission denied".to_owned(),
+        },
+        ProvisioningError::SuppliedDriverUnreadable {
+            driver: "mysql".to_owned(),
+            path: "/tmp/never-placed.so".to_owned(),
+            cause: "no such file or directory".to_owned(),
+        },
+    ]
+}
+
+/// `driver-provisioning/driver-path-override`: only the index request that
+/// reached no host at all is evidence of the air gap the last-resort route
+/// serves. Every other failure means something answered, so it says nothing
+/// about the cluster's egress and must not reach the default location.
+#[test]
+fn only_a_registry_reached_not_at_all_is_unreachable() {
+    for error in every_provisioning_error() {
+        match &error {
+            ProvisioningError::RegistryUnreachable { .. } => assert_eq!(
+                error.registry_unreachable(),
+                Some((UNREACHABLE_INDEX_URL, UNREACHABLE_TRANSPORT_CAUSE)),
+                "an index request that reached no host must hand back the index URL and \
+                 the transport cause it was built with: {error:?}"
+            ),
+            answered => assert_eq!(
+                error.registry_unreachable(),
+                None,
+                "a registry that answered says nothing about the cluster's egress: \
+                 {answered:?}"
+            ),
+        }
+    }
+}
+
+/// `driver-provisioning/driver-path-override`: no message on any route may deny
+/// that the default driver location exists. An operator who followed
+/// `README.md` to it must never be told it does not exist, whichever variant
+/// answered and whichever route the statement took.
+#[test]
+fn no_provisioning_message_denies_the_default_location() {
+    for error in every_provisioning_error() {
+        let message = error.to_string();
+        assert!(
+            !message.contains("no path on the mount to pre-load"),
+            "the default driver location exists on every cluster, so no message may deny \
+             it: {message}"
+        );
+    }
+}
+
+/// `driver-provisioning/driver-self-install`: the leg × point-of-failure table
+/// [`provisioning_error`] owns, asserted directly rather than through whichever
+/// single leg a live test happens to exercise.
+///
+/// [`RegistryLeg`] exists for exactly one row of it — an index request that
+/// reached no host — so a regression that dropped the argument and mapped both
+/// legs back to [`ProvisioningError::RegistryUnreachable`] would leave the rest
+/// of the suite green while re-enabling the last-resort fallback on a package
+/// download that reached no host.
+#[test]
+fn each_download_failure_maps_to_one_variant_per_leg() {
+    const CAUSE: &str = "error trying to connect: dns error";
+    type IsExpected = fn(&ProvisioningError) -> bool;
+    let rows: [(&str, DownloadFailure, RegistryLeg, IsExpected, bool); 10] = [
+        (
+            "an index request that reached no host",
+            DownloadFailure::Unreachable(CAUSE.to_owned()),
+            RegistryLeg::Index,
+            |error| matches!(error, ProvisioningError::RegistryUnreachable { .. }),
+            true,
+        ),
+        (
+            "a package request that reached no host",
+            DownloadFailure::Unreachable(CAUSE.to_owned()),
+            RegistryLeg::Package,
+            |error| matches!(error, ProvisioningError::PackageUnreachable { .. }),
+            false,
+        ),
+        (
+            "an index body that stopped after its status arrived",
+            DownloadFailure::Interrupted(CAUSE.to_owned()),
+            RegistryLeg::Index,
+            |error| matches!(error, ProvisioningError::TransferInterrupted { .. }),
+            false,
+        ),
+        (
+            "a package body that stopped after its status arrived",
+            DownloadFailure::Interrupted(CAUSE.to_owned()),
+            RegistryLeg::Package,
+            |error| matches!(error, ProvisioningError::TransferInterrupted { .. }),
+            false,
+        ),
+        (
+            "an index request the client could not follow through",
+            DownloadFailure::Answered(CAUSE.to_owned()),
+            RegistryLeg::Index,
+            |error| matches!(error, ProvisioningError::RegistryMisdirected { .. }),
+            false,
+        ),
+        (
+            "a package request the client could not follow through",
+            DownloadFailure::Answered(CAUSE.to_owned()),
+            RegistryLeg::Package,
+            |error| matches!(error, ProvisioningError::RegistryMisdirected { .. }),
+            false,
+        ),
+        (
+            "an index request answered with an HTTP status",
+            DownloadFailure::Rejected(503),
+            RegistryLeg::Index,
+            |error| matches!(error, ProvisioningError::RegistryRejected { .. }),
+            false,
+        ),
+        (
+            "a package request answered with an HTTP status",
+            DownloadFailure::Rejected(404),
+            RegistryLeg::Package,
+            |error| matches!(error, ProvisioningError::RegistryRejected { .. }),
+            false,
+        ),
+        (
+            "an index response past the size bound",
+            DownloadFailure::TooLarge(MAX_INDEX_BYTES),
+            RegistryLeg::Index,
+            |error| matches!(error, ProvisioningError::ResponseTooLarge { .. }),
+            false,
+        ),
+        (
+            "a package response past the size bound",
+            DownloadFailure::TooLarge(MAX_INDEX_BYTES),
+            RegistryLeg::Package,
+            |error| matches!(error, ProvisioningError::ResponseTooLarge { .. }),
+            false,
+        ),
+    ];
+
+    for (failure, download_failure, leg, is_expected_variant, is_air_gap_evidence) in rows {
+        let error = provisioning_error(download_failure, leg, UNREACHABLE_INDEX_URL, Driver::MySql);
+        assert!(
+            is_expected_variant(&error),
+            "{failure} must map to the one variant that reports it: {error:?}"
+        );
+        assert_eq!(
+            error.registry_unreachable().is_some(),
+            is_air_gap_evidence,
+            "only an index request that reached no host is evidence of an air gap, so \
+             {failure} must not answer otherwise: {error:?}"
+        );
+    }
+}
+
 #[test]
 fn two_versions_of_one_driver_install_at_different_paths() {
     let mount = Path::new("/buckets/bfsdefault/default");

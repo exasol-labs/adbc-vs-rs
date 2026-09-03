@@ -1,5 +1,6 @@
 use semver::Version;
 use serde_json::json;
+use tempfile::TempDir;
 
 use super::*;
 use crate::metadata::{DiscoveredColumn, DiscoveredTable, MetadataError};
@@ -468,6 +469,33 @@ fn a_property_the_request_sets_to_null_is_removed() {
     );
 }
 
+/// `vs-adapter/create-virtual-schema`'s precedence scenario, `refresh`/
+/// `setProperties` clause: a request that nulls out its current
+/// `BUCKETFS_CONNECTION` removes the property from what `driver_source` sees,
+/// same as a `createVirtualSchema` statement that never named one.
+#[test]
+fn a_set_properties_request_nulling_the_bucketfs_connection_takes_the_default_route() {
+    let request = json!({
+        "type": "setProperties",
+        "schemaMetadataInfo": {
+            "properties": {
+                "DRIVER": "mysql",
+                "CONNECTION_NAME": "A",
+                "BUCKETFS_CONNECTION": "B",
+            }
+        },
+        "properties": {"BUCKETFS_CONNECTION": null},
+    });
+
+    let properties = read_properties(&request);
+    let source = driver_source(&properties);
+
+    assert!(
+        matches!(&source, DriverSource::DefaultBucketFs),
+        "nulling BUCKETFS_CONNECTION must take the default route: {source:?}"
+    );
+}
+
 /// `vs-adapter/create-virtual-schema`, `driver-provisioning/driver-path-override`:
 /// a statement naming a driver library supplies it, so the write credential
 /// self-install would need is not a property it has to carry.
@@ -475,8 +503,7 @@ fn a_property_the_request_sets_to_null_is_removed() {
 fn a_statement_setting_driver_path_supplies_its_own_library() {
     let source = driver_source(&properties(json!({
         "DRIVER_PATH": "/buckets/bfsdefault/default/mine/libadbc_driver_postgresql.so",
-    })))
-    .expect("a statement that supplies its own driver library needs no BUCKETFS_CONNECTION");
+    })));
 
     assert!(
         matches!(&source, DriverSource::Supplied(path)
@@ -494,8 +521,7 @@ fn a_driver_path_supplies_the_library_even_beside_a_bucketfs_connection() {
     let source = driver_source(&properties(json!({
         "BUCKETFS_CONNECTION": "B",
         "DRIVER_PATH": "/buckets/bfsdefault/default/mine/libadbc_driver_mysql.so",
-    })))
-    .expect("a statement carrying both properties is not ambiguous");
+    })));
 
     assert!(
         matches!(&source, DriverSource::Supplied(_)),
@@ -511,8 +537,7 @@ fn a_statement_setting_an_empty_driver_path_self_installs() {
     let source = driver_source(&properties(json!({
         "DRIVER_PATH": "",
         "BUCKETFS_CONNECTION": "B",
-    })))
-    .expect("an empty DRIVER_PATH leaves self-install as the route");
+    })));
 
     assert!(
         matches!(&source, DriverSource::SelfInstall(name) if name == "B"),
@@ -522,8 +547,7 @@ fn a_statement_setting_an_empty_driver_path_self_installs() {
 
 #[test]
 fn a_statement_without_driver_path_self_installs_through_its_bucketfs_connection() {
-    let source = driver_source(&properties(json!({"BUCKETFS_CONNECTION": "B"})))
-        .expect("a statement supplying no library provisions one");
+    let source = driver_source(&properties(json!({"BUCKETFS_CONNECTION": "B"})));
 
     assert!(
         matches!(&source, DriverSource::SelfInstall(name) if name == "B"),
@@ -531,19 +555,26 @@ fn a_statement_without_driver_path_self_installs_through_its_bucketfs_connection
     );
 }
 
-/// `vs-adapter/create-virtual-schema`: `BUCKETFS_CONNECTION` is optional only
-/// while `DRIVER_PATH` is set. Without one, self-install is the route and the
-/// write credential is required — and it is missed before any connection is
-/// resolved, so a statement that cannot provision never provisions.
+/// `vs-adapter/create-virtual-schema`: a statement naming neither `DRIVER_PATH`
+/// nor `BUCKETFS_CONNECTION` takes the reserved-connection route rather than
+/// being refused before any connection is resolved. An empty
+/// `BUCKETFS_CONNECTION` reads the same way `optional_property` reads every
+/// other empty property — as absent — so it takes the same route rather than
+/// being read as the precedence scenario's explicit level.
 #[test]
-fn bucketfs_connection_required_without_driver_path() {
-    let error = driver_source(&properties(json!({"CONNECTION_NAME": "A"})))
-        .expect_err("self-install needs the write credential BUCKETFS_CONNECTION names");
+fn a_statement_naming_no_bucketfs_connection_takes_the_default_route() {
+    for properties_value in [
+        json!({"CONNECTION_NAME": "A"}),
+        json!({"CONNECTION_NAME": "A", "BUCKETFS_CONNECTION": ""}),
+    ] {
+        let source = driver_source(&properties(properties_value.clone()));
 
-    assert!(
-        matches!(error, SchemaError::MissingProperty("BUCKETFS_CONNECTION")),
-        "the refusal must name the property the statement left out: {error}"
-    );
+        assert!(
+            matches!(&source, DriverSource::DefaultBucketFs),
+            "an absent BUCKETFS_CONNECTION must take the default route: {source:?} \
+             (properties: {properties_value})"
+        );
+    }
 }
 
 /// `driver-provisioning/driver-version-resolution`: under a version range the
@@ -596,6 +627,310 @@ fn a_supplied_library_records_no_driver_version() {
         library.version, None,
         "a version adbc-vs did not resolve must not be reported as one it did"
     );
+}
+
+/// The index request's own URL and transport cause, as an unreachable registry
+/// hands them to the last-resort route.
+const UNREACHABLE_INDEX_URL: &str = "https://dbc-cdn.columnar.tech/index.yaml";
+const UNREACHABLE_TRANSPORT_CAUSE: &str = "error trying to connect: dns error";
+
+/// A resolution failure that names no connection of its own, so a test
+/// asserting the message names `ADBC_VS_BUCKETFS` is asserting the message
+/// rather than reading the cause back.
+const UNRESOLVED_CAUSE: &str = "the session holds no access to it";
+
+/// A mount holding a readable driver library at the default location, in the
+/// shape an operator who followed the documentation leaves behind.
+///
+/// The mount is a temporary directory rather than the compiled-in one, which is
+/// the whole reason `open_driver_library` takes it as an argument: a branch
+/// chosen by whether `/buckets` holds a file is not assertable below the
+/// end-to-end tier.
+fn mount_holding_the_default_library(driver: Driver) -> TempDir {
+    let mount = TempDir::new().expect("a temporary mount must be creatable");
+    let library = provisioning::default_driver_path(mount.path(), driver);
+    std::fs::create_dir_all(
+        library
+            .parent()
+            .expect("the default location names a directory"),
+    )
+    .expect("the default location's directories must be creatable");
+    std::fs::write(&library, b"\x7fELF").expect("the pre-placed library must be writable");
+    mount
+}
+
+/// An index request that reached no host at all, the one failure the reserved
+/// connection route has a last resort for.
+fn an_index_that_reached_no_host() -> ProvisioningError {
+    ProvisioningError::RegistryUnreachable {
+        url: UNREACHABLE_INDEX_URL.to_string(),
+        driver: Driver::MySql.as_str().to_string(),
+        cause: UNREACHABLE_TRANSPORT_CAUSE.to_string(),
+    }
+}
+
+/// `driver-provisioning/driver-path-override`: a readable library at the
+/// default location answers when the reserved connection did not resolve, and
+/// records no driver version because nothing resolved one.
+#[test]
+fn the_default_location_answers_a_connection_that_did_not_resolve() {
+    let mount = mount_holding_the_default_library(Driver::MySql);
+
+    let library = default_location_library(
+        mount.path(),
+        Driver::MySql,
+        FallbackCause::ConnectionUnresolved(UNRESOLVED_CAUSE.to_string()),
+    )
+    .expect("a readable library at the default location answers a credential that never was");
+
+    assert_eq!(
+        Path::new(&library.path),
+        provisioning::default_driver_path(mount.path(), Driver::MySql),
+        "the library must be loaded from exactly the default location"
+    );
+    assert_eq!(
+        library.version, None,
+        "nothing resolved a version on this route, so none may be reported: {library:?}"
+    );
+}
+
+/// The same location answers the other trigger, and answers it identically: the
+/// two causes differ in what failed, never in what the route then does.
+#[test]
+fn the_default_location_answers_a_registry_that_answered_nothing() {
+    let mount = mount_holding_the_default_library(Driver::MySql);
+
+    let library = default_location_library(
+        mount.path(),
+        Driver::MySql,
+        FallbackCause::RegistryUnreachable {
+            url: UNREACHABLE_INDEX_URL.to_string(),
+            cause: UNREACHABLE_TRANSPORT_CAUSE.to_string(),
+        },
+    )
+    .expect("a readable library at the default location answers an unreachable registry");
+
+    assert_eq!(
+        Path::new(&library.path),
+        provisioning::default_driver_path(mount.path(), Driver::MySql),
+        "the library must be loaded from exactly the default location"
+    );
+    assert_eq!(
+        library.version, None,
+        "an index request that reached no host resolved no version: {library:?}"
+    );
+}
+
+/// `driver-provisioning/driver-path-override`: with no route left, the refusal
+/// is the whole diagnosis, so it names the location it looked at, the driver it
+/// looked for, the reserved connection and why that connection failed, and both
+/// properties that state a route explicitly.
+#[test]
+fn no_driver_route_names_the_location_the_connection_and_both_properties() {
+    let mount = TempDir::new().expect("a temporary mount must be creatable");
+
+    let error = default_location_library(
+        mount.path(),
+        Driver::MySql,
+        FallbackCause::ConnectionUnresolved(UNRESOLVED_CAUSE.to_string()),
+    )
+    .expect_err("an empty default location leaves the statement no route at all");
+
+    let message = error.to_string();
+    let location = provisioning::default_driver_path(mount.path(), Driver::MySql);
+    for named in [
+        location.to_string_lossy().as_ref(),
+        Driver::MySql.as_str(),
+        DEFAULT_BUCKETFS_CONNECTION,
+        UNRESOLVED_CAUSE,
+        BUCKETFS_CONNECTION_PROPERTY,
+        DRIVER_PATH_PROPERTY,
+    ] {
+        assert!(
+            message.contains(named),
+            "the refusal must name `{named}`: {message}"
+        );
+    }
+}
+
+/// `driver-provisioning/driver-path-override`: on this trigger the reserved
+/// connection resolved, so the message reports the registry rather than the
+/// connection, and carries no text written for the explicit route.
+#[test]
+fn no_driver_route_names_the_registry_it_could_not_reach() {
+    let mount = TempDir::new().expect("a temporary mount must be creatable");
+
+    let error = default_location_library(
+        mount.path(),
+        Driver::MySql,
+        FallbackCause::RegistryUnreachable {
+            url: UNREACHABLE_INDEX_URL.to_string(),
+            cause: UNREACHABLE_TRANSPORT_CAUSE.to_string(),
+        },
+    )
+    .expect_err("an empty default location leaves the statement no route at all");
+
+    let message = error.to_string();
+    let location = provisioning::default_driver_path(mount.path(), Driver::MySql);
+    for named in [
+        UNREACHABLE_INDEX_URL,
+        UNREACHABLE_TRANSPORT_CAUSE,
+        location.to_string_lossy().as_ref(),
+        BUCKETFS_CONNECTION_PROPERTY,
+        DRIVER_PATH_PROPERTY,
+    ] {
+        assert!(
+            message.contains(named),
+            "the refusal must name `{named}`: {message}"
+        );
+    }
+    assert!(
+        !message.contains(UNRESOLVED_CONNECTION_SENTENCE),
+        "the reserved connection resolved on this route, so naming it is fine and reporting \
+         it as the failure is not: {message}"
+    );
+    assert!(
+        !message.contains("no path on the mount to pre-load"),
+        "this message names the very location it looked at, so nothing may deny that the \
+         location exists: {message}"
+    );
+}
+
+/// `driver-provisioning/driver-path-override`: something *is* at the default
+/// location and cannot be loaded, so the refusal says why rather than reporting
+/// the location as empty.
+///
+/// The operator who reaches this is the air-gapped one who pre-placed a library
+/// and got the path shape or the mode bits slightly wrong, and a message that
+/// only says no file is there sends them to look in the wrong place. A
+/// directory standing where the library belongs is the reproducible form of
+/// that mistake: it is the one unreadable kind a test can create without
+/// depending on the mode bits a build agent runs under.
+#[test]
+fn no_driver_route_names_why_the_default_location_was_unusable() {
+    let mount = TempDir::new().expect("a temporary mount must be creatable");
+    let location = provisioning::default_driver_path(mount.path(), Driver::MySql);
+    std::fs::create_dir_all(&location)
+        .expect("a directory standing where the library belongs must be creatable");
+
+    let error = default_location_library(
+        mount.path(),
+        Driver::MySql,
+        FallbackCause::ConnectionUnresolved(UNRESOLVED_CAUSE.to_string()),
+    )
+    .expect_err("a directory at the default location is no driver library");
+
+    let message = error.to_string();
+    for named in [
+        location.to_string_lossy().as_ref(),
+        "it is not a regular file",
+    ] {
+        assert!(
+            message.contains(named),
+            "an unusable file at the default location must be reported as unusable and not \
+             as absent, so the refusal must name `{named}`: {message}"
+        );
+    }
+}
+
+/// `vs-adapter/create-virtual-schema` and
+/// `driver-provisioning/driver-version-resolution`: only the reserved-connection
+/// route has a last resort, and only an index request that reached no host
+/// reaches it.
+///
+/// The `SelfInstall` pairing is the call the explicit route makes in
+/// production, because both credential routes funnel their `ensure_driver`
+/// failure through this one function rather than each deciding for itself.
+#[test]
+fn an_explicit_bucketfs_connection_never_falls_back() {
+    let explicit = DriverSource::SelfInstall("MY_OWN_BUCKETFS".to_string());
+    assert!(
+        self_install_fallback(&explicit, &an_index_that_reached_no_host()).is_none(),
+        "an explicitly named BucketFS connection is an instruction, so even the one failure \
+         the reserved route falls back on surfaces unchanged"
+    );
+
+    assert!(
+        self_install_fallback(
+            &DriverSource::Supplied("/mine/libadbc_driver_mysql.so".to_string()),
+            &an_index_that_reached_no_host()
+        )
+        .is_none(),
+        "a supplied library never reaches ensure_driver at all, so this pairing cannot arise \
+         in production and must answer None if it ever does"
+    );
+
+    let answered: [(&str, ProvisioningError); 5] = [
+        (
+            "a registry that answered an HTTP status",
+            ProvisioningError::RegistryRejected {
+                url: UNREACHABLE_INDEX_URL.to_string(),
+                status: 503,
+                driver: Driver::MySql.as_str().to_string(),
+            },
+        ),
+        (
+            "a package download that reached no host, which runs only after a version \
+             resolved and the versioned presence check ran",
+            ProvisioningError::PackageUnreachable {
+                url: "https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_linux_amd64.tar.gz"
+                    .to_string(),
+                driver: Driver::MySql.as_str().to_string(),
+                cause: "error trying to connect: connection refused".to_string(),
+            },
+        ),
+        (
+            "an index body that stopped arriving after its status did",
+            ProvisioningError::TransferInterrupted {
+                url: UNREACHABLE_INDEX_URL.to_string(),
+                driver: Driver::MySql.as_str().to_string(),
+                cause: "connection closed before message completed".to_string(),
+            },
+        ),
+        (
+            "a package body that stopped arriving after its status did",
+            ProvisioningError::TransferInterrupted {
+                url: "https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_linux_amd64.tar.gz"
+                    .to_string(),
+                driver: Driver::MySql.as_str().to_string(),
+                cause: "connection closed before message completed".to_string(),
+            },
+        ),
+        (
+            "a BucketFS write that was refused",
+            ProvisioningError::BucketFsRejected {
+                url: "https://exasol:2581/default".to_string(),
+                status: 403,
+            },
+        ),
+    ];
+    for (failure, error) in answered {
+        assert!(
+            self_install_fallback(&DriverSource::DefaultBucketFs, &error).is_none(),
+            "{failure} says nothing about the cluster's egress, so the reserved route must \
+             fail the statement rather than fall back"
+        );
+    }
+}
+
+/// The other half of the same rule: the one pairing that does fall back carries
+/// the accessor's two facts through unchanged, so the last-resort error can
+/// compose its own sentence from them.
+#[test]
+fn the_reserved_connection_falls_back_on_an_index_that_reached_no_host() {
+    let fallback = self_install_fallback(
+        &DriverSource::DefaultBucketFs,
+        &an_index_that_reached_no_host(),
+    );
+
+    let Some(FallbackCause::RegistryUnreachable { url, cause }) = fallback else {
+        panic!(
+            "the reserved route must fall back on an index request that reached no host, \
+                which is the only failure that says the cluster has no egress: {fallback:?}"
+        );
+    };
+    assert_eq!(url, UNREACHABLE_INDEX_URL);
+    assert_eq!(cause, UNREACHABLE_TRANSPORT_CAUSE);
 }
 
 /// The `DRIVER` property as Exasol delivers it: a string among the statement's

@@ -19,13 +19,12 @@ Create a virtual schema pointed at a MySQL database, then query it like any othe
 ```sql
 CREATE VIRTUAL SCHEMA MYSQLVS USING ADBC_VS.ADBC_ADAPTER WITH
   DRIVER = 'mysql'
-  CONNECTION_NAME = 'ADBC_VS_MYSQL'
-  BUCKETFS_CONNECTION = 'ADBC_VS_BUCKETFS';
+  CONNECTION_NAME = 'ADBC_VS_MYSQL';
 
 SELECT * FROM MYSQLVS.customers;
 ```
 
-`CONNECTION_NAME` names an Exasol `CONNECTION` object whose address is a `mysql://host:port/database` URI, carrying the source user and password. `BUCKETFS_CONNECTION` names the `CONNECTION` object the adapter uses to self-install the driver — no manual driver packaging step required.
+`CONNECTION_NAME` names an Exasol `CONNECTION` object whose address is a `mysql://host:port/database` URI, carrying the source user and password. Self-installing the driver needs a BucketFS write credential, resolved through one precedence chain. The adapter first tries the reserved `CONNECTION` object `ADBC_VS_BUCKETFS` — no property required. Setting `BUCKETFS_CONNECTION` overrides that reserved connection and never falls back to it, or to anything else, on failure. Below both routes sits a pre-placed library at `adbc-drivers/<driver>/supplied/<library>` on the BucketFS mount, reached on either of two conditions: the reserved connection does not resolve at all, or it resolves but the driver registry's index is unreachable through it. An operator who kept `ADBC_VS_BUCKETFS` but has no HTTPS egress meets the second condition, so pre-placing the library there needs no property either.
 
 ---
 
@@ -34,7 +33,7 @@ SELECT * FROM MYSQLVS.customers;
 Exasol's existing Virtual Schema dialects run on the JVM and move data through JDBC's row-by-row `ResultSet` cursor. adbc-vs replaces that with [ADBC](https://arrow.apache.org/adbc/) — a uniform C API returning Arrow record batches natively.
 
 - **ADBC-backed Virtual Schema.** One adapter maps any ADBC-fronted database's tables into Exasol virtual tables, replacing the one-dialect-per-database model of the JVM Virtual Schemas.
-- **Self-installing drivers.** On first use, the adapter checks BucketFS for the requested driver; if absent, it fetches the matching platform tarball from the `dbc` ADBC driver registry and installs it itself. Air-gapped clusters pre-load the driver with `exapump` instead.
+- **Self-installing drivers.** On first use, the adapter checks BucketFS for the requested driver; if absent, it fetches the matching platform tarball from the `dbc` ADBC driver registry and installs it itself. Air-gapped clusters instead pre-load the driver by uploading it to `adbc-drivers/<driver>/supplied/<library>` on the BucketFS mount — no property, no download.
 - **SQL pushdown.** Projection, filter predicates, aggregation, and equi/outer joins are rewritten into the target dialect's SQL and executed by the ADBC driver at the source.
 - **Arrow-native scan path.** The scan UDF streams the driver's Arrow record batches straight back to Exasol, with no row-by-row marshaling step.
 

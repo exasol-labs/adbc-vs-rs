@@ -18,7 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use adbc_vs_adapter::provisioning::{
-    ensure_driver, supplied_driver, Bucket, Credentials, Registry,
+    default_driver_path, ensure_driver, readable_library, supplied_driver, Bucket, Credentials,
+    Registry,
 };
 use adbc_vs_scan::driver::Driver;
 use flate2::write::GzEncoder;
@@ -51,6 +52,23 @@ const LIBRARY_BYTES: &[u8] = b"\x7fELF a driver, for the purposes of this test";
 const OLDER_LIBRARY_BYTES: &[u8] = b"\x7fELF the driver an earlier statement installed";
 const WRITE_USER: &str = "w";
 const WRITE_PASSWORD: &str = "M4b7-bucketfs-write";
+
+/// A version outside `drivers/mysql.toml`'s declared `>=0.6.0, <0.7.0` range —
+/// published, and parseable, but not one the range resolves to. Distinct from
+/// an index publishing no version at all: this is what "a registry that
+/// answered" looks like on the version-resolution step rather than on the
+/// transport, and it is a fact about the package, not about the cluster's
+/// egress.
+const PUBLISHED_OUT_OF_RANGE: &str = "v0.9.0";
+
+/// The bytes of a library an operator pre-placed at the default location.
+/// Distinct from [`LIBRARY_BYTES`] and [`OLDER_LIBRARY_BYTES`] so a test
+/// asserting which bytes survive cannot pass by every fixture happening to
+/// share content.
+const SUPPLIED_LIBRARY_BYTES: &[u8] = b"\x7fELF a pre-placed mysql driver, never touched \
+    by self-install";
+const POSTGRESQL_SUPPLIED_LIBRARY_BYTES: &[u8] = b"\x7fELF a pre-placed postgresql driver, \
+    never touched by self-install";
 
 /// PostgreSQL's own published version and what it resolves to, spelled bare
 /// rather than with MySQL's leading `v` — the same asymmetry
@@ -241,8 +259,8 @@ fn offline_fallback_names_the_drivers_own_path() {
     );
     assert!(
         !message.contains(driver_library()),
-        "the error must not send an operator to a BucketFS path to pre-load: the install \
-         path carries a version an unreachable registry never resolved: {message}"
+        "the error must name no versioned install path, because an unreachable registry \
+         never resolved a version to install: {message}"
     );
 }
 
@@ -274,8 +292,8 @@ fn offline_fallback_names_the_drivers_own_path_for_postgresql() {
     );
     assert!(
         !message.contains(Driver::Postgres.package().library),
-        "the error must not send an operator to a BucketFS path to pre-load: the install \
-         path carries a version an unreachable registry never resolved: {message}"
+        "the error must name no versioned install path, because an unreachable registry \
+         never resolved a version to install: {message}"
     );
     assert!(
         !message.contains(driver_library()),
@@ -374,9 +392,8 @@ fn bucketfs_write_failure_hides_credential() {
             package_declaring(driver_library(), LIBRARY_BYTES),
         ),
     ]));
-    let bucketfs = StubServer::serving(Arc::new(|_: &StubRequest| StubReply {
-        status: 403,
-        body: b"forbidden".to_vec(),
+    let bucketfs = StubServer::serving(Arc::new(|_: &StubRequest| {
+        StubReply::complete(403, b"forbidden".to_vec())
     }));
 
     let error = ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount))
@@ -444,9 +461,8 @@ fn visibility_wait_times_out() {
             package_declaring(driver_library(), LIBRARY_BYTES),
         ),
     ]));
-    let bucketfs = StubServer::serving(Arc::new(|_: &StubRequest| StubReply {
-        status: 200,
-        body: Vec::new(),
+    let bucketfs = StubServer::serving(Arc::new(|_: &StubRequest| {
+        StubReply::complete(200, Vec::new())
     }));
     let deadline = Duration::from_millis(300);
 
@@ -619,6 +635,9 @@ fn two_drivers_install_side_by_side_at_distinct_driver_and_version_segments() {
     );
 }
 
+/// Proves the stub registry is actually reachable -- the self-install route
+/// hits it and installs successfully -- before trusting the request count
+/// below as evidence the `DRIVER_PATH` route skipped it.
 #[test]
 fn the_driver_path_route_makes_no_registry_request() {
     let mount = MountDirectory::new();
@@ -638,9 +657,6 @@ fn the_driver_path_route_makes_no_registry_request() {
     ]));
     let bucketfs = StubServer::serving(mount.accepting_writes());
 
-    // Prove the stub registry is actually reachable -- the self-install route
-    // hits it and installs successfully -- before trusting the request count
-    // below as evidence the DRIVER_PATH route skipped it.
     ensure_driver(
         &Registry::at(&registry.url(), Driver::Postgres),
         &bucketfs.as_bucket(&mount),
@@ -673,6 +689,259 @@ fn the_driver_path_route_makes_no_registry_request() {
         "the DRIVER_PATH route must perform no HTTP request at all, to the registry the \
          self-install route already proved is listening: {:?}",
         registry.requests()
+    );
+}
+
+#[test]
+fn self_install_writes_only_the_versioned_path_and_leaves_a_supplied_library_alone() {
+    let mount = MountDirectory::new();
+    place_supplied_library(&mount, DRIVER, SUPPLIED_LIBRARY_BYTES);
+    place_supplied_library(&mount, Driver::Postgres, POSTGRESQL_SUPPLIED_LIBRARY_BYTES);
+
+    let registry = StubServer::serving(routes(&[
+        (
+            INDEX_PATH,
+            index_publishing_both_drivers(&[PUBLISHED_NEWEST], &[POSTGRESQL_PUBLISHED]),
+        ),
+        (
+            &package_path(PUBLISHED_NEWEST),
+            package_declaring(driver_library(), LIBRARY_BYTES),
+        ),
+        (
+            &package_path_for(Driver::Postgres, POSTGRESQL_PUBLISHED),
+            package_declaring_with_license(
+                POSTGRESQL_LICENSE_FILENAME,
+                Driver::Postgres.package().library,
+                POSTGRESQL_LIBRARY_BYTES,
+            ),
+        ),
+    ]));
+    let bucketfs = StubServer::serving(mount.accepting_writes());
+
+    let mysql_installed = ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount))
+        .expect("mysql must self-install while a supplied mysql library sits beside it");
+    let postgres_installed = ensure_driver(
+        &Registry::at(&registry.url(), Driver::Postgres),
+        &bucketfs.as_bucket(&mount),
+    )
+    .expect("postgresql must self-install while a supplied postgresql library sits beside it");
+
+    assert_eq!(mysql_installed.path, mount.driver_path(RESOLVED_VERSION));
+    assert_eq!(
+        postgres_installed.path,
+        mount.driver_path_for(Driver::Postgres, POSTGRESQL_RESOLVED_VERSION)
+    );
+
+    assert_eq!(
+        fs::read(mount.supplied_path_for(DRIVER))
+            .expect("the supplied mysql library must still be readable"),
+        SUPPLIED_LIBRARY_BYTES,
+        "self-install must leave a pre-placed mysql library's bytes untouched, byte for byte"
+    );
+    assert_eq!(
+        fs::read(mount.supplied_path_for(Driver::Postgres))
+            .expect("the supplied postgresql library must still be readable"),
+        POSTGRESQL_SUPPLIED_LIBRARY_BYTES,
+        "self-install must leave a pre-placed postgresql library's bytes untouched, byte for \
+         byte"
+    );
+
+    assert_eq!(
+        bucketfs.requested_paths(),
+        vec![
+            driver_put_path(RESOLVED_VERSION),
+            driver_put_path_for(Driver::Postgres, POSTGRESQL_RESOLVED_VERSION),
+        ],
+        "each driver must write exactly once, at its own versioned path, never at either \
+         driver's supplied location -- this is what separates \"did not overwrite\" from \
+         \"overwrote with identical bytes\""
+    );
+}
+
+/// Proves the stub registry is actually reachable -- self-install hits it
+/// and installs successfully -- before trusting the request count below as
+/// evidence the default-location route skipped it.
+#[test]
+fn the_default_location_route_makes_no_registry_request() {
+    let mount = MountDirectory::new();
+    let registry = StubServer::serving(routes(&[
+        (INDEX_PATH, index_publishing(&[PUBLISHED_NEWEST])),
+        (
+            &package_path(PUBLISHED_NEWEST),
+            package_declaring(driver_library(), LIBRARY_BYTES),
+        ),
+    ]));
+    let bucketfs = StubServer::serving(mount.accepting_writes());
+
+    ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount)).expect(
+        "the stub registry must serve a real package so this test can prove the default \
+         location route skips it, rather than merely being unable to reach an unreachable \
+         one",
+    );
+    let requests_before = registry.requests().len();
+    assert!(
+        requests_before > 0,
+        "self-install must have reached the stub registry for the request count below to \
+         mean anything"
+    );
+    let bucketfs_requests_before = bucketfs.requests().len();
+
+    let default_path = default_driver_path(mount.path(), DRIVER);
+    assert!(
+        readable_library(&default_path).is_err(),
+        "an empty default location must not be readable"
+    );
+
+    fs::create_dir_all(
+        default_path
+            .parent()
+            .expect("the default path has a directory"),
+    )
+    .expect("the default directory must be creatable");
+    fs::write(&default_path, b"\x7fELF a pre-placed driver")
+        .expect("the fixture library at the default location must be writable");
+    assert!(
+        readable_library(&default_path).is_ok(),
+        "a readable file at the default location must be usable"
+    );
+
+    assert_eq!(
+        registry.requests().len(),
+        requests_before,
+        "neither resolving the default location nor checking whether it is readable may \
+         perform an HTTP request, to the registry self-install already proved is listening: \
+         {:?}",
+        registry.requests()
+    );
+    assert_eq!(
+        bucketfs.requests().len(),
+        bucketfs_requests_before,
+        "neither resolving the default location nor checking whether it is readable may \
+         write to BucketFS: {:?}",
+        bucketfs.requests()
+    );
+}
+
+#[test]
+fn registry_unreachability_is_told_from_a_registry_that_answered() {
+    let mount = MountDirectory::new();
+    let bucketfs = StubServer::serving(routes(&[]));
+
+    let closed = closed_port();
+    let unreachable = ensure_driver(
+        &Registry::at(&format!("http://127.0.0.1:{closed}"), DRIVER),
+        &bucketfs.as_bucket(&mount),
+    )
+    .expect_err("a registry nothing answers for must fail provisioning");
+    assert!(
+        unreachable.registry_unreachable().is_some(),
+        "a registry nothing answers for is the one failure that is evidence of an air gap: \
+         {unreachable}"
+    );
+
+    let answering_500 = StubServer::serving(Arc::new(|_: &StubRequest| {
+        StubReply::complete(500, Vec::new())
+    }));
+    let rejected = ensure_driver(
+        &Registry::at(&answering_500.url(), DRIVER),
+        &bucketfs.as_bucket(&mount),
+    )
+    .expect_err("a registry answering HTTP 500 must fail provisioning");
+    assert!(
+        rejected.registry_unreachable().is_none(),
+        "a registry that answered any HTTP status is not an unreachable one: {rejected}"
+    );
+
+    let no_in_range_version = StubServer::serving(routes(&[(
+        INDEX_PATH,
+        index_publishing(&[PUBLISHED_OUT_OF_RANGE]),
+    )]));
+    let unsatisfied = ensure_driver(
+        &Registry::at(&no_in_range_version.url(), DRIVER),
+        &bucketfs.as_bucket(&mount),
+    )
+    .expect_err("an index publishing no in-range version must fail provisioning");
+    assert!(
+        unsatisfied.registry_unreachable().is_none(),
+        "an index that answered, but with no version the range accepts, is not an \
+         unreachable registry: {unsatisfied}"
+    );
+}
+
+#[test]
+fn a_package_download_that_failed_mid_transfer_is_not_an_unreachable_registry() {
+    let mount = MountDirectory::new();
+    let bucketfs = StubServer::serving(routes(&[]));
+
+    let index = index_publishing(&[PUBLISHED_NEWEST]);
+    let package_route = package_path(PUBLISHED_NEWEST);
+    let full_package = package_declaring(driver_library(), LIBRARY_BYTES);
+    let truncated_package = full_package[..full_package.len() / 2].to_vec();
+    let declared_length = full_package.len();
+
+    let registry = StubServer::serving(Arc::new(move |request: &StubRequest| {
+        if request.path == INDEX_PATH {
+            StubReply::complete(200, index.clone())
+        } else if request.path == package_route {
+            StubReply {
+                status: 200,
+                body: truncated_package.clone(),
+                declared_length: Some(declared_length),
+            }
+        } else {
+            StubReply::complete(404, b"not found".to_vec())
+        }
+    }));
+
+    let error = ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount)).expect_err(
+        "a package download whose body stops arriving after its status did must fail \
+         provisioning",
+    );
+    assert!(
+        error.registry_unreachable().is_none(),
+        "the registry answered the index and the version range resolved -- a package \
+         download that ran after the versioned presence check is not evidence of an \
+         unreachable registry: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("stopped arriving while provisioning"),
+        "a truncated package body must reach the interrupted-transfer variant rather than \
+         any other refusal: {error}"
+    );
+}
+
+#[test]
+fn an_index_read_that_failed_mid_transfer_is_not_an_unreachable_registry() {
+    let mount = MountDirectory::new();
+    let bucketfs = StubServer::serving(routes(&[]));
+
+    let full_index = index_publishing(&[PUBLISHED_NEWEST]);
+    let truncated_index = full_index[..full_index.len() / 2].to_vec();
+    let declared_length = full_index.len();
+
+    let registry = StubServer::serving(Arc::new(move |_: &StubRequest| StubReply {
+        status: 200,
+        body: truncated_index.clone(),
+        declared_length: Some(declared_length),
+    }));
+
+    let error = ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount)).expect_err(
+        "an index read whose body stops arriving after its status did must fail provisioning",
+    );
+    assert!(
+        error.registry_unreachable().is_none(),
+        "a host that answered a status line before the connection dropped is not evidence \
+         of an unreachable registry -- nothing was resolved and nothing was installed, but \
+         something answered: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("stopped arriving while provisioning"),
+        "a truncated index body must reach the interrupted-transfer variant rather than \
+         any other refusal: {error}"
     );
 }
 
@@ -713,6 +982,13 @@ impl MountDirectory {
             .join(driver.package().library)
     }
 
+    /// Where the mount exposes an operator pre-placed library for `driver`,
+    /// with no version segment — the location [`default_driver_path`]
+    /// computes and self-install must never write to.
+    fn supplied_path_for(&self, driver: Driver) -> PathBuf {
+        default_driver_path(self.root.path(), driver)
+    }
+
     fn install(&self, version: &str, bytes: &[u8]) {
         let path = self.driver_path(version);
         fs::create_dir_all(path.parent().expect("the driver path has a directory"))
@@ -739,10 +1015,7 @@ impl MountDirectory {
             fs::create_dir_all(written.parent().expect("the driver path has a directory"))
                 .expect("the driver directory must be creatable");
             fs::write(&written, &request.body).expect("the uploaded driver must be writable");
-            StubReply {
-                status: 200,
-                body: Vec::new(),
-            }
+            StubReply::complete(200, Vec::new())
         })
     }
     /// A BucketFS stub that answers `locked` requests with HTTP 423 before it
@@ -755,14 +1028,21 @@ impl MountDirectory {
             let mut remaining = remaining.lock().expect("the lock counter is not poisoned");
             if *remaining > 0 {
                 *remaining -= 1;
-                return StubReply {
-                    status: 423,
-                    body: b"locked".to_vec(),
-                };
+                return StubReply::complete(423, b"locked".to_vec());
             }
             accepting(request)
         })
     }
+}
+
+/// Writes `bytes` at `mount`'s default location for `driver`, as an operator
+/// pre-placing a library there would, so self-install can be proven to leave
+/// it alone.
+fn place_supplied_library(mount: &MountDirectory, driver: Driver, bytes: &[u8]) {
+    let path = mount.supplied_path_for(driver);
+    fs::create_dir_all(path.parent().expect("the supplied path has a directory"))
+        .expect("the supplied directory must be creatable");
+    fs::write(path, bytes).expect("the supplied library must be writable");
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1184,24 @@ struct StubRequest {
 struct StubReply {
     status: u16,
     body: Vec<u8>,
+    /// Overrides the declared `Content-Length` past `body.len()`, so a
+    /// handler can announce a body it never finishes sending — the shape a
+    /// connection dropped mid-transfer takes on the wire. `None` for every
+    /// ordinary reply, whose declared length is exactly `body.len()`.
+    declared_length: Option<usize>,
+}
+
+impl StubReply {
+    /// A reply whose declared `Content-Length` matches the body sent in
+    /// full — every reply this file served before a mid-transfer failure
+    /// needed expressing at all.
+    fn complete(status: u16, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body,
+            declared_length: None,
+        }
+    }
 }
 
 type Handler = Arc<dyn Fn(&StubRequest) -> StubReply + Send + Sync>;
@@ -917,14 +1215,8 @@ fn routes(paths: &[(&str, Vec<u8>)]) -> Handler {
 
     Arc::new(
         move |request: &StubRequest| match table.get(&request.path) {
-            Some(body) => StubReply {
-                status: 200,
-                body: body.clone(),
-            },
-            None => StubReply {
-                status: 404,
-                body: b"not found".to_vec(),
-            },
+            Some(body) => StubReply::complete(200, body.clone()),
+            None => StubReply::complete(404, b"not found".to_vec()),
         },
     )
 }
@@ -1077,10 +1369,10 @@ fn read_request(stream: &mut TcpStream) -> Option<StubRequest> {
 }
 
 fn write_reply(stream: &mut TcpStream, reply: &StubReply) {
+    let length = reply.declared_length.unwrap_or(reply.body.len());
     let head = format!(
-        "HTTP/1.1 {} STUB\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        reply.status,
-        reply.body.len()
+        "HTTP/1.1 {} STUB\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n",
+        reply.status
     );
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&reply.body);

@@ -34,6 +34,13 @@ const DRIVER_BUCKET_PREFIX: &str = "adbc-drivers/mysql/";
 const DRIVER_LIBRARY: &str = "libadbc_driver_mysql.so";
 const BUCKET_MOUNT: &str = "/buckets/bfsdefault/default";
 
+/// Where tasks 2.3 and 3.2 copy an already-installed driver library to, to
+/// prove self-install does not short-circuit off a pre-placed one. This is an
+/// operator-owned object, not an installed driver — its `supplied` path
+/// segment is not a version, which is exactly what [`installed_driver_entries`]
+/// filters on to keep it out of [`installed_drivers`].
+const SUPPLIED_BUCKET_PATH: &str = "adbc-drivers/mysql/supplied/libadbc_driver_mysql.so";
+
 /// A lower bound distinguishing an installed driver package from a stray
 /// placeholder file: the pinned `libadbc_driver_mysql.so` measured 46,408,368
 /// bytes (about 44.3 MiB) on the registry this release pins, so any file
@@ -104,7 +111,7 @@ fn driver_lands_in_bucketfs() {
     });
 
     assert_eq!(
-        adapter_notes(stack)["driverPath"],
+        adapter_notes(VIRTUAL_SCHEMA)["driverPath"],
         format!("{BUCKET_MOUNT}/{installed}"),
         "the recorded driver path must be the path a UDF opens, carrying the driver and \
          the resolved version"
@@ -141,6 +148,304 @@ fn second_schema_reuses_driver() {
     schema::drop_connection(&stack.exasol, "ADBC_VS_BUCKETFS_CLOSED");
 
     assert_eq!(cell(&rows[0], "N"), Some("3".to_string()));
+}
+
+/// A statement naming no `BUCKETFS_CONNECTION` property at all must still
+/// self-install: the adapter resolves the reserved connection
+/// [`schema::BUCKETFS_CONNECTION`] on its own, which the shared stack already
+/// holds. This proves the default path end to end, not merely that the
+/// property is optional syntactically.
+#[test]
+fn default_bucketfs_connection_needs_no_property() {
+    let stack = stack::shared();
+
+    schema::create_virtual_schema_through(
+        &stack.exasol,
+        schema::VirtualSchemaSpec {
+            schema: "DEFAULTVS",
+            driver: Driver::MySql,
+            connection: MYSQL_CONNECTION,
+            bucketfs_connection: None,
+            driver_path: None,
+        },
+    );
+
+    let rows = stack
+        .exasol
+        .query_rows("SELECT COUNT(*) AS N FROM DEFAULTVS.\"orders\"");
+    let notes = adapter_notes("DEFAULTVS");
+    schema::drop_virtual_schema(&stack.exasol, "DEFAULTVS");
+
+    assert_eq!(
+        cell(&rows[0], "N"),
+        Some("3".to_string()),
+        "a schema created with no BUCKETFS_CONNECTION property must still reach the shared \
+         fixture's three seeded rows, which proves it reached the source rather than merely \
+         being created"
+    );
+    let shared_notes = adapter_notes(VIRTUAL_SCHEMA);
+    assert_eq!(
+        notes["driverPath"], shared_notes["driverPath"],
+        "self-install through the default connection must land the driver at the same path the \
+         shared schema's own self-install used: {notes:?} vs {shared_notes:?}"
+    );
+    assert!(
+        notes["driverVersion"].is_string(),
+        "self-install through the default connection must record a driver version, which is \
+         what separates it from the last-resort route: {notes:?}"
+    );
+}
+
+/// Settles a guard's cleanup: raises the failure while nothing is unwinding,
+/// and reports it to stderr once something already is.
+///
+/// A panic raised inside a `Drop` that is itself running for an earlier panic
+/// is a double panic, and Rust turns that into `std::process::abort()`. The
+/// abort would take every guard that has not dropped yet with it — in
+/// [`a_preplaced_library_answers_when_no_bucketfs_connection_resolves`],
+/// [`BucketObjectGuard`] drops first and [`ReservedConnectionGuard`] second —
+/// so one cleanup that failed would silently cancel a restore that would have
+/// succeeded, and every later test in this `--test-threads=1` binary would run
+/// against a stack missing the reserved connection. Raising is therefore
+/// correct only while this thread is not already unwinding; the original
+/// payload is resumed rather than re-wrapped, so the first failure keeps its
+/// own message.
+///
+/// The report names what was left changed and how to change it back, because
+/// nothing else will: the stack stays dirty from here on, and the next
+/// `make test-e2e` reads the same BucketFS and the same Exasol.
+fn raise_or_report(guard: &str, subject: &str, cleanup: std::thread::Result<()>) {
+    let Err(failure) = cleanup else {
+        return;
+    };
+    if !std::thread::panicking() {
+        std::panic::resume_unwind(failure);
+    }
+    eprintln!(
+        "{guard} could not undo its change to {subject} while a panic was already unwinding, \
+         so the failure is reported rather than raised: raising it would abort the process \
+         before the remaining guards restore anything. The stack is now dirty for every later \
+         test in this binary and for the next run; reset it with `make stack-down && make \
+         stack-up`."
+    );
+}
+
+/// Deletes a BucketFS object when it drops, so a panic in the step between
+/// placing an operator-owned object and a test's own explicit cleanup still
+/// removes it from BucketFS, rather than leaving it for the rest of a
+/// `--test-threads=1` run and the next binary. Task 3.3 follows the same
+/// pattern for its own guard.
+///
+/// A failed delete goes through [`raise_or_report`] rather than out of `drop`,
+/// because this guard drops *first* and an abort here would cancel the restore
+/// [`ReservedConnectionGuard`] still owes.
+struct BucketObjectGuard {
+    exasol: &'static common::exasol::Exasol,
+    bucket_path: &'static str,
+}
+
+impl BucketObjectGuard {
+    fn new(exasol: &'static common::exasol::Exasol, bucket_path: &'static str) -> Self {
+        Self {
+            exasol,
+            bucket_path,
+        }
+    }
+}
+
+impl Drop for BucketObjectGuard {
+    fn drop(&mut self) {
+        let removed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.exasol.delete_file(self.bucket_path)
+        }));
+        raise_or_report("BucketObjectGuard", self.bucket_path, removed);
+    }
+}
+
+/// A library placed at the operator-owned `supplied` path must not
+/// short-circuit self-install while the registry is reachable: provisioning
+/// still installs its own versioned copy rather than reusing the pre-placed
+/// one.
+#[test]
+fn a_supplied_library_does_not_short_circuit_self_install() {
+    let stack = stack::shared();
+    let installed = installed_driver(stack).unwrap_or_else(|| {
+        panic!(
+            "BucketFS lists {:?}, which includes no driver under {DRIVER_BUCKET_PREFIX} to copy \
+             from",
+            stack.exasol.bucket_entries()
+        )
+    });
+
+    stack
+        .exasol
+        .copy_bucket_object(&installed, SUPPLIED_BUCKET_PATH);
+    let guard = BucketObjectGuard::new(&stack.exasol, SUPPLIED_BUCKET_PATH);
+
+    schema::create_virtual_schema_through(
+        &stack.exasol,
+        schema::VirtualSchemaSpec {
+            schema: "SUPPLIEDVS",
+            driver: Driver::MySql,
+            connection: MYSQL_CONNECTION,
+            bucketfs_connection: None,
+            driver_path: None,
+        },
+    );
+
+    let notes = adapter_notes("SUPPLIEDVS");
+    drop(guard);
+    schema::drop_virtual_schema(&stack.exasol, "SUPPLIEDVS");
+
+    assert_eq!(
+        notes["driverPath"],
+        format!("{BUCKET_MOUNT}/{installed}"),
+        "self-install must still land the driver at the versioned install path rather than \
+         short-circuiting off the library supplied at {SUPPLIED_BUCKET_PATH}: {notes:?}"
+    );
+    assert!(
+        notes["driverVersion"].is_string(),
+        "self-install reaching the registry must record a driver version: {notes:?}"
+    );
+}
+
+/// Recreates the reserved BucketFS `CONNECTION` when it drops, so a panic
+/// between dropping that connection and a test's own explicit restore still
+/// leaves every later test in this `--test-threads=1` binary the connection
+/// the shared setup created. Without it, one real defect in the last-resort
+/// route would surface as a cascade of unrelated provisioning failures that
+/// hides the defect that caused them.
+///
+/// [`schema::create_bucketfs_connection`] restores through `CREATE OR REPLACE`
+/// and so is idempotent, which is why the guard is constructed *before* the
+/// `DROP CONNECTION` rather than after it: there is then no instant in which
+/// the connection is gone and nothing is bound to put it back.
+///
+/// A failed restore is raised while nothing is unwinding and reported to
+/// stderr once something already is, through [`raise_or_report`]. Raising it
+/// during an unwind would be a panic inside a `Drop` running for another
+/// panic, which Rust turns into `std::process::abort()` — and that abort would
+/// cancel every guard that has not dropped yet, so a guard raising its own
+/// failure could destroy the very restores this pattern exists to guarantee.
+struct ReservedConnectionGuard {
+    exasol: &'static common::exasol::Exasol,
+}
+
+impl ReservedConnectionGuard {
+    fn new(exasol: &'static common::exasol::Exasol) -> Self {
+        Self { exasol }
+    }
+}
+
+impl Drop for ReservedConnectionGuard {
+    fn drop(&mut self) {
+        let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            schema::create_bucketfs_connection(self.exasol)
+        }));
+        raise_or_report(
+            "ReservedConnectionGuard",
+            &format!("CONNECTION `{}`", schema::BUCKETFS_CONNECTION),
+            restored,
+        );
+    }
+}
+
+/// With the reserved connection gone, a statement naming neither property has
+/// no credential to self-install through, so the adapter falls to the default
+/// driver location. Empty, that location leaves no route at all and the
+/// statement must fail naming every one it had; holding a pre-placed library,
+/// it answers, and the schema records that path and no version — the same
+/// two-field signature `driver_path_is_accepted_and_bypasses_provisioning`
+/// reads for an explicit `DRIVER_PATH`.
+///
+/// Both phases share one dropped connection, and the order is what makes each
+/// prove something: the refusal is the evidence the location was empty when
+/// the second phase pre-placed its library there, so the second creation
+/// cannot have been answered by anything left over.
+///
+/// This is the only test in the binary that removes an object the shared setup
+/// created, so it puts the stack back before it asserts anything, exactly as
+/// [`first_use_installs_driver_from_registry`] does. Two guards do it — one
+/// per thing taken away, each constructed at the step that takes it — so an
+/// unwind runs exactly the restores that are owed: a panic before the copy
+/// recreates the connection and does not try to delete an object that was
+/// never placed.
+#[test]
+fn a_preplaced_library_answers_when_no_bucketfs_connection_resolves() {
+    const SCHEMA: &str = "PREPLACEDVS";
+    let stack = stack::shared();
+    let installed = installed_driver(stack).unwrap_or_else(|| {
+        panic!(
+            "BucketFS lists {:?}, which includes no driver under {DRIVER_BUCKET_PREFIX} to \
+             pre-place a copy of",
+            stack.exasol.bucket_entries()
+        )
+    });
+    let shared_count = cell(
+        &stack.exasol.query_rows(&format!(
+            "SELECT COUNT(*) AS N FROM {VIRTUAL_SCHEMA}.\"orders\""
+        ))[0],
+        "N",
+    )
+    .expect("COUNT(*) over the shared virtual schema answers");
+    let default_location = format!("{BUCKET_MOUNT}/{SUPPLIED_BUCKET_PATH}");
+    let spec = || schema::VirtualSchemaSpec {
+        schema: SCHEMA,
+        driver: Driver::MySql,
+        connection: MYSQL_CONNECTION,
+        bucketfs_connection: None,
+        driver_path: None,
+    };
+
+    let connection_guard = ReservedConnectionGuard::new(&stack.exasol);
+    schema::drop_connection(&stack.exasol, schema::BUCKETFS_CONNECTION);
+
+    let no_route = schema::create_virtual_schema_through_expecting_failure(&stack.exasol, spec());
+
+    stack
+        .exasol
+        .copy_bucket_object(&installed, SUPPLIED_BUCKET_PATH);
+    let object_guard = BucketObjectGuard::new(&stack.exasol, SUPPLIED_BUCKET_PATH);
+
+    schema::create_virtual_schema_through(&stack.exasol, spec());
+    let rows = stack
+        .exasol
+        .query_rows(&format!("SELECT COUNT(*) AS N FROM {SCHEMA}.\"orders\""));
+    let notes = adapter_notes(SCHEMA);
+    schema::drop_virtual_schema(&stack.exasol, SCHEMA);
+
+    drop(object_guard);
+    drop(connection_guard);
+
+    for route in [
+        default_location.as_str(),
+        schema::BUCKETFS_CONNECTION,
+        "BUCKETFS_CONNECTION",
+        "DRIVER_PATH",
+    ] {
+        assert!(
+            no_route.contains(route),
+            "with the reserved connection gone and the default location empty, the refusal must \
+             name every route to a driver library, and `{route}` is missing from: {no_route}"
+        );
+    }
+    assert_eq!(
+        cell(&rows[0], "N"),
+        Some(shared_count),
+        "a schema loaded from the pre-placed library must reach the same rows the shared \
+         schema's self-installed driver reads, which proves it reached the source rather than \
+         merely being created"
+    );
+    assert_eq!(
+        notes["driverPath"], default_location,
+        "the last-resort route must record the default driver location it loaded from, not the \
+         versioned install path {installed}: {notes}"
+    );
+    assert!(
+        notes.get("driverVersion").is_none(),
+        "nothing resolved a version for a pre-placed library, and recording one would report a \
+         version this schema is not running: {notes}"
+    );
 }
 
 #[test]
@@ -470,7 +775,7 @@ fn views_are_exposed() {
 fn adapter_notes_hold_state_not_credentials() {
     let stack = stack::shared();
 
-    let notes = adapter_notes(stack);
+    let notes = adapter_notes(VIRTUAL_SCHEMA);
 
     let installed = installed_driver(stack).expect("the shared virtual schema installed a driver");
 
@@ -495,8 +800,6 @@ fn adapter_notes_hold_state_not_credentials() {
 
 #[test]
 fn unmappable_column_omitted_and_recorded() {
-    let stack = stack::shared();
-
     let columns = column_names("mixed_types");
 
     assert_eq!(
@@ -504,7 +807,7 @@ fn unmappable_column_omitted_and_recorded() {
         vec!["id", "label"],
         "the JSON column must be left out of the virtual table"
     );
-    let omitted = adapter_notes(stack)["omitted"].clone();
+    let omitted = adapter_notes(VIRTUAL_SCHEMA)["omitted"].clone();
     let entry = omitted
         .as_array()
         .expect("omitted is an array")
@@ -521,15 +824,13 @@ fn unmappable_column_omitted_and_recorded() {
 
 #[test]
 fn latin1_column_omitted_and_recorded() {
-    let stack = stack::shared();
-
     let columns = column_names("items");
 
     assert!(
         !columns.contains(&"region".to_string()),
         "the latin1 column must be left out of the virtual table: {columns:?}"
     );
-    let omitted = adapter_notes(stack)["omitted"].clone();
+    let omitted = adapter_notes(VIRTUAL_SCHEMA)["omitted"].clone();
     let entry = omitted
         .as_array()
         .expect("omitted is an array")
@@ -547,15 +848,13 @@ fn latin1_column_omitted_and_recorded() {
 
 #[test]
 fn fully_unmappable_table_omitted() {
-    let stack = stack::shared();
-
     let tables = table_names(VIRTUAL_SCHEMA);
 
     assert!(
         !tables.contains(&"unmapped_only".to_string()),
         "a table with no mappable column must not be exposed: {tables:?}"
     );
-    let omitted = adapter_notes(stack)["omitted"].clone();
+    let omitted = adapter_notes(VIRTUAL_SCHEMA)["omitted"].clone();
     assert!(
         omitted
             .as_array()
@@ -647,6 +946,49 @@ fn unreachable_source_fails_create() {
     assert!(
         error.contains(&mysql::unreachable_uri()),
         "the error surfaced to the session must name the address it could not reach: {error}"
+    );
+}
+
+/// Probes whether a `CONNECTION` the adapter cannot resolve surfaces as the
+/// adapter's own error rather than killing the statement. The last-resort
+/// default-driver-location route (decision-log `add-default-bucketfs-connection`
+/// task 1.1) depends entirely on this being recoverable: the route is reached
+/// through exactly this failure, and if the script language container's host
+/// bridge cannot survive it, the route cannot be built at all.
+///
+/// This also covers the "explicit properties never fall back" half of the
+/// BucketFS-connection precedence scenario: an explicit `BUCKETFS_CONNECTION`
+/// that does not resolve must fail naming only itself, never falling back to
+/// the reserved connection this same stack has installed and ready.
+#[test]
+fn an_explicit_bucketfs_connection_that_does_not_resolve_fails_naming_it() {
+    let stack = stack::shared();
+
+    let error = schema::create_virtual_schema_through_expecting_failure(
+        &stack.exasol,
+        schema::VirtualSchemaSpec {
+            schema: "NOBUCKETFSVS",
+            driver: Driver::MySql,
+            connection: MYSQL_CONNECTION,
+            bucketfs_connection: Some("ADBC_VS_NO_SUCH_CONNECTION"),
+            driver_path: None,
+        },
+    );
+
+    let left_behind = virtual_schema_exists("NOBUCKETFSVS");
+
+    assert!(
+        !left_behind,
+        "a failed CREATE VIRTUAL SCHEMA must leave no schema behind"
+    );
+    assert!(
+        error.contains("ADBC_VS_NO_SUCH_CONNECTION"),
+        "the surfaced error must name the connection that does not resolve: {error}"
+    );
+    assert!(
+        !error.contains(schema::BUCKETFS_CONNECTION),
+        "explicit properties never fall back: the reserved connection must not be named \
+         even though this stack has it installed and ready: {error}"
     );
 }
 
@@ -1411,13 +1753,49 @@ fn generated_statement_carries_no_order_or_limit() {
 /// registry can publish a newer in-range version after an older one was
 /// already installed — so callers that need "the" installed driver must
 /// choose deterministically among these rather than assume there is one.
+///
+/// Excludes any entry whose version segment does not parse as a semantic
+/// version — in particular [`SUPPLIED_BUCKET_PATH`], the operator-owned
+/// object tasks 2.3 and 3.2 place there to prove self-install does not
+/// short-circuit off a pre-placed library. That object is deliberately not
+/// an installed driver, so it must not reach [`driver_semver`], which panics
+/// on a non-version segment.
 fn installed_drivers(stack: &stack::Stack) -> Vec<String> {
-    stack
-        .exasol
-        .bucket_entries()
+    installed_driver_entries(stack.exasol.bucket_entries())
+}
+
+/// Pure filter over a BucketFS listing: the entries that are a real installed
+/// MySQL driver library, rather than any other object placed under the same
+/// prefix. Split out from [`installed_drivers`] so the exclusion is
+/// assertable without a running stack.
+fn installed_driver_entries(entries: Vec<String>) -> Vec<String> {
+    entries
         .into_iter()
         .filter(|entry| entry.starts_with(DRIVER_BUCKET_PREFIX) && entry.ends_with(DRIVER_LIBRARY))
+        .filter(|entry| {
+            common::driver::installed_driver_version(entry, DRIVER_BUCKET_PREFIX).is_some()
+        })
         .collect()
+}
+
+#[test]
+fn the_supplied_object_is_not_an_installed_driver() {
+    let versioned_a = format!("{DRIVER_BUCKET_PREFIX}0.6.1/{DRIVER_LIBRARY}");
+    let versioned_b = format!("{DRIVER_BUCKET_PREFIX}v0.6.0/{DRIVER_LIBRARY}");
+    let listing = vec![
+        versioned_a.clone(),
+        SUPPLIED_BUCKET_PATH.to_string(),
+        versioned_b.clone(),
+    ];
+
+    let installed = installed_driver_entries(listing);
+
+    assert_eq!(
+        installed,
+        vec![versioned_a, versioned_b],
+        "the supplied object must be excluded, leaving both versioned entries, including the \
+         v-prefixed one: {installed:?}"
+    );
 }
 
 /// The bucket-relative path of the installed MySQL driver library at the
@@ -1435,10 +1813,14 @@ fn installed_driver(stack: &stack::Stack) -> Option<String> {
 
 /// Parses a driver's version segment (e.g. `v0.6.0` or `1.12.0`, the two
 /// spellings the registry index mixes) as a comparable semantic version.
+///
+/// Panics on a non-version segment, unlike [`common::driver::parse_driver_semver`]
+/// this wraps: every caller of this function has already gone through
+/// [`installed_drivers`], which excludes the one bucket object that is
+/// deliberately not a version, so a panic here means that filter regressed.
 fn driver_semver(version: &str) -> Version {
-    Version::parse(version.strip_prefix('v').unwrap_or(version)).unwrap_or_else(|error| {
-        panic!("installed driver version {version} is not a semantic version: {error}")
-    })
+    common::driver::parse_driver_semver(version)
+        .unwrap_or_else(|| panic!("installed driver version {version} is not a semantic version"))
 }
 
 /// The version segment of an installed driver's bucket-relative path, which is
@@ -1453,13 +1835,13 @@ fn installed_version(installed: &str) -> String {
         .to_string()
 }
 
-/// The `adapterNotes` Exasol persisted for the shared virtual schema, parsed.
-fn adapter_notes(stack: &stack::Stack) -> serde_json::Value {
-    let notes = stack
+/// The `adapterNotes` Exasol persisted for `schema`, parsed.
+fn adapter_notes(schema: &str) -> serde_json::Value {
+    let notes = stack::shared()
         .exasol
         .query_scalar(&format!(
             "SELECT ADAPTER_NOTES FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS \
-             WHERE SCHEMA_NAME = '{VIRTUAL_SCHEMA}'"
+             WHERE SCHEMA_NAME = '{schema}'"
         ))
         .expect("the virtual schema records adapter notes");
     serde_json::from_str(&notes).expect("adapter notes are a JSON object")

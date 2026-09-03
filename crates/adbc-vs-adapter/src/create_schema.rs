@@ -17,7 +17,7 @@
 //! as the bare response it always is.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use adbc_vs_scan::driver::{Driver, UnsupportedDriver};
 use exasol_udf_sdk::connect_back::ConnectionObject;
@@ -33,6 +33,13 @@ use crate::provisioning::{
 use crate::type_mapping::MappedColumn;
 
 /// The bucket-relative mount every UDF sees BucketFS's `default` bucket at.
+///
+/// [`open`] is the only reader of it. Everything downstream takes the mount as
+/// an argument, so the install path and the default driver location are always
+/// computed under one value — which is what makes their disjointness a property
+/// of the layout rather than a coincidence of two callers agreeing — and so
+/// both branches of the last-resort route are assertable against a directory
+/// inside the workspace.
 const BUCKETFS_MOUNT: &str = "/buckets/bfsdefault/default";
 
 /// The property naming the Exasol `CONNECTION` object holding the BucketFS
@@ -43,6 +50,17 @@ const BUCKETFS_MOUNT: &str = "/buckets/bfsdefault/default";
 /// through the read-only mount every UDF already sees.
 const BUCKETFS_CONNECTION_PROPERTY: &str = "BUCKETFS_CONNECTION";
 
+/// The `CONNECTION` self-install writes the fetched driver through when the
+/// statement names no `BUCKETFS_CONNECTION` of its own.
+///
+/// The name is reserved rather than configurable: a value an operator can set
+/// is a decision the module declined to make, and every cluster this adapter
+/// runs on needs exactly one BucketFS write credential, never a choice among
+/// several. It lives here rather than in `provisioning` because this module
+/// owns every connection-name decision the adapter makes; `provisioning` is
+/// handed credentials and resolves no name of its own.
+pub const DEFAULT_BUCKETFS_CONNECTION: &str = "ADBC_VS_BUCKETFS";
+
 /// The property naming the Exasol `CONNECTION` object that addresses the
 /// source.
 ///
@@ -51,6 +69,33 @@ const BUCKETFS_CONNECTION_PROPERTY: &str = "BUCKETFS_CONNECTION";
 /// property name outright, so a virtual schema carrying it can never be
 /// created.
 const CONNECTION_PROPERTY: &str = "CONNECTION_NAME";
+
+/// Why self-install through the reserved connection could not run at all,
+/// which is the only thing that reaches the default driver location.
+///
+/// Two variants rather than two `Option` fields on the error, so a last-resort
+/// failure cannot be built naming both causes or neither: exactly one of them
+/// happened. The registry arm carries the two facts
+/// [`ProvisioningError::registry_unreachable`] hands back, never a rendered
+/// [`ProvisioningError`], because that module's prose names `DRIVER_PATH` as
+/// the remedy and this route's remedy is the location its own message names.
+///
+/// Public only because it is a field of the public [`SchemaError`]. Nothing
+/// outside this module builds one: the route rule that decides which variant a
+/// failure produces is [`self_install_fallback`], and it is private.
+#[derive(Debug)]
+pub enum FallbackCause {
+    ConnectionUnresolved(String),
+    RegistryUnreachable { url: String, cause: String },
+}
+
+/// The sentence that reports the reserved connection itself as the failure.
+///
+/// Named rather than inlined because its absence is the assertable difference
+/// between the two [`FallbackCause`] arms: on the registry arm that connection
+/// resolved, so the message names it as context and must not report it as what
+/// went wrong.
+const UNRESOLVED_CONNECTION_SENTENCE: &str = "That reserved connection did not resolve";
 
 /// Everything that stops `createVirtualSchema`, `refresh`, or
 /// `setProperties` from producing a `schemaMetadata` response.
@@ -70,6 +115,12 @@ pub enum SchemaError {
     ConnectionSchemeMismatch {
         driver: &'static str,
         scheme: String,
+    },
+    NoDriverRoute {
+        driver: &'static str,
+        path: PathBuf,
+        fallback: FallbackCause,
+        unreadable: String,
     },
     Provisioning(ProvisioningError),
     ScanConnection(adbc_vs_scan::connection::ConnectError),
@@ -105,11 +156,65 @@ impl fmt::Display for SchemaError {
                  driver unchanged, so the mismatch would surface as a source connection failure \
                  rather than as the property mismatch it is"
             ),
+            Self::NoDriverRoute {
+                driver,
+                path,
+                fallback,
+                unreadable,
+            } => write_no_driver_route(f, driver, path, fallback, unreadable),
             Self::Provisioning(error) => write!(f, "{error}"),
             Self::ScanConnection(error) => write!(f, "{error}"),
             Self::Metadata(error) => write!(f, "{error}"),
         }
     }
+}
+
+/// The refusal an operator gets when every route to a driver library is
+/// exhausted, which is the whole diagnosis they have to act on.
+///
+/// It names the three property and connection names from this module's own
+/// constants rather than from fields, so the reserved connection is context on
+/// both arms and the reported failure on one. It quotes no text from
+/// [`ProvisioningError`]: that prose offers `DRIVER_PATH` as the remedy, and
+/// this route's remedy is the location this message already names.
+///
+/// `unreadable` and `fallback` report two different failures and never one
+/// twice: `fallback` is why self-install could not run, and `unreadable` is why
+/// the location it fell back to holds nothing loadable. Stating the second is
+/// what keeps the message true for an operator who *did* pre-place a library
+/// and got its kind or its mode bits wrong — telling them nothing is there
+/// would send them to look in the wrong place.
+fn write_no_driver_route(
+    f: &mut fmt::Formatter<'_>,
+    driver: &str,
+    path: &Path,
+    fallback: &FallbackCause,
+    unreadable: &str,
+) -> fmt::Result {
+    write!(
+        f,
+        "no `{driver}` driver library is available: the statement named neither \
+         {BUCKETFS_CONNECTION_PROPERTY} nor {DRIVER_PATH_PROPERTY}, so the reserved \
+         CONNECTION `{DEFAULT_BUCKETFS_CONNECTION}` was the route to a self-installed one. "
+    )?;
+    match fallback {
+        FallbackCause::ConnectionUnresolved(cause) => {
+            write!(f, "{UNRESOLVED_CONNECTION_SENTENCE} ({cause}). ")
+        }
+        FallbackCause::RegistryUnreachable { url, cause } => write!(
+            f,
+            "It resolved, but the driver registry index at {url} reached no host, so no \
+             version could be resolved to install: {cause}. "
+        ),
+    }?;
+    write!(
+        f,
+        "The default driver location {} holds no library this adapter can load either \
+         ({unreadable}), so no route is left. Pre-place the `{driver}` library there, name \
+         one with {DRIVER_PATH_PROPERTY}, or name a BucketFS write credential with \
+         {BUCKETFS_CONNECTION_PROPERTY}.",
+        path.display()
+    )
 }
 
 impl std::error::Error for SchemaError {}
@@ -157,13 +262,13 @@ fn open(
     let properties = read_properties(request);
     let driver = resolve_driver(&properties)?;
     let connection_name = required_property(&properties, CONNECTION_PROPERTY)?.to_string();
-    let source = driver_source(&properties)?;
+    let source = driver_source(&properties);
 
     let source_connection_object = resolve_connection(ctx, &connection_name)?;
     check_connection_scheme(&source_connection_object.address, driver)?;
     let database = parse_database(&source_connection_object.address)?;
 
-    let library = open_driver_library(ctx, &source, driver)?;
+    let library = open_driver_library(ctx, Path::new(BUCKETFS_MOUNT), &source, driver)?;
 
     let source_connection = adbc_vs_scan::connection::SourceConnection {
         uri: source_connection_object.address,
@@ -198,6 +303,9 @@ enum DriverSource {
     /// The `BUCKETFS_CONNECTION` self-install writes the fetched driver
     /// through.
     SelfInstall(String),
+    /// Neither property is set: self-install writes through
+    /// [`DEFAULT_BUCKETFS_CONNECTION`], the reserved connection.
+    DefaultBucketFs,
 }
 
 /// The driver library this virtual schema loads, in the spellings its notes
@@ -227,55 +335,143 @@ impl DriverLibrary {
     }
 }
 
-/// Reads which of the two driver routes the statement asked for.
+/// Reads which of the three driver routes the statement asked for.
 ///
-/// `DRIVER_PATH` decides it: an operator who names a library has supplied it,
-/// and `BUCKETFS_CONNECTION` — whose only purpose is the write credential
-/// self-install needs — is then not a property the statement has to carry.
-fn driver_source(properties: &serde_json::Map<String, Value>) -> Result<DriverSource, SchemaError> {
-    match optional_property(properties, DRIVER_PATH_PROPERTY) {
-        Some(path) => Ok(DriverSource::Supplied(path.to_string())),
-        None => Ok(DriverSource::SelfInstall(
-            required_property(properties, BUCKETFS_CONNECTION_PROPERTY)?.to_string(),
-        )),
+/// `DRIVER_PATH` decides the first split: an operator who names a library has
+/// supplied it, and `BUCKETFS_CONNECTION` — whose only purpose is the write
+/// credential self-install needs — is then not a property the statement has
+/// to carry. Absent that, an explicit `BUCKETFS_CONNECTION` is used exactly as
+/// named; without either property, self-install still has a route, through the
+/// reserved connection. `DRIVER_PATH` no longer decides the route alone.
+///
+/// Stays pure — no `ctx` parameter — because it runs before any `CONNECTION`
+/// is resolved, and that ordering is what keeps an unprovisionable statement
+/// refusable without reaching outside the process.
+fn driver_source(properties: &serde_json::Map<String, Value>) -> DriverSource {
+    if let Some(path) = optional_property(properties, DRIVER_PATH_PROPERTY) {
+        return DriverSource::Supplied(path.to_string());
+    }
+    match optional_property(properties, BUCKETFS_CONNECTION_PROPERTY) {
+        Some(name) => DriverSource::SelfInstall(name.to_string()),
+        None => DriverSource::DefaultBucketFs,
     }
 }
 
-/// Makes the driver library readable, by whichever route the statement chose.
+/// Makes the driver library readable, by whichever route the statement chose,
+/// under the BucketFS mount it was handed.
+///
+/// The two credential routes share one `ensure_driver` call and one
+/// [`self_install_fallback`] call on its failure, so the route rule lives in a
+/// function rather than in an arm: an edit that let an explicit
+/// `BUCKETFS_CONNECTION` fall back has to change the function one test owns.
+/// Only resolving the credential still branches by route, because a failed
+/// resolution is a `UdfError` and never reaches the provisioning taxonomy the
+/// rule reads.
 fn open_driver_library(
     ctx: &mut dyn UdfContext,
+    mount: &Path,
     source: &DriverSource,
     driver: Driver,
 ) -> Result<DriverLibrary, SchemaError> {
-    match source {
-        DriverSource::Supplied(path) => provisioning::supplied_driver(path, driver)
-            .map(DriverLibrary::supplied)
-            .map_err(SchemaError::Provisioning),
-        DriverSource::SelfInstall(connection_name) => {
-            self_install_driver(ctx, connection_name, driver)
+    let bucketfs_connection_name = match source {
+        DriverSource::Supplied(path) => {
+            return provisioning::supplied_driver(path, driver)
+                .map(DriverLibrary::supplied)
+                .map_err(SchemaError::Provisioning)
         }
+        DriverSource::SelfInstall(name) => name.as_str(),
+        DriverSource::DefaultBucketFs => DEFAULT_BUCKETFS_CONNECTION,
+    };
+
+    let credential = match resolve_connection(ctx, bucketfs_connection_name) {
+        Ok(credential) => credential,
+        Err(unresolved) if matches!(source, DriverSource::DefaultBucketFs) => {
+            return default_location_library(
+                mount,
+                driver,
+                FallbackCause::ConnectionUnresolved(unresolved.to_string()),
+            )
+        }
+        Err(unresolved) => return Err(unresolved),
+    };
+
+    self_install_driver(mount, &credential, driver).or_else(|error| {
+        match self_install_fallback(source, &error) {
+            Some(cause) => default_location_library(mount, driver, cause),
+            None => Err(SchemaError::Provisioning(error)),
+        }
+    })
+}
+
+/// Whether an `ensure_driver` failure leaves the statement a last resort, and
+/// why.
+///
+/// The rule this owns is one sentence: only the reserved-connection route has a
+/// last resort, and only an index request that reached no host reaches it.
+/// Every other pairing is `None`, including every failure of a registry that
+/// answered something — a status, a truncated body, a package host that went
+/// unanswered — because none of those says anything about the cluster's egress.
+///
+/// Both credential routes call it, which is what makes `source` a value rather
+/// than a constant: `SelfInstall` reaches `None` through the same call
+/// `DefaultBucketFs` reaches `Some` through, so the explicit route's refusal to
+/// fall back is a live answer rather than an arm nothing exercises.
+fn self_install_fallback(
+    source: &DriverSource,
+    error: &ProvisioningError,
+) -> Option<FallbackCause> {
+    if !matches!(source, DriverSource::DefaultBucketFs) {
+        return None;
+    }
+    let (url, cause) = error.registry_unreachable()?;
+    Some(FallbackCause::RegistryUnreachable {
+        url: url.to_owned(),
+        cause: cause.to_owned(),
+    })
+}
+
+/// The last resort both triggers reach: the driver library an operator
+/// pre-placed at the default location, or the refusal that no route is left.
+///
+/// It is reached only after self-install could not run at all, never before an
+/// install would have been attempted. Checking it first would restore the
+/// defect the versioned install path exists to remove, where an unversioned
+/// path answers for whichever version arrived first.
+///
+/// The refusal carries [`provisioning::readable_library`]'s own cause rather
+/// than discarding it, which is the whole reason that function reports one:
+/// absence and a file of the wrong kind or the wrong mode bits are different
+/// mistakes with different corrections, and only the cause tells them apart.
+fn default_location_library(
+    mount: &Path,
+    driver: Driver,
+    cause: FallbackCause,
+) -> Result<DriverLibrary, SchemaError> {
+    let path = provisioning::default_driver_path(mount, driver);
+    match provisioning::readable_library(&path) {
+        Ok(()) => Ok(DriverLibrary::supplied(path)),
+        Err(unreadable) => Err(SchemaError::NoDriverRoute {
+            driver: driver.as_str(),
+            path,
+            fallback: cause,
+            unreadable,
+        }),
     }
 }
 
-/// Provisions the driver from the registry into the bucket
-/// `bucketfs_connection_name` addresses.
+/// Provisions the driver from the registry into the bucket `credential`
+/// addresses, under `mount`.
 fn self_install_driver(
-    ctx: &mut dyn UdfContext,
-    bucketfs_connection_name: &str,
+    mount: &Path,
+    credential: &ConnectionObject,
     driver: Driver,
-) -> Result<DriverLibrary, SchemaError> {
-    let bucketfs_connection_object = resolve_connection(ctx, bucketfs_connection_name)?;
+) -> Result<DriverLibrary, ProvisioningError> {
     let bucket = Bucket::new(
-        &bucketfs_connection_object.address,
-        BUCKETFS_MOUNT,
-        Credentials::new(
-            &bucketfs_connection_object.user,
-            &bucketfs_connection_object.password,
-        ),
+        &credential.address,
+        mount,
+        Credentials::new(&credential.user, &credential.password),
     );
-    provisioning::ensure_driver(&Registry::public(driver), &bucket)
-        .map(DriverLibrary::provisioned)
-        .map_err(SchemaError::Provisioning)
+    provisioning::ensure_driver(&Registry::public(driver), &bucket).map(DriverLibrary::provisioned)
 }
 
 /// Everything the response needs from outside this process: [`open`]'s

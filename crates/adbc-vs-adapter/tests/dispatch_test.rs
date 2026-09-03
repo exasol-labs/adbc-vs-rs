@@ -260,10 +260,11 @@ fn malformed_json_reports_parse_failure() {
 }
 
 /// `vs-adapter/create-virtual-schema`: a property the statement has to carry is
-/// named when it is left out, and `BUCKETFS_CONNECTION` is one of those only
-/// while self-install is the route — a statement supplying its own driver
-/// library through `DRIVER_PATH` writes nothing and so needs no write
-/// credential.
+/// named when it is left out. `DRIVER` and `CONNECTION_NAME` are unconditional;
+/// `BUCKETFS_CONNECTION` no longer is — its absence is covered by
+/// `an_unnamed_bucketfs_connection_falls_back_to_the_unresolved_reserved_one`
+/// below instead, since it no longer fails before the source `CONNECTION` is
+/// resolved.
 ///
 /// The `DRIVER_PATH` case asserts a negative, which is the strongest claim this
 /// tier can make: property validation passing means the request goes on to open
@@ -288,13 +289,6 @@ fn missing_property_named_in_error() {
                 "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
             }),
         ),
-        (
-            "BUCKETFS_CONNECTION",
-            json!({
-                "DRIVER": "mysql",
-                "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
-            }),
-        ),
     ] {
         let mut ctx = FakeCtx::new();
 
@@ -306,6 +300,51 @@ fn missing_property_named_in_error() {
             "the error must name the missing property `{missing}`: {error}"
         );
     }
+}
+
+/// `vs-adapter/create-virtual-schema`'s precedence scenario, default level: a
+/// statement naming no `BUCKETFS_CONNECTION` reaches the reserved connection
+/// `ADBC_VS_BUCKETFS` rather than being refused for a missing property — this
+/// context resolves the source `CONNECTION` but not the reserved one, so the
+/// failure surfaces only once self-install tries to use it.
+///
+/// This reads the real `/buckets/bfsdefault/default` mount, because the
+/// dispatch tier cannot inject one, so it assumes no pre-placed library
+/// already exists on the host running the test.
+#[test]
+fn an_unnamed_bucketfs_connection_falls_back_to_the_unresolved_reserved_one() {
+    let mut ctx = FakeCtx::new().with_connection(
+        "MY_MYSQL_CONNECTION",
+        ConnectionObject {
+            kind: "mysql".to_string(),
+            address: "mysql://172.28.5.10:3306/shop".to_string(),
+            user: "root".to_string(),
+            password: "secret".to_string(),
+        },
+    );
+    let request = create_request(json!({
+        "DRIVER": "mysql",
+        "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
+    }));
+
+    let error = adapter_call(&mut ctx, &request)
+        .expect_err("this context resolves no reserved BucketFS connection")
+        .to_string();
+
+    assert!(
+        error.contains("BUCKETFS_CONNECTION"),
+        "the reserved connection's own resolution failure must still name the write-credential \
+         property: {error}"
+    );
+    assert!(
+        error.contains("ADBC_VS_BUCKETFS"),
+        "the error must name the reserved connection itself, not just the property that would \
+         have named one: {error}"
+    );
+    assert!(
+        !error.contains("missing required property"),
+        "the removed missing-property refusal must not resurface: {error}"
+    );
 }
 
 #[test]
