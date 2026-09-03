@@ -14,6 +14,7 @@
 pub mod bench;
 pub mod bench_data;
 pub mod bench_stack;
+pub mod driver;
 pub mod exasol;
 pub mod items;
 pub mod jdbc_vs;
