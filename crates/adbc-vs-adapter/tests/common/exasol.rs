@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+use tempfile::NamedTempFile;
 
 use super::readiness::{self, BUCKETFS_DEADLINE, SERVICE_DEADLINE};
 use super::{run, try_run};
@@ -155,6 +156,11 @@ impl Exasol {
     /// [`put_library`](Self::put_library) for a shared object, or
     /// [`await_bucket_path`](Self::await_bucket_path) for an archive's
     /// extracted contents.
+    ///
+    /// A locked path is waited out rather than reported, on the rule
+    /// [`accepted_upload`] owns: writing one path is a transient refusal away
+    /// from succeeding, and absorbing that here is what keeps every caller
+    /// from having to sequence its own writes around another test's delete.
     pub fn put_file(&self, local: &Path, bucket_path: &str) {
         assert!(
             local.is_file(),
@@ -164,23 +170,34 @@ impl Exasol {
 
         let source = local.to_string_lossy().into_owned();
         let url = format!("https://{HOST}:{BUCKETFS_PORT}/{BUCKET}/{bucket_path}");
+        let description = format!("uploading {source} to BucketFS at {bucket_path}");
 
-        run(
-            &format!("uploading {source} to BucketFS at {bucket_path}"),
-            "curl",
-            &[
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--insecure",
-                "--max-time",
-                "600",
-                "--user",
-                &self.credentials(),
-                "--upload-file",
-                &source,
-                &url,
-            ],
+        readiness::wait_until(
+            &format!("a writable BucketFS path at {bucket_path}"),
+            BUCKETFS_DEADLINE,
+            || {
+                let status = run(
+                    &description,
+                    "curl",
+                    &[
+                        "--silent",
+                        "--show-error",
+                        "--insecure",
+                        "--max-time",
+                        "600",
+                        "--user",
+                        &self.credentials(),
+                        "--upload-file",
+                        &source,
+                        "--output",
+                        "/dev/null",
+                        "--write-out",
+                        "%{http_code}",
+                        &url,
+                    ],
+                );
+                accepted_upload(&status, &description)
+            },
         );
     }
 
@@ -202,6 +219,45 @@ impl Exasol {
             BUCKETFS_DEADLINE,
             || self.bucket_file_size(bucket_path) == Some(length),
         );
+    }
+
+    /// Copies an already-installed driver library from `from` to `to`, so a
+    /// test can prove self-install does not short-circuit off a pre-placed
+    /// library sitting elsewhere in BucketFS.
+    ///
+    /// Downloads through a temporary file rather than into memory: the pinned
+    /// MySQL driver library measures about 44 MiB, and a call holding that as
+    /// a `Vec<u8>` for its whole lifetime is worse than one writing it to
+    /// disk. Waiting for `to` to become readable is [`put_library`]'s job, not
+    /// a second call this one might omit.
+    ///
+    /// [`put_library`]: Self::put_library
+    pub fn copy_bucket_object(&self, from: &str, to: &str) {
+        let temp = NamedTempFile::new().unwrap_or_else(|error| {
+            panic!("creating a temporary file to copy BucketFS object {from} into: {error}")
+        });
+        let temp_path = temp.path().to_string_lossy().into_owned();
+        let url = format!("https://{HOST}:{BUCKETFS_PORT}/{BUCKET}/{from}");
+
+        run(
+            &format!("downloading BucketFS object {from} to copy it to {to}"),
+            "curl",
+            &[
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--insecure",
+                "--max-time",
+                "600",
+                "--user",
+                &self.credentials(),
+                "--output",
+                &temp_path,
+                &url,
+            ],
+        );
+
+        self.put_library(temp.path(), to);
     }
 
     /// Deletes a bucket object and returns once it is gone from the tree a UDF
@@ -419,6 +475,30 @@ fn node_address(container: &str) -> String {
     addresses[0].to_owned()
 }
 
+/// The status BucketFS answers an upload with while the path it names is
+/// still locked, which is the one status worth another attempt.
+const BUCKETFS_LOCKED: &str = "423";
+
+/// Whether BucketFS accepted an upload, given the HTTP status it answered.
+///
+/// BucketFS keeps a path locked for several seconds after a delete — measured
+/// at about eight on `exasol/docker-db:2025.2.1`, well past the point the
+/// object leaves the tree [`Exasol::delete_file`] waits on — so a second
+/// writer of one path fails for a condition that clears itself. Answering
+/// `false` for that one status is what turns it into another attempt.
+///
+/// Every other refusal is BucketFS's own answer and will not change, so it
+/// panics here rather than being retried until the deadline reports it as a
+/// timeout: a wrong password must name itself, not the path it was waiting
+/// for.
+fn accepted_upload(status: &str, description: &str) -> bool {
+    match status.trim() {
+        BUCKETFS_LOCKED => false,
+        accepted if accepted.starts_with('2') => true,
+        refused => panic!("{description}: BucketFS answered HTTP {refused}"),
+    }
+}
+
 /// Parses `exapump sql --format json` output into its rows.
 fn parse_rows(stdout: &str, sql: &str) -> Vec<Map<String, Value>> {
     let rows: Vec<Value> = serde_json::from_str(stdout.trim())
@@ -502,6 +582,30 @@ mod tests {
         let rows = parse_rows(r#"[{"A":1}]"#, "SELECT A, B");
 
         assert_eq!(cell(&rows[0], "B"), None);
+    }
+
+    #[test]
+    fn a_locked_bucket_path_is_worth_another_upload_attempt() {
+        assert!(!accepted_upload(
+            "423",
+            "uploading to BucketFS at some/path"
+        ));
+    }
+
+    #[test]
+    fn an_accepted_upload_needs_no_further_attempt() {
+        assert!(accepted_upload(
+            "200\n",
+            "uploading to BucketFS at some/path"
+        ));
+    }
+
+    /// A refusal BucketFS will keep repeating must surface as itself rather
+    /// than as a timeout, which would name the deadline and hide the status.
+    #[test]
+    #[should_panic(expected = "BucketFS answered HTTP 401")]
+    fn a_refused_upload_fails_the_run_rather_than_waiting_out_the_deadline() {
+        accepted_upload("401", "uploading to BucketFS at some/path");
     }
 
     #[test]

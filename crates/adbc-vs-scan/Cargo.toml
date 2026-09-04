@@ -42,7 +42,7 @@ arrow = { version = "58", default-features = false }
 # is the only direction that can express that: `[dependencies]` runs
 # adapter -> scan, and cargo resolves dev-dependencies separately, so the two
 # together are not a cycle it refuses.
-adbc-vs-adapter = { path = "../adbc-vs-adapter", version = "0.3.0" }
+adbc-vs-adapter = { path = "../adbc-vs-adapter", version = "0.4.0" }
 flate2 = "1.1.9"
 reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
