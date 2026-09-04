@@ -3,9 +3,11 @@
 //! itself.
 //!
 //! Property names are the adapter's own (`DRIVER`, `CONNECTION_NAME`,
-//! `BUCKETFS_CONNECTION`, `DRIVER_PATH`) and are spelled once, here. The
-//! `DRIVER` value is never spelled here at all: it comes from [`Driver`], the
-//! same identity the adapter resolves the statement's property back into, so a
+//! `DRIVER_PATH`) and are spelled once, here. `BUCKETFS_CONNECTION` is
+//! optional on every statement this harness builds, since the adapter itself
+//! now falls back to a reserved connection when it is absent. The `DRIVER`
+//! value is never spelled here at all: it comes from [`Driver`], the same
+//! identity the adapter resolves the statement's property back into, so a
 //! test enumerating the supported technologies and the statement it generates
 //! cannot disagree about how one is spelled.
 
@@ -16,8 +18,10 @@ use super::udf::ADAPTER_SCRIPT;
 use super::{mysql, postgres};
 
 /// The `CONNECTION` object holding BucketFS write credentials, which driver
-/// self-install needs.
-pub const BUCKETFS_CONNECTION: &str = "ADBC_VS_BUCKETFS";
+/// self-install needs. Re-exports the adapter's own reserved-connection
+/// constant, so the harness cannot create a connection under a name the
+/// product no longer reserves.
+pub use adbc_vs_adapter::create_schema::DEFAULT_BUCKETFS_CONNECTION as BUCKETFS_CONNECTION;
 
 /// The name, address, and credentials a `CONNECTION` object is created from.
 pub struct ConnectionSpec<'a> {
@@ -119,6 +123,21 @@ pub fn create_virtual_schema_expecting_failure(
         bucketfs_connection: Some(BUCKETFS_CONNECTION),
         driver_path: None,
     }))
+}
+
+/// Creates a virtual schema that is expected to fail, from a caller-supplied
+/// spec, and returns the error Exasol surfaced to the session.
+///
+/// Unlike [`create_virtual_schema_expecting_failure`], which hardcodes
+/// `bucketfs_connection` to [`BUCKETFS_CONNECTION`], this takes the full
+/// [`VirtualSchemaSpec`] — needed by a test asserting on a statement whose
+/// `BUCKETFS_CONNECTION` is something other than the reserved connection.
+pub fn create_virtual_schema_through_expecting_failure(
+    exasol: &Exasol,
+    spec: VirtualSchemaSpec<'_>,
+) -> String {
+    drop_virtual_schema(exasol, spec.schema);
+    exasol.execute_expecting_failure(&create_statement(&spec))
 }
 
 /// Drops a virtual schema and everything Exasol derived from it, if it exists.

@@ -1184,6 +1184,13 @@ fn two_virtual_schemas_advertise_their_own_capability_sets() {
 /// The listing is read rather than a path composed, because the version
 /// segment is the registry's answer at run time and no constant in this
 /// repository can state it.
+///
+/// Excludes any entry whose version segment does not parse through
+/// [`common::driver::parse_driver_semver`] — in particular a `supplied`
+/// object the MySQL E2E binary places under the same driver prefix to prove
+/// self-install does not short-circuit off a pre-placed library. The two
+/// binaries share one BucketFS, so a `supplied` object a MySQL-binary failure
+/// left behind must not be returned here as the installed driver.
 fn installed_driver(stack: &stack::Stack, driver: Driver) -> Option<String> {
     let prefix = format!("adbc-drivers/{}/", driver.as_str());
     let library = driver.package().library;
@@ -1191,7 +1198,8 @@ fn installed_driver(stack: &stack::Stack, driver: Driver) -> Option<String> {
         .exasol
         .bucket_entries()
         .into_iter()
-        .find(|entry| entry.starts_with(&prefix) && entry.ends_with(library))
+        .filter(|entry| entry.starts_with(&prefix) && entry.ends_with(library))
+        .find(|entry| common::driver::installed_driver_version(entry, &prefix).is_some())
 }
 
 /// The `adapterNotes` Exasol persisted for `schema`, parsed.

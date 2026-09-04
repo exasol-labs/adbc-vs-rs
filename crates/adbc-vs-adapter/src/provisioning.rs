@@ -6,8 +6,11 @@
 //! the path the scan UDF loads the driver from and the version the range
 //! resolved to. Whether that driver was already there, or was downloaded,
 //! unpacked, uploaded and waited for, is this module's business alone.
-//! [`supplied_driver`] is the `DRIVER_PATH` route, where the operator placed
-//! the library themselves and nothing is fetched, resolved, or written.
+//! [`supplied_driver`] is the operator-supplied route, where the operator
+//! placed the library themselves and nothing is fetched, resolved, or written.
+//! [`default_driver_path`] states where that library goes when no property
+//! named it, and [`readable_library`] is the one definition of readable both
+//! routes phrase their own error over.
 //!
 //! Which package to fetch, which versions of it are acceptable, and which file
 //! name it installs are read off the [`Driver`] the [`Registry`] was bound to,
@@ -20,9 +23,10 @@
 //! been read. An unversioned path would have made it answer for whichever
 //! version arrived first, so a range would resolve once per cluster and never
 //! again. The cost is that an already-installed driver saves the download but
-//! not the index read, and that a cluster with no outbound egress can no longer
-//! be served by placing a file on the mount — that route is the `DRIVER_PATH`
-//! property, and this module's unreachable-registry errors name it.
+//! not the index read. A cluster with no outbound egress is served instead by
+//! placing a file the adapter never writes: at the path `DRIVER_PATH` names, or
+//! at [`default_driver_path`], whose `supplied` segment is what keeps that tree
+//! disjoint from the versioned one rather than competing with it.
 //!
 //! Two HTTP clients, never one. The registry client reaches a public internet
 //! host by name and verifies its certificate against a bundled root store,
@@ -78,6 +82,10 @@ pub const DRIVER_PATH_PROPERTY: &str = "DRIVER_PATH";
 
 /// The bucket-relative directory every adbc-vs driver is installed under.
 const DRIVER_DIRECTORY: &str = "adbc-drivers";
+
+/// The segment that stands where an install path carries a resolved version,
+/// naming the operator as the owner of what is under it.
+const SUPPLIED_DIRECTORY: &str = "supplied";
 
 /// Response size ceilings. A registry that answers with an endless body would
 /// otherwise exhaust the UDF's memory instead of failing.
@@ -259,12 +267,42 @@ impl Registry {
 
 /// Everything that stops the driver from being readable at its BucketFS path.
 ///
+/// One variant means one failure, which the four transport variants pay for
+/// by being four rather than one. A caller has to tell an index request that
+/// reached no host from a registry that answered, because only the first says
+/// anything about the cluster's egress, and a variant covering both could not
+/// answer that question however carefully it was read. So the two axes a
+/// download can fail on — which leg it was, and how far short of a readable
+/// body the request fell — are resolved into [`Self::RegistryUnreachable`],
+/// [`Self::PackageUnreachable`], [`Self::TransferInterrupted`] and
+/// [`Self::RegistryMisdirected`] here rather than left for
+/// [`Self::registry_unreachable`]'s caller to reconstruct.
+///
+/// No message denies that a version-free location to pre-place a library
+/// exists. One does — [`default_driver_path`] — on every cluster, whether or
+/// not the route that raised the error reads it.
+///
 /// No variant carries a credential: BucketFS messages are built from the
 /// endpoint and the HTTP status, and every borrowed text is redacted against
 /// the password before it is stored.
 #[derive(Debug)]
 pub enum ProvisioningError {
     RegistryUnreachable {
+        url: String,
+        driver: String,
+        cause: String,
+    },
+    PackageUnreachable {
+        url: String,
+        driver: String,
+        cause: String,
+    },
+    TransferInterrupted {
+        url: String,
+        driver: String,
+        cause: String,
+    },
+    RegistryMisdirected {
         url: String,
         driver: String,
         cause: String,
@@ -348,6 +386,62 @@ pub enum ProvisioningError {
     },
 }
 
+impl ProvisioningError {
+    /// The index URL and the transport cause of a registry index request that
+    /// reached no host at all, and `None` for every other failure.
+    ///
+    /// This is the one question a caller may ask the taxonomy, and the answer
+    /// is narrow on purpose: only an index request that reached nothing is
+    /// evidence of an air gap. A registry that answered any HTTP status, an
+    /// index that will not parse, a range no published version satisfies, a
+    /// resolved version with no platform package, an archive that will not
+    /// unpack, either leg's body stopping after its status arrived, a request
+    /// the client could not follow through, a package download that reached no
+    /// host, and every BucketFS failure are facts about the registry, the
+    /// request, the package, or the bucket rather than about the cluster's
+    /// egress. Each is therefore `None`, and widening any of them would pin a
+    /// cluster to a pre-placed library on a transient outage.
+    ///
+    /// It hands back the two facts rather than a bool because this module's
+    /// [`fmt::Display`] names `DRIVER_PATH` as the remedy, which is the
+    /// explicit route's answer and not every caller's. A caller composes its
+    /// own sentence from these two facts and quotes none of this module's
+    /// prose. Keeping the accessor here is what stops a caller matching on a
+    /// variant it does not own.
+    ///
+    /// The `match` below lists every variant and has no wildcard arm. A variant
+    /// added later therefore stops this module compiling, which is the intended
+    /// behavior rather than an oversight: whether the new failure is evidence of
+    /// an air gap is a decision that must be made, not defaulted to `None`
+    /// unnoticed. Restore no wildcard to quiet the build — add the arm.
+    pub fn registry_unreachable(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::RegistryUnreachable { url, cause, .. } => Some((url, cause)),
+            Self::PackageUnreachable { .. }
+            | Self::TransferInterrupted { .. }
+            | Self::RegistryMisdirected { .. }
+            | Self::RegistryRejected { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::PackageTooLarge { .. }
+            | Self::IndexUnreadable { .. }
+            | Self::DriverNotPublished { .. }
+            | Self::RangeUnparseable { .. }
+            | Self::RangeNotSatisfied { .. }
+            | Self::PlatformNotPublished { .. }
+            | Self::PackageUnreadable { .. }
+            | Self::ManifestMissing { .. }
+            | Self::ManifestUnreadable { .. }
+            | Self::LibraryMissing { .. }
+            | Self::LibraryFilenameDiverged { .. }
+            | Self::BucketFsUnreachable { .. }
+            | Self::BucketFsRejected { .. }
+            | Self::DriverNotVisible { .. }
+            | Self::LocalFailure { .. }
+            | Self::SuppliedDriverUnreadable { .. } => None,
+        }
+    }
+}
+
 impl fmt::Display for ProvisioningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -355,9 +449,28 @@ impl fmt::Display for ProvisioningError {
                 f,
                 "could not reach the driver registry at {url} while provisioning the \
                  `{driver}` driver: {cause}. Without outbound access, supply the driver \
-                 library yourself with the {DRIVER_PATH_PROPERTY} property; there is no path \
-                 on the mount to pre-load it at, because the install path carries a version \
-                 only the registry could have resolved"
+                 library yourself with the {DRIVER_PATH_PROPERTY} property"
+            ),
+            Self::PackageUnreachable { url, driver, cause } => write!(
+                f,
+                "could not reach {url} to download the `{driver}` driver package: {cause}. \
+                 The registry index answered and the version range resolved, so it is the \
+                 package host alone that went unanswered; without outbound access to it, \
+                 supply the driver library yourself with the {DRIVER_PATH_PROPERTY} property"
+            ),
+            Self::TransferInterrupted { url, driver, cause } => write!(
+                f,
+                "the response from {url} stopped arriving while provisioning the `{driver}` \
+                 driver, after its status had already been received: {cause}. Nothing was \
+                 installed, so the statement can be retried"
+            ),
+            Self::RegistryMisdirected { url, driver, cause } => write!(
+                f,
+                "the request to {url} for the `{driver}` driver could not be followed through: \
+                 {cause}. A redirect the client will not follow, or a request it could not \
+                 build, is a fact about the registry or the request rather than about this \
+                 cluster's outbound access; while it lasts, supply the driver library yourself \
+                 with the {DRIVER_PATH_PROPERTY} property"
             ),
             Self::RegistryRejected {
                 url,
@@ -367,9 +480,7 @@ impl fmt::Display for ProvisioningError {
                 f,
                 "the driver registry at {url} answered HTTP {status} while provisioning \
                  the `{driver}` driver. Without registry access, supply the driver library \
-                 yourself with the {DRIVER_PATH_PROPERTY} property; there is no path on the \
-                 mount to pre-load it at, because the install path carries a version only the \
-                 registry could have resolved"
+                 yourself with the {DRIVER_PATH_PROPERTY} property"
             ),
             Self::ResponseTooLarge { url, limit } => write!(
                 f,
@@ -514,8 +625,9 @@ pub fn ensure_driver(
 ) -> Result<InstalledDriver, ProvisioningError> {
     let registry_client = registry_client()?;
     let index_url = registry.index_url();
-    let index = download(&registry_client, &index_url, MAX_INDEX_BYTES)
-        .map_err(|failure| provisioning_error(failure, &index_url, registry.driver))?;
+    let index = download(&registry_client, &index_url, MAX_INDEX_BYTES).map_err(|failure| {
+        provisioning_error(failure, RegistryLeg::Index, &index_url, registry.driver)
+    })?;
     let index = String::from_utf8(index).map_err(|error| ProvisioningError::IndexUnreadable {
         url: registry.index_url(),
         cause: error.to_string(),
@@ -531,8 +643,15 @@ pub fn ensure_driver(
     }
 
     let driver = {
-        let package = download(&registry_client, &resolved.url, MAX_PACKAGE_BYTES)
-            .map_err(|failure| provisioning_error(failure, &resolved.url, registry.driver))?;
+        let package =
+            download(&registry_client, &resolved.url, MAX_PACKAGE_BYTES).map_err(|failure| {
+                provisioning_error(
+                    failure,
+                    RegistryLeg::Package,
+                    &resolved.url,
+                    registry.driver,
+                )
+            })?;
         extract_driver(&package, &resolved.url)?
     };
     verify_library_filename(&driver.filename, registry.driver)?;
@@ -575,21 +694,36 @@ pub fn ensure_driver(
 /// gap the property exists to serve, and would make an operator's typo look
 /// like a slow first query.
 pub fn supplied_driver(path: &str, driver: Driver) -> Result<PathBuf, ProvisioningError> {
-    let unreadable = |cause: String| ProvisioningError::SuppliedDriverUnreadable {
-        driver: driver.as_str().to_owned(),
-        path: path.to_owned(),
-        cause,
-    };
-
-    let library = File::open(path).map_err(|error| unreadable(error.to_string()))?;
-    let kind = library
-        .metadata()
-        .map_err(|error| unreadable(error.to_string()))?;
-    if !kind.is_file() {
-        return Err(unreadable("it is not a regular file".to_owned()));
-    }
+    readable_library(Path::new(path)).map_err(|cause| {
+        ProvisioningError::SuppliedDriverUnreadable {
+            driver: driver.as_str().to_owned(),
+            path: path.to_owned(),
+            cause,
+        }
+    })?;
 
     Ok(PathBuf::from(path))
+}
+
+/// Whether `path` is a driver shared library this adapter will load, which is
+/// a readable regular file and nothing further.
+///
+/// One definition, called by every route that reaches an operator-owned file,
+/// because two routes deciding independently what counts as readable is a
+/// decision with two owners: one could load a library the other refused. The
+/// `Err` carries only the cause, never a message, so each route phrases its own
+/// error — naming its own property and its own remedy — over one shared answer.
+///
+/// A directory opens without error on Linux, so the file kind is checked rather
+/// than the open alone: a `dlopen` of a directory fails much later and names
+/// nothing an operator can act on.
+pub fn readable_library(path: &Path) -> Result<(), String> {
+    let library = File::open(path).map_err(|error| error.to_string())?;
+    let kind = library.metadata().map_err(|error| error.to_string())?;
+    if !kind.is_file() {
+        return Err("it is not a regular file".to_owned());
+    }
+    Ok(())
 }
 
 /// Where one version of `driver`'s library is installed under a bucket's mount.
@@ -602,6 +736,33 @@ fn driver_install_path(mount: &Path, driver: Driver, version: &Version) -> PathB
         .join(DRIVER_DIRECTORY)
         .join(driver.as_str())
         .join(version.to_string())
+        .join(driver.package().library)
+}
+
+/// Where an operator pre-places `driver`'s library when no property named one.
+///
+/// It stands in the same per-driver directory as the install path and differs
+/// in exactly one segment: [`SUPPLIED_DIRECTORY`] where [`driver_install_path`]
+/// writes a resolved version. That is not a naming convenience but the property
+/// the whole last-resort route rests on. The install path's third segment is
+/// always a [`Version`] rendered by [`Version::to_string`], and `supplied`
+/// parses as no version at all, so the two trees are disjoint for every version
+/// the registry could ever publish rather than for the versions anyone thought
+/// to check. Nothing therefore has to keep them apart at run time: a pre-placed
+/// library can never satisfy the versioned presence check, and self-install can
+/// never write over one.
+///
+/// It carries no version segment because nothing resolved a version on the
+/// route that reads it — the index was never read, or reading it reached no
+/// host — so the adapter reads this path and never writes it.
+///
+/// The mount is an argument, exactly as it is for [`driver_install_path`], so
+/// this module owns the layout and its caller owns which mount is real.
+pub fn default_driver_path(mount: &Path, driver: Driver) -> PathBuf {
+    mount
+        .join(DRIVER_DIRECTORY)
+        .join(driver.as_str())
+        .join(SUPPLIED_DIRECTORY)
         .join(driver.package().library)
 }
 
@@ -844,20 +1005,53 @@ fn bucketfs_client() -> Result<Client, ProvisioningError> {
 
 /// Everything that stops a driver-registry download from producing a body.
 ///
-/// Carries only what the download itself knows; `ensure_driver` translates
-/// each variant into the matching `ProvisioningError`, adding the driver where
-/// the message needs it.
+/// Carries only what the download itself knows; [`provisioning_error`]
+/// translates each case into the matching [`ProvisioningError`], adding the
+/// driver and the leg the message needs.
+///
+/// [`Self::Unreachable`], [`Self::Interrupted`] and [`Self::Answered`] are
+/// three cases rather than one because only the first is evidence that the
+/// cluster has no outbound access, and that evidence is what the last-resort
+/// route turns on. One case covering them would leave that distinction
+/// unrecoverable downstream, whichever leg raised it. [`Self::Unreachable`] is
+/// therefore the narrow one: a failure earns it only by ruling the other two
+/// out.
 enum DownloadFailure {
+    /// The request reached no host: a connect-, name-resolution-, or TLS-level
+    /// failure, with no status line ever received.
     Unreachable(String),
+    /// The status line arrived and the body then stopped: a host answered, and
+    /// the response was cut short after it did.
+    Interrupted(String),
+    /// A host answered in a way the client would not follow, or the request was
+    /// never sent because it could not be built: a redirect policy exceeded, or
+    /// a malformed request. Neither says the cluster reached nothing, which is
+    /// the only thing [`Self::Unreachable`] claims — a redirect loop is a host
+    /// answering repeatedly, and an unbuildable request never left the process.
+    Answered(String),
     Rejected(u16),
     TooLarge(u64),
 }
 
+/// Which of the two registry requests a download failure came from.
+///
+/// The leg is the caller's own knowledge rather than something the download can
+/// tell: [`download`] is shared, so the same failure means different things
+/// depending on which request raised it, and only the caller knows which.
+enum RegistryLeg {
+    Index,
+    Package,
+}
+
 fn download(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, DownloadFailure> {
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|error| DownloadFailure::Unreachable(error.to_string()))?;
+    let response = client.get(url).send().map_err(|error| {
+        let cause = error.to_string();
+        if error.is_redirect() || error.is_builder() {
+            DownloadFailure::Answered(cause)
+        } else {
+            DownloadFailure::Unreachable(cause)
+        }
+    })?;
     let status = response.status();
     if !status.is_success() {
         return Err(DownloadFailure::Rejected(status.as_u16()));
@@ -867,7 +1061,7 @@ fn download(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, DownloadF
     response
         .take(limit + 1)
         .read_to_end(&mut body)
-        .map_err(|error| DownloadFailure::Unreachable(error.to_string()))?;
+        .map_err(|error| DownloadFailure::Interrupted(error.to_string()))?;
     if body.len() as u64 > limit {
         return Err(DownloadFailure::TooLarge(limit));
     }
@@ -875,9 +1069,50 @@ fn download(client: &Client, url: &str, limit: u64) -> Result<Vec<u8>, DownloadF
     Ok(body)
 }
 
-fn provisioning_error(failure: DownloadFailure, url: &str, driver: Driver) -> ProvisioningError {
+/// Translates a download failure into the taxonomy, over both axes it can
+/// differ on: which leg made the request, and whether a status line arrived.
+///
+/// Only a request that reached no host differs by leg, and it is the whole
+/// reason the leg is an argument: the index leg's is the one failure
+/// [`ProvisioningError::registry_unreachable`] answers `Some` to, and the
+/// package leg's must never be mistaken for it. A package request runs only
+/// after a version was resolved and the versioned presence check ran, so
+/// falling back there would pin a cluster to an unversioned pre-placed library
+/// on a reset download.
+///
+/// An interrupted transfer is one variant on both legs, because the ground that
+/// excludes it is the same on both and is the leg-independent one: a host
+/// answered with a status line, so nothing about the cluster's egress was
+/// learned. A request the client could not follow through is one variant on
+/// both legs for the same reason — a redirect loop is a host answering
+/// repeatedly, and an unbuildable request never left the process, so neither
+/// leg's version of it is evidence of an air gap. A rejected or oversized
+/// response needs no leg either.
+fn provisioning_error(
+    failure: DownloadFailure,
+    leg: RegistryLeg,
+    url: &str,
+    driver: Driver,
+) -> ProvisioningError {
     match failure {
-        DownloadFailure::Unreachable(cause) => ProvisioningError::RegistryUnreachable {
+        DownloadFailure::Unreachable(cause) => match leg {
+            RegistryLeg::Index => ProvisioningError::RegistryUnreachable {
+                url: url.to_owned(),
+                driver: driver.as_str().to_owned(),
+                cause,
+            },
+            RegistryLeg::Package => ProvisioningError::PackageUnreachable {
+                url: url.to_owned(),
+                driver: driver.as_str().to_owned(),
+                cause,
+            },
+        },
+        DownloadFailure::Interrupted(cause) => ProvisioningError::TransferInterrupted {
+            url: url.to_owned(),
+            driver: driver.as_str().to_owned(),
+            cause,
+        },
+        DownloadFailure::Answered(cause) => ProvisioningError::RegistryMisdirected {
             url: url.to_owned(),
             driver: driver.as_str().to_owned(),
             cause,
