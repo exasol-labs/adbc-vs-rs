@@ -349,10 +349,27 @@ fn stack_targets_start_expected_services() {
         "stack-up-postgres must start PostgreSQL alone: {postgres_only}"
     );
 
-    let both = dry_run_stdout("stack-up");
-    assert!(both.contains("docker compose up -d --wait mysql"));
-    assert!(both.contains("docker compose up -d --wait postgres"));
-    assert!(both.contains("docker compose up -d exasol"));
+    let trino_only = dry_run_stdout("stack-up-trino");
+    assert!(trino_only.contains("docker compose up -d trino"));
+    assert!(
+        !trino_only.to_lowercase().contains("exasol"),
+        "stack-up-trino must start Trino alone: {trino_only}"
+    );
+
+    let exasol_only = dry_run_stdout("stack-up-exasol");
+    assert!(exasol_only.contains("docker compose up -d exasol"));
+    assert!(
+        !exasol_only.to_lowercase().contains("mysql")
+            && !exasol_only.to_lowercase().contains("postgres")
+            && !exasol_only.to_lowercase().contains("trino"),
+        "stack-up-exasol must start Exasol alone: {exasol_only}"
+    );
+
+    let everything = dry_run_stdout("stack-up");
+    assert!(everything.contains("docker compose up -d --wait mysql"));
+    assert!(everything.contains("docker compose up -d --wait postgres"));
+    assert!(everything.contains("docker compose up -d trino"));
+    assert!(everything.contains("docker compose up -d exasol"));
 
     let down = dry_run_stdout("stack-down");
     assert!(down.contains("docker compose down"));
@@ -364,8 +381,8 @@ fn container_tests_depend_on_tier_stack_target() {
 
     let e2e = rule(&text, "test-e2e");
     assert!(
-        e2e.prerequisites.iter().any(|p| p == "stack-up"),
-        "test-e2e must declare stack-up as a prerequisite: {:?}",
+        e2e.prerequisites.iter().any(|p| p == "stack-up-exasol"),
+        "test-e2e must declare stack-up-exasol as a prerequisite: {:?}",
         e2e.prerequisites
     );
 
@@ -376,8 +393,8 @@ fn container_tests_depend_on_tier_stack_target() {
         it.prerequisites
     );
     assert!(
-        !it.prerequisites.iter().any(|p| p == "stack-up"),
-        "test-it must never start the Exasol-bearing stack: {:?}",
+        !it.prerequisites.iter().any(|p| p == "stack-up-exasol"),
+        "test-it must never start Exasol: {:?}",
         it.prerequisites
     );
 
@@ -391,10 +408,37 @@ fn container_tests_depend_on_tier_stack_target() {
         it_postgres.prerequisites
     );
     assert!(
-        !it_postgres.prerequisites.iter().any(|p| p == "stack-up"),
-        "test-it-postgres must never start the Exasol-bearing stack: {:?}",
+        !it_postgres
+            .prerequisites
+            .iter()
+            .any(|p| p == "stack-up-exasol"),
+        "test-it-postgres must never start Exasol: {:?}",
         it_postgres.prerequisites
     );
+
+    let it_trino = rule(&text, "test-it-trino");
+    assert!(
+        it_trino.prerequisites.iter().any(|p| p == "stack-up-trino"),
+        "test-it-trino must declare stack-up-trino as a prerequisite: {:?}",
+        it_trino.prerequisites
+    );
+    assert!(
+        !it_trino
+            .prerequisites
+            .iter()
+            .any(|p| p == "stack-up-exasol"),
+        "test-it-trino must never start Exasol: {:?}",
+        it_trino.prerequisites
+    );
+
+    for it_target in ["test-it", "test-it-postgres", "test-it-trino"] {
+        let it_rule = rule(&text, it_target);
+        assert!(
+            !it_rule.recipe.to_lowercase().contains("exasol"),
+            "{it_target} drives the ADBC layer directly and must not mention Exasol: {}",
+            it_rule.recipe
+        );
+    }
 }
 
 #[test]
@@ -461,7 +505,16 @@ fn test_it_postgres_target_needs_no_exasol() {
 fn test_e2e_depends_on_cross_udf_build() {
     let text = makefile_text();
     let e2e = rule(&text, "test-e2e");
-    assert!(e2e.prerequisites.iter().any(|p| p == "cross-udf-build"));
+    assert_eq!(
+        e2e.prerequisites,
+        vec![
+            "cross-udf-build".to_string(),
+            "stack-up-exasol".to_string(),
+            "stack-up-mysql".to_string(),
+        ],
+        "test-e2e must depend on exactly the sources e2e_mysql_test queries: {:?}",
+        e2e.prerequisites
+    );
     assert!(e2e.recipe.contains("--features exasol-e2e"));
     assert!(e2e.recipe.contains("--test-threads=1"));
     assert!(e2e.recipe.contains("--test e2e_mysql_test"));
@@ -479,9 +532,17 @@ fn test_e2e_postgres_depends_on_cross_udf_build_and_stack_up() {
         "test-e2e-postgres must declare cross-udf-build as a prerequisite: {:?}",
         e2e_postgres.prerequisites
     );
+    for stack_target in ["stack-up-exasol", "stack-up-postgres", "stack-up-mysql"] {
+        assert!(
+            e2e_postgres.prerequisites.iter().any(|p| p == stack_target),
+            "test-e2e-postgres must declare {stack_target} as a prerequisite: {:?}",
+            e2e_postgres.prerequisites
+        );
+    }
     assert!(
-        e2e_postgres.prerequisites.iter().any(|p| p == "stack-up"),
-        "test-e2e-postgres must declare stack-up as a prerequisite: {:?}",
+        !e2e_postgres.prerequisites.iter().any(|p| p == "stack-up"),
+        "test-e2e-postgres must name each source's own stack-up-* target, not the \
+         everything-up alias: {:?}",
         e2e_postgres.prerequisites
     );
     assert!(e2e_postgres.recipe.contains("--features exasol-e2e"));
@@ -500,7 +561,11 @@ fn bench_target_has_expected_prerequisites_and_recipe() {
     let bench = rule(&text, "bench");
     assert_eq!(
         bench.prerequisites,
-        vec!["cross-udf-build".to_string(), "stack-up".to_string()]
+        vec![
+            "cross-udf-build".to_string(),
+            "stack-up-exasol".to_string(),
+            "stack-up-mysql".to_string(),
+        ]
     );
     assert!(bench
         .recipe
@@ -529,4 +594,118 @@ fn test_registry_live_target_needs_no_stack() {
     assert!(registry_live
         .recipe
         .contains("--test provisioning_test -- registry_live"));
+}
+
+#[test]
+fn test_it_trino_target_needs_no_exasol() {
+    let text = makefile_text();
+    let it_trino = rule(&text, "test-it-trino");
+    assert_eq!(it_trino.prerequisites, vec!["stack-up-trino".to_string()]);
+    assert!(!it_trino
+        .prerequisites
+        .iter()
+        .any(|p| p == "cross-udf-build"));
+    assert!(it_trino.recipe.contains("--features trino-it"));
+    assert!(it_trino.recipe.contains("--test trino_it_test"));
+    assert!(
+        !it_trino.recipe.to_lowercase().contains("exasol"),
+        "test-it-trino drives the ADBC layer directly and must not mention Exasol: {}",
+        it_trino.recipe
+    );
+}
+
+#[test]
+fn test_e2e_trino_depends_on_expected_targets() {
+    let text = makefile_text();
+    let e2e_trino = rule(&text, "test-e2e-trino");
+    assert_eq!(
+        e2e_trino.prerequisites,
+        vec![
+            "cross-udf-build".to_string(),
+            "stack-up-exasol".to_string(),
+            "stack-up-trino".to_string(),
+            "stack-up-mysql".to_string(),
+        ]
+    );
+    assert!(e2e_trino.recipe.contains("--features exasol-e2e"));
+    assert!(e2e_trino.recipe.contains("--test-threads=1"));
+    assert!(e2e_trino.recipe.contains("--test e2e_trino_test"));
+    assert!(
+        !e2e_trino.recipe.contains("e2e_mysql_test")
+            && !e2e_trino.recipe.contains("e2e_postgres_test"),
+        "test-e2e-trino must run its own binary: {}",
+        e2e_trino.recipe
+    );
+}
+
+/// A container that silently drops password authentication would still pass
+/// every other assertion in this file: `make -n` never executes a recipe, so
+/// nothing here can observe the live server. What it can observe is whether
+/// the recipe text itself asks for authentication and checks for its
+/// absence -- a `stack-up-trino` that lost the `--user`/`--password` flags,
+/// fell back to `--wait`, or dropped the negative probe would fail exactly
+/// one of the assertions below.
+#[test]
+fn stack_up_trino_polls_for_readiness_and_probes_authentication() {
+    let text = makefile_text();
+    let stack_up_trino = rule(&text, "stack-up-trino");
+
+    assert!(
+        !stack_up_trino.recipe.contains("--wait"),
+        "stack-up-trino must not rely on the image's own HEALTHCHECK via --wait: {}",
+        stack_up_trino.recipe
+    );
+    assert!(
+        stack_up_trino.recipe.contains("until "),
+        "stack-up-trino must poll for readiness the way stack-up-exasol does: {}",
+        stack_up_trino.recipe
+    );
+    assert!(
+        stack_up_trino.recipe.contains("TRINO_WAIT_TIMEOUT"),
+        "stack-up-trino must fail with a named, bounded deadline: {}",
+        stack_up_trino.recipe
+    );
+
+    let cli_lines: Vec<&str> = stack_up_trino
+        .recipe
+        .lines()
+        .filter(|line| line.contains("trino --server"))
+        .collect();
+    assert!(
+        !cli_lines.is_empty(),
+        "stack-up-trino must invoke the trino CLI at least once: {}",
+        stack_up_trino.recipe
+    );
+    for line in &cli_lines {
+        assert!(
+            line.contains("--server https://"),
+            "every CLI invocation must use TLS, never plain HTTP: {line}"
+        );
+        assert!(
+            !line.contains("http://localhost:8080"),
+            "no CLI invocation may target the insecure port: {line}"
+        );
+    }
+
+    assert!(
+        stack_up_trino.recipe.contains("--user adbc_vs"),
+        "the readiness/seeding invocation must authenticate as a named user: {}",
+        stack_up_trino.recipe
+    );
+    assert!(
+        stack_up_trino.recipe.contains("--password"),
+        "the readiness/seeding invocation must pass --password: {}",
+        stack_up_trino.recipe
+    );
+
+    let negative_probe = stack_up_trino
+        .recipe
+        .lines()
+        .find(|line| line.contains("--execute \"SELECT 1\""))
+        .expect("stack-up-trino must carry a credential-free negative probe");
+    assert!(
+        !negative_probe.contains("--user") && !negative_probe.contains("--password"),
+        "the negative probe must carry no credential, or it cannot prove authentication is \
+         enforced: {negative_probe}"
+    );
 }

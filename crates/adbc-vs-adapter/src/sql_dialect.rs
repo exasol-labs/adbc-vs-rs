@@ -11,9 +11,9 @@
 //! the agreement, so an invariant test that renders every advertised
 //! capability is what establishes it.
 //!
-//! The trait has one implementation per technology, MySQL and PostgreSQL
-//! today: mission.md's v1 driver set also names Snowflake, Databricks, and
-//! DuckDB, and each remaining one adds its own implementation rather than
+//! The trait has one implementation per technology, MySQL, PostgreSQL, and
+//! Trino today: mission.md's v1 driver set also names Snowflake, Databricks,
+//! and DuckDB, and each remaining one adds its own implementation rather than
 //! editing an existing renderer.
 
 use std::fmt;
@@ -23,6 +23,7 @@ use adbc_vs_scan::driver::Driver;
 use crate::mysql_dialect::MySqlDialect;
 use crate::postgres_dialect::PostgresDialect;
 use crate::pushdown_query::Query;
+use crate::trino_dialect::TrinoDialect;
 
 /// The dialect that renders for a driver, and advertises what that rendering
 /// covers.
@@ -37,6 +38,7 @@ pub fn dialect_for(driver: Driver) -> &'static dyn SqlDialect {
     match driver {
         Driver::MySql => &MySqlDialect,
         Driver::Postgres => &PostgresDialect,
+        Driver::Trino => &TrinoDialect,
     }
 }
 

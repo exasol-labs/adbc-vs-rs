@@ -8,16 +8,18 @@
 //! say.
 //!
 //! Neither decision is one answer. How the credential travels is per
-//! technology, because the drivers disagree about it: MySQL's takes a user and
-//! a password as ADBC options of their own, while PostgreSQL's rejects both as
-//! unknown and accepts only `uri`, so its credential has to travel inside that
-//! one option's value. What is *not* per technology is the invariant around
-//! it — the credential is resolved for one open, reaches no structure that
-//! outlives the attempt, and appears in no message this module produces.
+//! technology, because the drivers disagree about it: MySQL's and Trino's take
+//! a user and a password as ADBC options of their own, while PostgreSQL's
+//! rejects both as unknown and accepts only `uri`, so its credential has to
+//! travel inside that one option's value. What is *not* per technology is the
+//! invariant around it — the credential is resolved for one open, reaches no
+//! structure that outlives the attempt, and appears in no message this module
+//! produces.
 //!
 //! That invariant is why a failure names a [`DatabaseTarget`]'s own subject
-//! rather than the value handed to the driver. For MySQL the two coincide;
-//! for PostgreSQL the value is a libpq connection string carrying the password
+//! rather than the value handed to the driver. For MySQL and Trino the two
+//! coincide, because neither one's connection value carries a credential; for
+//! PostgreSQL the value is a libpq connection string carrying the password
 //! verbatim, so the subject is the host and database parsed out of the address
 //! instead. Redaction is then applied to the assembled message rather than to
 //! the driver's half of it, so no caller can leak a secret by formatting
@@ -43,8 +45,9 @@ use crate::driver::Driver;
 /// credential, resolved beside it.
 ///
 /// How that credential then reaches the driver is the driver's own answer, not
-/// this type's: MySQL takes it as separate ADBC options, and PostgreSQL takes
-/// it inside a libpq connection string this module builds at connect time.
+/// this type's: MySQL and Trino take it as separate ADBC options, and
+/// PostgreSQL takes it inside a libpq connection string this module builds at
+/// connect time.
 /// Either way the value is resolved fresh for each open and never stored, and
 /// it renders without its password under every formatting trait it implements,
 /// so no accidental diagnostic can put the secret into a message or a log
@@ -120,9 +123,9 @@ impl<'a> OpenDiagnostic<'a> {
 /// The database options `driver` accepts for `connection`, and the subject a
 /// failure to open it may name.
 ///
-/// Matched exhaustively rather than defaulted: the two drivers disagree about
-/// how a credential travels, and a technology added to the identity has to
-/// state its own answer instead of inheriting one that would either drop its
+/// Matched exhaustively rather than defaulted: the drivers disagree about how
+/// a credential travels, and a technology added to the identity has to state
+/// its own answer instead of inheriting one that would either drop its
 /// credential or disclose it.
 pub(crate) fn database_target(
     driver: Driver,
@@ -131,6 +134,7 @@ pub(crate) fn database_target(
     match driver {
         Driver::MySql => Ok(mysql_target(connection)),
         Driver::Postgres => postgres_target(connection),
+        Driver::Trino => Ok(trino_target(connection)),
     }
 }
 
@@ -170,6 +174,82 @@ fn postgres_target(connection: &SourceConnection) -> Result<DatabaseTarget, Conn
         options: vec![(OptionDatabase::Uri, conninfo.as_str().into())],
         subject: address.describe(),
     })
+}
+
+/// Trino's three options: the address with its userinfo removed, and the
+/// username and password as options of their own — the shape [`mysql_target`]
+/// already uses, for the same reason.
+///
+/// The driver registers `username` and `password` beside `uri` and lets them
+/// override a userinfo the address carries, field by field, so the credential
+/// never has to enter a value the driver parses. Nothing about it is encoded,
+/// escaped, or transcoded: the driver sends the option's bytes as it was given
+/// them, and Trino 483 authenticates no password holding a character outside
+/// the ASCII range through this mechanism, so an encoding invented here could
+/// only turn a working credential into a failing one.
+///
+/// The userinfo-free address is also the failure subject. The resolved
+/// credential never enters it, and the strip removes a userinfo the driver's
+/// own URL reader would recognise. An address whose userinfo carries an
+/// unencoded `/`, `?`, or `#` is not one of those: it is malformed, the driver
+/// rejects it, and it is passed through rather than stripped, so that one shape
+/// still reaches the subject.
+///
+/// No path-element count is checked here. `create_schema.rs::parse_qualifier`
+/// already checks that count against the driver's declared `[qualifier]
+/// segment_count`, and repeating it would give the arity a second owner in a
+/// second crate.
+fn trino_target(connection: &SourceConnection) -> DatabaseTarget {
+    let uri = without_userinfo(&connection.uri);
+
+    DatabaseTarget {
+        options: vec![
+            (OptionDatabase::Uri, uri.as_str().into()),
+            (
+                OptionDatabase::Username,
+                connection.username.as_str().into(),
+            ),
+            (
+                OptionDatabase::Password,
+                connection.password.as_str().into(),
+            ),
+        ],
+        subject: uri,
+    }
+}
+
+/// The address with its authority's userinfo component removed, and every
+/// other byte left where it was written.
+///
+/// A user and password written into the address are not the credential —
+/// Exasol resolves that beside the address — so keeping them would address the
+/// right host with the wrong principal's secret and put that secret into every
+/// message the open produces, while changing no authentication result, because
+/// the separate options override the userinfo field by field anyway.
+///
+/// The authority runs from the scheme separator to the first `/`, `?`, or `#`,
+/// and its userinfo ends at the last `@` inside it, which is how the driver's
+/// own URL reader delimits both. An `@` in a path element or a query parameter
+/// is therefore a literal rather than a delimiter, so no component the
+/// operator wrote is dropped or re-derived by the strip.
+fn without_userinfo(address: &str) -> String {
+    const SCHEME_SEPARATOR: &str = "://";
+
+    let authority_start = address
+        .find(SCHEME_SEPARATOR)
+        .map_or(0, |index| index + SCHEME_SEPARATOR.len());
+    let authority_end = address[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(address.len(), |offset| authority_start + offset);
+
+    match address[authority_start..authority_end].rsplit_once('@') {
+        None => address.to_string(),
+        Some((_, host)) => format!(
+            "{}{host}{}",
+            &address[..authority_start],
+            &address[authority_end..]
+        ),
+    }
 }
 
 /// The parts of a PostgreSQL `CONNECTION` address a libpq connection string is

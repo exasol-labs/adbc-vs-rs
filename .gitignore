@@ -1,5 +1,6 @@
 /target
 /dist
+/docker/trino/generated/
 .idea/
 .vscode/
 *.swp

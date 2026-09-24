@@ -1,0 +1,136 @@
+# The Trino ADBC driver adbc-vs loads.
+#
+# The file name is the driver's canonical name — the value the `DRIVER`
+# property takes and `adapterNotes.driver` records. `build.rs` generates the
+# compiled-in table from this file; nothing here is read at run time.
+
+[package]
+# The path the driver registry index publishes this driver's versions under.
+registry_path = "trino"
+
+# The shared library the package installs, as its `MANIFEST` names it. Read
+# out of the published `v0.5.3` package's own `MANIFEST` and exported symbol
+# table rather than derived from the registry path, because provisioning
+# compares the manifest against this value and installs only the file it
+# names.
+library = "libadbc_driver_trino.so"
+
+# The ADBC entry-point symbol the driver manager loads the library through,
+# read out of the published package's exported symbol table rather than
+# derived from the registry path, and named explicitly rather than left to
+# the manager's filename-derivation heuristic.
+entry_point = "AdbcDriverTrinoInit"
+
+# The published versions this release accepts. Independent of every other
+# driver's range: MySQL's stops below 0.7.0 and PostgreSQL's admits every
+# 1.x, neither for a reason that has anything to do with this one.
+#
+# The floor is 0.5.3 because that is the version phase 2's gates ran against:
+# nothing has run this adapter against a lower published 0.5.x. The ceiling
+# stops below the next pre-1.0 minor because a pre-1.0 minor bump is breaking
+# by SemVer convention, which is the rule MySQL's ceiling follows and
+# PostgreSQL's does not. Resolution selects the highest satisfying version,
+# so the floor is a statement about what the gates measure rather than about
+# what gets installed.
+version_range = ">=0.5.3, <0.6.0"
+
+# How many name segments a Trino source qualifier carries. A Trino table is
+# named `catalog.schema.table` and its `information_schema` is scoped to one
+# catalog, so two names are needed to qualify a table — the catalog and the
+# schema. This is the one place the count is stated: the address check and
+# the metadata source both read it, and two modules deciding it apart could
+# disagree.
+[qualifier]
+segment_count = 2
+
+# What the Trino dialect advertises to Exasol, and therefore what Exasol
+# delegates to it. Exasol re-applies no delegated fragment, so an entry here
+# that `trino_dialect.rs` cannot render returns wrong rows rather than an
+# error: the two are one decision, and the capability invariant test renders
+# every entry below to hold them together.
+#
+# The set is the 35 entries `postgresql.toml` states plus one Trino advertises
+# and no other dialect does: `AGGREGATE_GROUP_BY_TUPLE`. Trino executes a
+# multi-column `GROUP BY`, and the capability needs no rendering change in any
+# dialect — `vs-adapter/pushdown-dialect` already records that each dialect
+# renders every grouping column a request carries, so this widening costs no
+# renderer anything. Decision `[16]` records that the requester drew the line
+# here and nowhere else: `AGGREGATE_GROUP_BY_EXPRESSION` and `AGGREGATE_HAVING`
+# stay withheld release-wide because neither is confirmed rendering-free the
+# way this one is.
+#
+# Nothing in this list is withheld because Trino's SQL cannot render it. Every
+# capability name this release's vocabulary holds and this list omits is
+# withheld by a framework or mission decision that binds every dialect
+# identically:
+#
+#   - `JOIN_CONDITION_ALL` — mission.md scopes pushdown to equi and outer
+#     joins. Trino would execute a non-equi condition, including under a full
+#     outer join; the boundary is this project's, not Trino's
+#     (mission.md, `vs-adapter/pushdown-join`).
+#   - `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_HAVING` — this release
+#     groups by columns rather than expressions and applies `HAVING` in
+#     Exasol, for every dialect. Trino executes both, but neither is
+#     confirmed rendering-free the way `AGGREGATE_GROUP_BY_TUPLE` is, so
+#     lifting either buys a rendering change in three dialects rather than
+#     none (`vs-adapter/pushdown-aggregation`, decision `[16]`).
+#   - `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT`
+#     — a capability admits every numeric operand, and a floating-point sum
+#     is order-dependent. Trino distributes an aggregation and combines
+#     partial results, so its accumulation order is not stable between two
+#     runs (`vs-adapter/pushdown-aggregation`).
+#   - `ORDER_BY_COLUMN`, `ORDER_BY_EXPRESSION`, `LIMIT`, `LIMIT_WITH_OFFSET`
+#     — the emitting-UDF transport carries no ordering guarantee, whatever
+#     the source (`vs-adapter/result-ordering`).
+#   - `LITERAL_BOOL` — no mapped column produces Exasol `BOOLEAN`, and the
+#     declarable-set closure rests on that
+#     (`vs-adapter/type-mapping`, `vs-adapter/pushdown-dialect`).
+#   - Every `FN_<scalar>` — no dialect advertises a scalar function, which is
+#     what keeps the declarable type set closed
+#     (`vs-adapter/pushdown-dialect`).
+#
+# The names are `virtual-schema-common-java`'s protocol vocabulary. Nothing
+# validates them at build time — this list is the adapter's only list of
+# capability names, and a second one to check it against is what that
+# arrangement exists to avoid.
+#
+# Grouped for a reader; Exasol reads the array as a set.
+[capabilities]
+advertised = [
+    "SELECTLIST_PROJECTION",
+    "SELECTLIST_EXPRESSIONS",
+    "FILTER_EXPRESSIONS",
+    "AGGREGATE_SINGLE_GROUP",
+    "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_TUPLE",
+    "FN_AGG_COUNT",
+    "FN_AGG_COUNT_STAR",
+    "FN_AGG_COUNT_DISTINCT",
+    "FN_AGG_MIN",
+    "FN_AGG_MAX",
+    "FN_PRED_AND",
+    "FN_PRED_OR",
+    "FN_PRED_NOT",
+    "FN_PRED_EQUAL",
+    "FN_PRED_NOTEQUAL",
+    "FN_PRED_LESS",
+    "FN_PRED_LESSEQUAL",
+    "FN_PRED_IS_NULL",
+    "FN_PRED_IS_NOT_NULL",
+    "FN_PRED_BETWEEN",
+    "FN_PRED_IN_CONSTLIST",
+    "FN_PRED_LIKE",
+    "FN_PRED_LIKE_ESCAPE",
+    "LITERAL_NULL",
+    "LITERAL_EXACTNUMERIC",
+    "LITERAL_DOUBLE",
+    "LITERAL_STRING",
+    "LITERAL_DATE",
+    "LITERAL_TIMESTAMP",
+    "JOIN",
+    "JOIN_TYPE_INNER",
+    "JOIN_TYPE_LEFT_OUTER",
+    "JOIN_TYPE_RIGHT_OUTER",
+    "JOIN_TYPE_FULL_OUTER",
+    "JOIN_CONDITION_EQUI",
+]

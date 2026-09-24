@@ -31,6 +31,9 @@ pub mod schema;
 pub mod script;
 pub mod slc;
 pub mod stack;
+pub mod trino;
+pub mod trino_mirror;
+pub mod trino_stack;
 pub mod udf;
 
 use std::process::Command;
@@ -70,18 +73,37 @@ pub fn try_run(description: &str, program: &str, args: &[&str]) -> Result<String
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// The addresses one technology's container is reached at, named rather than
+/// positional: the two URIs are mutually substitutable at a call site, and a
+/// swap would compile and assert the invariants against the wrong string.
+pub struct ContainerAddresses<'a> {
+    /// The URI an operator writes into the `CONNECTION` object.
+    pub driver_uri: &'a str,
+    /// A URI naming a port nothing serves, used to exercise the unreachable
+    /// path.
+    pub unreachable_uri: &'a str,
+    /// The `host:port` the stack publishes on the loopback interface.
+    pub published_endpoint: &'a str,
+    /// The port the container serves on inside the Compose network.
+    pub port: u16,
+    /// The credential that must reach none of the addresses above.
+    pub password: &'a str,
+}
+
 /// The container-address invariants every technology's stack module owes,
 /// asserted once here rather than once per module: the driver URI an operator
 /// writes carries no credential, the deliberately unreachable URI names the
 /// same host on the very next port, and the published endpoint agrees with
 /// the in-network address on port.
-pub fn assert_container_address_invariants(
-    driver_uri: &str,
-    unreachable_uri: &str,
-    published_endpoint: &str,
-    port: u16,
-    password: &str,
-) {
+pub fn assert_container_address_invariants(addresses: ContainerAddresses<'_>) {
+    let ContainerAddresses {
+        driver_uri,
+        unreachable_uri,
+        published_endpoint,
+        port,
+        password,
+    } = addresses;
+
     assert!(
         !driver_uri.contains(password) && !driver_uri.contains('@'),
         "a credential must never reach the driver URI an operator writes: {driver_uri}"

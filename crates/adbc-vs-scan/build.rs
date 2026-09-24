@@ -8,15 +8,18 @@
 //! refuses to generate anything it cannot fully validate, naming the file and
 //! the field that stopped it.
 //!
-//! It emits one `DriverPackage` constant and one advertised-capability list per
-//! declaration, plus `DECLARED_DRIVERS` listing them by canonical name. Which of
+//! It emits one `DriverPackage` constant, one advertised-capability list, and
+//! one source-qualifier segment count per declaration, plus `DECLARED_DRIVERS`
+//! listing them by canonical name. Which of
 //! them has a `Driver` variant is `driver.rs`'s decision, and the two are held
 //! together by a test rather than by this script, which cannot see the enum.
 //!
-//! What it refuses is the `[package]` table's fields and nothing else. A
-//! capability name is protocol vocabulary rather than a type this repo defines,
-//! so this script has nothing to check one against, and giving it a list of
-//! valid names would put a second capability list beside the declarations.
+//! What it refuses is the `[package]` table's fields, a `[qualifier]
+//! segment_count` that is missing or zero, and a capability list that is empty
+//! or carries a blank entry. It still checks no capability *name*: a capability
+//! name is protocol vocabulary rather than a type this repo defines, so this
+//! script has nothing to check one against, and giving it a list of valid names
+//! would put a second capability list beside the declarations.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -31,6 +34,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 struct Declaration {
     package: Package,
+    qualifier: Qualifier,
     capabilities: Capabilities,
 }
 
@@ -41,6 +45,20 @@ struct Package {
     library: String,
     entry_point: String,
     version_range: String,
+}
+
+/// How deeply this technology nests the tables a virtual schema exposes.
+///
+/// A value rather than code because it is one number per technology, and giving
+/// it one owner is the whole point: the check that a `CONNECTION` address's
+/// path spells the qualifier runs before a connection exists, and the check
+/// that the metadata source produced it runs only once one does. Two modules
+/// deciding it independently could disagree, and the disagreement would surface
+/// as a statement naming the wrong object rather than as an error.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Qualifier {
+    segment_count: usize,
 }
 
 /// The capability set this technology's dialect advertises to Exasol.
@@ -164,6 +182,14 @@ fn read_declaration(path: &Path) -> Declaration {
         }
     }
 
+    if declaration.qualifier.segment_count == 0 {
+        fail(&format!(
+            "{}: `[qualifier] segment_count` is 0, and a table qualified by no name at all is \
+             one no dialect can render",
+            path.display()
+        ));
+    }
+
     if declaration.capabilities.advertised.is_empty() {
         fail(&format!(
             "{}: `[capabilities] advertised` is empty, and a dialect advertising nothing \
@@ -207,6 +233,13 @@ fn render(declarations: &BTreeMap<String, Declaration>) -> String {
             quote(&package.library),
             quote(&package.entry_point),
             quote(&package.version_range),
+        ));
+        generated.push_str(&format!(
+            "\n/// How many name segments the `{name}` source qualifier carries, from\n\
+             /// `drivers/{name}.toml`.\n\
+             pub const {}: usize = {};\n",
+            qualifier_constant_name(name),
+            declaration.qualifier.segment_count,
         ));
         generated.push_str(&render_capabilities(name, &declaration.capabilities));
     }
@@ -253,6 +286,10 @@ fn render_capabilities(name: &str, capabilities: &Capabilities) -> String {
 
 fn package_constant_name(driver: &str) -> String {
     format!("{}_PACKAGE", driver.to_ascii_uppercase())
+}
+
+fn qualifier_constant_name(driver: &str) -> String {
+    format!("{}_QUALIFIER_SEGMENTS", driver.to_ascii_uppercase())
 }
 
 fn capabilities_constant_name(driver: &str) -> String {

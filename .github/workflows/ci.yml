@@ -70,6 +70,13 @@ jobs:
       - name: Run the PostgreSQL-only integration tier
         run: make test-it-postgres
 
+  integration-tests-trino:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the Trino-only integration tier
+        run: make test-it-trino
+
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -122,6 +129,32 @@ jobs:
           name: exasol-container-log-postgres
           path: exasol-postgres.log
 
+  e2e-trino:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache /usr/local/.ghcup
+          docker image prune -af
+      - name: Relax AppArmor for the Exasol UDF sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install exapump
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/exasol-labs/exapump/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run the Trino end-to-end tier
+        run: make test-e2e-trino
+      - name: Dump the Exasol container log
+        if: failure()
+        run: docker compose logs exasol > exasol-trino.log
+      - name: Upload the Exasol container log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exasol-container-log-trino
+          path: exasol-trino.log
+
   release:
     name: Release
     runs-on: ubuntu-latest
@@ -133,8 +166,10 @@ jobs:
         deny,
         integration-tests,
         integration-tests-postgres,
+        integration-tests-trino,
         e2e,
         e2e-postgres,
+        e2e-trino,
       ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:

@@ -64,3 +64,48 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+
+  # No healthcheck: the image's own HEALTHCHECK probes the server's info
+  # endpoint, and what that endpoint answers once PASSWORD authentication is
+  # on is not established here. Readiness is the bounded poll in the
+  # `stack-up-trino` Make recipe instead, the same shape as the Exasol loop
+  # in `stack-up-exasol`.
+  trino:
+    image: trinodb/trino:483
+    networks:
+      adbc-vs:
+        ipv4_address: 172.28.5.12
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8443:8443"
+    # The image sets no -Xmx: jvm.config's MaxRAMPercentage=80 sizes the heap
+    # off the container's own memory limit, so a container with no limit at
+    # all gets an unbounded heap target.
+    mem_limit: 2g
+    environment:
+      # Read by the `trino` CLI inside the container (TRINO_PASSWORD is a
+      # CLI-side convention, not a server setting) when `stack-up-trino`'s
+      # `docker compose exec -e TRINO_PASSWORD` forwards it; kept here so the
+      # value is declared once beside the service rather than only in the
+      # Makefile, which sets and exports the same variable for the host-side
+      # `docker compose exec` invocation.
+      TRINO_PASSWORD: adbc_vs_password
+      # The plaintext behind password.db's second principal, adbc_vs_hostile.
+      # Carries `@ / : ? # & %` and a space in one value: the integration and
+      # E2E tiers authenticate as this principal to prove a credential that
+      # reaches no URI needs no encoding. Read by no container process -- it
+      # is here so the plaintext behind a committed hash is declared beside
+      # the service that checks it, as TRINO_PASSWORD is. Interpolated from the
+      # Makefile variable of the same name rather than repeated as a literal,
+      # so overriding it there actually reaches the container; the default
+      # below is what the committed bcrypt hash authenticates.
+      TRINO_HOSTILE_PASSWORD: "${TRINO_HOSTILE_PASSWORD:-p@ss/w:o?r#d&x% y}"
+    volumes:
+      # Individual files only, never the whole /etc/trino: the stock image's
+      # `memory`/`jmx`/`tpch`/`tpcds` catalogs and node.properties are left
+      # exactly as the image ships them.
+      - ./docker/trino/config.properties:/etc/trino/config.properties:ro
+      - ./docker/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
+      - ./docker/trino/password.db:/etc/trino/password.db:ro
+      - ./docker/trino/init.sql:/etc/trino/init.sql:ro
+      - ./docker/trino/generated/keystore.pem:/etc/trino/keystore.pem:ro

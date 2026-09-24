@@ -10,7 +10,103 @@
 //! resolved fresh from their `CONNECTION` objects at the moment they are
 //! needed, never persisted here.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// The ordered name segments that qualify a table at its source.
+///
+/// A list rather than one string because sources nest their tables to
+/// different depths — a MySQL database is one name, a Trino table is named by a
+/// catalog and a schema — and a catalog or a schema name may itself contain a
+/// dot, so a joined string could never be split back into the segments that
+/// built it. Nothing here joins them: which separator and which quoting a
+/// qualifier is written with is the dialect's business, and this type is what
+/// hands both the dialect and the metadata source one shape for it.
+///
+/// It carries at least one segment, and no segment of it is blank, so every
+/// reader can render it without a fallback for a qualifier that names nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceQualifier {
+    segments: Vec<String>,
+}
+
+impl SourceQualifier {
+    /// The qualifier `segments` spell, or why they spell none.
+    ///
+    /// Refusing here rather than at each reader is what lets a dialect and a
+    /// metadata source treat a qualifier as always renderable: a blank segment
+    /// would reach a generated statement as an empty quoted name, which
+    /// addresses nothing and fails at the source rather than at the operator.
+    pub fn of(segments: Vec<String>) -> Result<Self, String> {
+        if segments.is_empty() {
+            return Err("a source qualifier names at least one segment".to_string());
+        }
+        if let Some(position) = segments.iter().position(|segment| segment.is_empty()) {
+            return Err(format!(
+                "source qualifier segment {} is empty, and an empty name qualifies nothing",
+                position + 1
+            ));
+        }
+        Ok(Self { segments })
+    }
+
+    /// The qualifier one already-known name spells.
+    ///
+    /// Infallible because its callers hold a source name rather than operator
+    /// text: a technology whose qualifier is one segment derives that segment
+    /// from a `CONNECTION` address [`Self::of`] already accepted, or from a
+    /// constant of its own.
+    pub fn single(segment: impl Into<String>) -> Self {
+        Self {
+            segments: vec![segment.into()],
+        }
+    }
+
+    /// The segments, outermost first.
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
+    /// The outermost segment, which every qualifier carries.
+    pub fn first(&self) -> &str {
+        &self.segments[0]
+    }
+}
+
+/// Writes one segment as the bare string an earlier release wrote, and more as
+/// an array.
+///
+/// Exasol persists `adapterNotes` and returns them rather than having them
+/// recreated, so a virtual schema created before the qualifier became a list is
+/// read back by this release. Keeping the single-segment spelling identical is
+/// what lets those notes be read *and* rewritten unchanged, and it leaves the
+/// statements every single-segment technology generates byte-identical too.
+impl Serialize for SourceQualifier {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.segments.as_slice() {
+            [only] => serializer.serialize_str(only),
+            many => many.serialize(serializer),
+        }
+    }
+}
+
+/// Reads back either spelling, under the one field rather than a second one: a
+/// second field would let two records of one fact disagree.
+impl<'de> Deserialize<'de> for SourceQualifier {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Recorded {
+            Joined(String),
+            Segments(Vec<String>),
+        }
+
+        let segments = match Recorded::deserialize(deserializer)? {
+            Recorded::Joined(segment) => vec![segment],
+            Recorded::Segments(segments) => segments,
+        };
+        Self::of(segments).map_err(serde::de::Error::custom)
+    }
+}
 
 /// One column or table `createVirtualSchema` left out of the virtual
 /// schema, recorded for an operator to read back rather than silently
@@ -60,12 +156,13 @@ pub struct AdapterNotes {
     /// The one source namespace this virtual schema exposes, and the qualifier
     /// every rendered statement puts in front of a table name.
     ///
-    /// Which source fact it is derived from is per technology — a MySQL
-    /// database, PostgreSQL's `public` schema — and the metadata source
-    /// answers it. The JSON name stays `database`, the field an earlier
-    /// release wrote, so notes Exasol persisted before this one parse
-    /// unchanged.
-    pub database: String,
+    /// Which source facts it is derived from, and how many segments it takes
+    /// to spell, are per technology — a MySQL database, PostgreSQL's `public`
+    /// schema, a Trino catalog and schema — and the metadata source answers
+    /// both. The JSON name stays `database`, the field an earlier release
+    /// wrote, and a single-segment qualifier keeps that release's spelling, so
+    /// notes Exasol persisted before this one parse and rewrite unchanged.
+    pub database: SourceQualifier,
     #[serde(default)]
     pub omitted: Vec<Omission>,
 }

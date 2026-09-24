@@ -10,17 +10,23 @@
 
 use adbc_vs_scan::driver::{Driver, DECLARED_DRIVERS};
 
-use crate::metadata;
+use crate::adapter_notes::SourceQualifier;
+use crate::metadata::{self, MetadataError};
 use crate::sql_dialect::dialect_for;
 
-/// Checked by the compiler rather than at run time: `metadata::source_for`
-/// must keep this exact shape, because constructing what it returns needs a
-/// live ADBC connection this tier has none of by design.
-const _: fn(
+/// The shape `metadata::source_for` must keep: it takes the qualifier the
+/// `CONNECTION` address spells and answers with a source or with why that
+/// qualifier is not one the driver declares.
+type ResolveSource = fn(
     Driver,
     adbc_driver_manager::ManagedConnection,
-    &str,
-) -> Box<dyn metadata::MetadataSource> = metadata::source_for;
+    &SourceQualifier,
+) -> Result<Box<dyn metadata::MetadataSource>, MetadataError>;
+
+/// Checked by the compiler rather than at run time, because constructing what
+/// `metadata::source_for` returns needs a live ADBC connection this tier has
+/// none of by design.
+const _: ResolveSource = metadata::source_for;
 
 /// `vs-adapter/driver-selection`: each identity yields its own dialect and its
 /// own package, and the two identities never share the values that would make

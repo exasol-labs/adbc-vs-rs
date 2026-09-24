@@ -77,8 +77,8 @@ impl FakeMetadataSource {
 }
 
 impl MetadataSource for FakeMetadataSource {
-    fn namespace(&self) -> &str {
-        "shop"
+    fn namespace(&self) -> SourceQualifier {
+        SourceQualifier::single("shop")
     }
 
     fn check_source(&mut self) -> Result<(), MetadataError> {
@@ -108,7 +108,7 @@ fn discovered_notes() -> AdapterNotes {
         driver_version: Some(RESOLVED_VERSION.to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
-        database: "shop".to_string(),
+        database: SourceQualifier::single("shop"),
         omitted: vec![],
     }
 }
@@ -166,7 +166,7 @@ fn the_recorded_notes_carry_the_state_pushdown_reads_back() {
         "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so"
     );
     assert_eq!(notes.connection, "MY_MYSQL_CONNECTION");
-    assert_eq!(notes.database, "shop");
+    assert_eq!(notes.database.segments(), ["shop"]);
     assert!(notes.omitted.is_empty(), "nothing was omitted: {notes:?}");
 }
 
@@ -311,37 +311,125 @@ fn a_table_with_no_mapped_column_is_omitted_entirely() {
 }
 
 #[test]
-fn database_is_the_path_component_of_the_connection_address() {
+fn the_qualifier_is_the_path_component_of_the_connection_address() {
     assert_eq!(
-        parse_database("mysql://172.28.5.10:3306/shop").unwrap(),
-        "shop"
+        parse_qualifier("mysql://172.28.5.10:3306/shop", Driver::MySql)
+            .unwrap()
+            .segments(),
+        ["shop"]
     );
 }
 
 #[test]
-fn address_without_a_database_path_errors() {
-    let error = parse_database("mysql://172.28.5.10:3306").unwrap_err();
-    assert!(matches!(
-        error,
-        SchemaError::ConnectionAddressMissingDatabase(_)
-    ));
-}
-
-#[test]
-fn address_with_an_empty_database_path_errors() {
-    let error = parse_database("mysql://172.28.5.10:3306/").unwrap_err();
-    assert!(matches!(
-        error,
-        SchemaError::ConnectionAddressMissingDatabase(_)
-    ));
-}
-
-#[test]
-fn database_path_stops_at_a_query_string() {
+fn the_qualifier_path_stops_at_a_query_string() {
     assert_eq!(
-        parse_database("mysql://host:3306/shop?useSSL=false").unwrap(),
-        "shop"
+        parse_qualifier("mysql://host:3306/shop?useSSL=false", Driver::MySql)
+            .unwrap()
+            .segments(),
+        ["shop"]
     );
+}
+
+/// One path element per qualifier segment, so an address whose path is deeper
+/// than one element is read as the segments it spells rather than as one name
+/// containing a separator. Asserted on the split alone: how many elements a
+/// driver needs is its own declaration's answer, never this function's, and
+/// the refusal is exercised by the test below.
+#[test]
+fn a_deeper_address_path_is_read_as_the_elements_it_spells() {
+    assert_eq!(
+        address_path_elements("trino://172.28.5.12:8443/memory/default"),
+        ["memory", "default"]
+    );
+    assert_eq!(
+        address_path_elements("trino://172.28.5.12:8443/memory/default?x=1"),
+        ["memory", "default"]
+    );
+    assert!(address_path_elements("mysql://172.28.5.10:3306").is_empty());
+    assert!(address_path_elements("mysql://172.28.5.10:3306/").is_empty());
+}
+
+/// Release 0.2 took everything after the first `/` as one database name, so a
+/// `postgresql://host/db/extra` address silently named the database `db/extra`.
+/// Once a qualifier can be deeper than one segment that leniency becomes a way
+/// to address a different object than the statement asked for, so the element
+/// count is checked against the driver's own declaration and both directions
+/// fail — an operator cannot tell which end to correct from one count alone.
+#[test]
+fn an_address_not_spelling_its_drivers_qualifier_is_refused_naming_the_driver_and_both_counts() {
+    for (driver, address, carried) in [
+        (Driver::MySql, "mysql://172.28.5.10:3306", 0),
+        (Driver::MySql, "mysql://172.28.5.10:3306/", 0),
+        (Driver::MySql, "mysql://172.28.5.10:3306/shop/extra", 2),
+        (Driver::Postgres, "postgresql://172.28.5.11:5432", 0),
+        (
+            Driver::Postgres,
+            "postgresql://172.28.5.11:5432/shop/extra",
+            2,
+        ),
+        (Driver::Trino, "trino://172.28.5.12:8443/memory", 1),
+        (
+            Driver::Trino,
+            "trino://172.28.5.12:8443/memory/adbc_vs/extra",
+            3,
+        ),
+    ] {
+        let needed = driver.qualifier_segment_count();
+        let Err(error) = parse_qualifier(address, driver) else {
+            panic!(
+                "`{address}` spells {carried} qualifier segments, not the {needed} `{}` needs",
+                driver.as_str()
+            );
+        };
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, SchemaError::ConnectionAddressQualifierArity { .. }),
+            "the refusal must be the qualifier-arity one: {message}"
+        );
+        assert!(
+            message.contains(driver.as_str()),
+            "the error must name the driver whose qualifier the address did not spell: {message}"
+        );
+        assert!(
+            message.contains(&format!("spells {carried} qualifier segments")),
+            "the error must state how many segments the address carried: {message}"
+        );
+        assert!(
+            message.contains(&format!("with {needed}")),
+            "the error must state how many segments the driver needs: {message}"
+        );
+    }
+}
+
+/// An address can spell the right number of path elements and still name
+/// nothing with one of them. This is reachable only for a driver qualifying
+/// with more than one segment: a single non-empty element cannot be blank, so
+/// for MySQL and PostgreSQL a blank path fails the arity check first.
+#[test]
+fn an_address_spelling_a_blank_qualifier_segment_is_refused_naming_its_position() {
+    for (address, position) in [
+        ("trino://172.28.5.12:8443/memory/", 2),
+        ("trino://172.28.5.12:8443//adbc_vs", 1),
+    ] {
+        let Err(error) = parse_qualifier(address, Driver::Trino) else {
+            panic!("`{address}` names nothing with one of its path elements");
+        };
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, SchemaError::ConnectionAddressQualifierSegment { .. }),
+            "the refusal must be the qualifier-segment one: {message}"
+        );
+        assert!(
+            message.contains(&position.to_string()),
+            "the error must state which segment is empty: {message}"
+        );
+        assert!(
+            message.contains(Driver::Trino.as_str()),
+            "the error must name the driver whose qualifier could not be built: {message}"
+        );
+    }
 }
 
 #[test]
@@ -402,12 +490,12 @@ fn a_database_name_carrying_a_quote_or_a_backslash_is_resolved_rather_than_judge
         "postgresql://172.28.5.11:5432/it's",
         "postgresql://172.28.5.11:5432/back\\slash",
     ] {
-        let database = parse_database(address)
+        let qualifier = parse_qualifier(address, Driver::Postgres)
             .unwrap_or_else(|error| panic!("`{address}` names a database: {error}"));
 
         assert_eq!(
             address,
-            format!("postgresql://172.28.5.11:5432/{database}"),
+            format!("postgresql://172.28.5.11:5432/{}", qualifier.first()),
             "the resolved name must be the address's path component, character for character"
         );
     }

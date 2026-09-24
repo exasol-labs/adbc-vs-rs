@@ -14,6 +14,7 @@
 
 use adbc_driver_manager::ManagedConnection;
 
+use crate::adapter_notes::SourceQualifier;
 use crate::metadata::{
     assemble_tables, batch_column, i64_cell, required_i64_cell, required_string_cell, run_query,
     string_cell, CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
@@ -72,8 +73,8 @@ impl MySqlSource {
 }
 
 impl MetadataSource for MySqlSource {
-    fn namespace(&self) -> &str {
-        &self.database
+    fn namespace(&self) -> SourceQualifier {
+        SourceQualifier::single(&self.database)
     }
 
     /// Refuses a database name this source cannot build a catalog query for,

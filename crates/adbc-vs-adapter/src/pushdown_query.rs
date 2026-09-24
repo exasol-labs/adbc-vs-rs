@@ -29,6 +29,7 @@
 
 use serde_json::Value;
 
+use crate::adapter_notes::SourceQualifier;
 use crate::emit_type;
 use crate::exa_type::{self, ExasolType};
 
@@ -253,12 +254,12 @@ pub enum FromClause {
     Join(Box<Join>),
 }
 
-/// A table at the source, qualified by the database `createVirtualSchema`
-/// recorded in `adapterNotes`, and carrying the alias the request assigned
-/// it, when it assigned one.
+/// A table at the source, qualified by the ordered name segments
+/// `createVirtualSchema` recorded in `adapterNotes`, and carrying the alias the
+/// request assigned it, when it assigned one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceTable {
-    pub schema: String,
+    pub namespace: SourceQualifier,
     pub name: String,
     pub alias: Option<String>,
 }
@@ -289,17 +290,17 @@ pub struct Join {
 
 /// Parses a `pushdown` request into the query model.
 ///
-/// `database` is the source database `createVirtualSchema` recorded in
+/// `namespace` is the source qualifier `createVirtualSchema` recorded in
 /// `adapterNotes`; a pushdown request never carries it, and the model needs
 /// it to name the source table in full.
-pub fn parse(request: &Value, database: &str) -> Result<Query, String> {
+pub fn parse(request: &Value, namespace: &SourceQualifier) -> Result<Query, String> {
     reject_undelegated_elements(request)?;
     let tables = read_involved_tables(request)?;
     Ok(Query {
         select_list: read_select_list(request, &tables)?,
         filter: read_filter(request, &tables)?,
         aggregation: read_aggregation(request, &tables)?,
-        from: read_from(request, &tables, database)?,
+        from: read_from(request, &tables, namespace)?,
     })
 }
 
@@ -890,12 +891,12 @@ fn read_literal_value(node: &Value) -> Result<String, String> {
 fn read_from(
     request: &Value,
     tables: &[InvolvedTable],
-    database: &str,
+    namespace: &SourceQualifier,
 ) -> Result<FromClause, String> {
     let from = request
         .pointer("/pushdownRequest/from")
         .ok_or_else(|| "the pushdown request carries no `from` element".to_string())?;
-    read_from_element(from, tables, database)
+    read_from_element(from, tables, namespace)
 }
 
 /// Reads one `from`-tree element, recursively: a `table` leaf, or a `join`
@@ -908,7 +909,7 @@ fn read_from(
 fn read_from_element(
     node: &Value,
     tables: &[InvolvedTable],
-    database: &str,
+    namespace: &SourceQualifier,
 ) -> Result<FromClause, String> {
     let element_type = node.get("type").and_then(Value::as_str).ok_or_else(|| {
         "the pushdown request's `from` element carries no `type` field".to_string()
@@ -925,7 +926,7 @@ fn read_from_element(
                 .map(str::to_string);
 
             Ok(FromClause::Table(SourceTable {
-                schema: database.to_string(),
+                namespace: namespace.clone(),
                 name: name.to_string(),
                 alias,
             }))
@@ -949,8 +950,8 @@ fn read_from_element(
 
             Ok(FromClause::Join(Box::new(Join {
                 join_type: join_type.to_string(),
-                left: Box::new(read_from_element(left, tables, database)?),
-                right: Box::new(read_from_element(right, tables, database)?),
+                left: Box::new(read_from_element(left, tables, namespace)?),
+                right: Box::new(read_from_element(right, tables, namespace)?),
                 condition: read_predicate(condition, tables)?,
             })))
         }

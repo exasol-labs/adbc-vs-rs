@@ -18,12 +18,19 @@ pub mod registry_index;
 pub mod scan_entry;
 pub mod scan_spec;
 pub mod sql_dialect;
+pub mod trino_dialect;
+pub mod trino_source;
+pub mod trino_type_mapping;
 pub mod type_mapping;
 
 /// The rules that bind the driver identity's three tables, which belong to no
 /// one of them.
 #[cfg(test)]
 mod driver_selection_tests;
+
+/// The dialect-agnostic query model every dialect's own tests are driven with.
+#[cfg(test)]
+mod dialect_test_fixtures;
 
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
