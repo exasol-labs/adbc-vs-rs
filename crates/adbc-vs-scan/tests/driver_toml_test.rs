@@ -118,14 +118,19 @@ const COMPLETE_DECLARATION: &str = "[package]\n\
      library = \"libadbc_driver_mysql.so\"\n\
      entry_point = \"AdbcDriverMysqlInit\"\n\
      version_range = \">=0.6.0, <0.7.0\"\n\
+     [qualifier]\n\
+     segment_count = 1\n\
      [capabilities]\n\
      advertised = [\"FILTER_EXPRESSIONS\"]\n";
 
-/// `package` plus a capability list, so a case about the `[package]` table
-/// declares a complete file in every other respect and the refusal it draws
-/// names the defect it is about.
-fn with_a_capability_list(package: &str) -> String {
-    format!("{package}[capabilities]\nadvertised = [\"FILTER_EXPRESSIONS\"]\n")
+/// `package` plus the two tables a declaration also carries, so a case about
+/// the `[package]` table declares a complete file in every other respect and
+/// the refusal it draws names the defect it is about.
+fn with_the_rest_of_a_declaration(package: &str) -> String {
+    format!(
+        "{package}[qualifier]\nsegment_count = 1\n\
+         [capabilities]\nadvertised = [\"FILTER_EXPRESSIONS\"]\n"
+    )
 }
 
 #[test]
@@ -140,22 +145,53 @@ fn a_complete_declaration_generates_its_table() {
     );
 }
 
-/// Every way a declaration can be malformed, each asserted to name the file
-/// it was read from and, where there is one, the field that stopped it.
+/// The segment count has one owner, and it is this file: the check that a
+/// `CONNECTION` address's path spells the qualifier and the check that the
+/// metadata source produced it both read it, and neither has a fallback. A file
+/// omitting it would leave two modules with nothing to agree on, so the build
+/// refuses it rather than generating a table with a count invented for it.
 #[test]
-fn malformed_driver_toml_fails_the_build() {
-    a_declaration_missing_a_field_names_the_file_and_the_field();
-    a_declaration_with_an_empty_field_names_the_file_and_the_field();
-    a_declaration_with_an_unknown_field_names_the_file_and_the_field();
-    a_declaration_with_no_package_table_names_the_file();
-    a_declaration_with_no_capability_list_names_the_file_and_the_field();
-    a_file_that_is_not_a_declaration_names_the_file();
-    a_declaration_whose_name_is_not_a_driver_name_names_the_file();
-    a_declaration_whose_name_starts_with_a_digit_names_the_file();
-    a_declaration_with_an_empty_capability_list_names_the_file();
-    a_declaration_with_a_blank_capability_entry_names_the_file();
+fn a_declaration_with_no_qualifier_table_names_the_file_and_the_field() {
+    let without_qualifier = "[package]\n\
+         registry_path = \"mysql\"\n\
+         library = \"libadbc_driver_mysql.so\"\n\
+         entry_point = \"AdbcDriverMysqlInit\"\n\
+         version_range = \">=0.6.0, <0.7.0\"\n\
+         [capabilities]\n\
+         advertised = [\"FILTER_EXPRESSIONS\"]\n";
+
+    let message = refusal("no-qualifier", &[("mysql.toml", without_qualifier)]);
+
+    assert!(
+        message.contains("mysql.toml") && message.contains("qualifier"),
+        "the refusal must name the file and the qualifier declaration it omits: {message}"
+    );
 }
 
+/// A table qualified by no name at all is one no dialect can render, and the
+/// address check would accept every address for it, so zero is refused at the
+/// build rather than reaching either reader.
+#[test]
+fn a_declaration_qualifying_with_no_segment_names_the_file_and_the_field() {
+    let no_segments = "[package]\n\
+         registry_path = \"mysql\"\n\
+         library = \"libadbc_driver_mysql.so\"\n\
+         entry_point = \"AdbcDriverMysqlInit\"\n\
+         version_range = \">=0.6.0, <0.7.0\"\n\
+         [qualifier]\n\
+         segment_count = 0\n\
+         [capabilities]\n\
+         advertised = [\"FILTER_EXPRESSIONS\"]\n";
+
+    let message = refusal("no-segments", &[("mysql.toml", no_segments)]);
+
+    assert!(
+        message.contains("mysql.toml") && message.contains("segment_count"),
+        "the refusal must name the file and the count that qualifies nothing: {message}"
+    );
+}
+
+#[test]
 fn a_declaration_missing_a_field_names_the_file_and_the_field() {
     let incomplete = "[package]\n\
          registry_path = \"mysql\"\n\
@@ -164,7 +200,7 @@ fn a_declaration_missing_a_field_names_the_file_and_the_field() {
 
     let message = refusal(
         "missing-field",
-        &[("mysql.toml", &with_a_capability_list(incomplete))],
+        &[("mysql.toml", &with_the_rest_of_a_declaration(incomplete))],
     );
 
     assert!(
@@ -177,6 +213,7 @@ fn a_declaration_missing_a_field_names_the_file_and_the_field() {
     );
 }
 
+#[test]
 fn a_declaration_with_an_empty_field_names_the_file_and_the_field() {
     let empty = "[package]\n\
          registry_path = \"mysql\"\n\
@@ -186,7 +223,7 @@ fn a_declaration_with_an_empty_field_names_the_file_and_the_field() {
 
     let message = refusal(
         "empty-field",
-        &[("mysql.toml", &with_a_capability_list(empty))],
+        &[("mysql.toml", &with_the_rest_of_a_declaration(empty))],
     );
 
     assert!(
@@ -195,6 +232,7 @@ fn a_declaration_with_an_empty_field_names_the_file_and_the_field() {
     );
 }
 
+#[test]
 fn a_declaration_with_an_unknown_field_names_the_file_and_the_field() {
     let misspelled = "[package]\n\
          registry_paths = \"mysql\"\n\
@@ -204,7 +242,7 @@ fn a_declaration_with_an_unknown_field_names_the_file_and_the_field() {
 
     let message = refusal(
         "unknown-field",
-        &[("mysql.toml", &with_a_capability_list(misspelled))],
+        &[("mysql.toml", &with_the_rest_of_a_declaration(misspelled))],
     );
 
     assert!(
@@ -213,6 +251,7 @@ fn a_declaration_with_an_unknown_field_names_the_file_and_the_field() {
     );
 }
 
+#[test]
 fn a_declaration_with_no_package_table_names_the_file() {
     let message = refusal("no-table", &[("mysql.toml", "library = \"lib.so\"\n")]);
 
@@ -235,12 +274,15 @@ fn a_declaration_with_no_package_table_names_the_file() {
 /// capability list `vs-adapter/pushdown-dialect` forbids. A name no dialect
 /// renders is caught by the invariant test that renders every advertised
 /// capability, not by the build.
+#[test]
 fn a_declaration_with_no_capability_list_names_the_file_and_the_field() {
     let package_only = "[package]\n\
          registry_path = \"mysql\"\n\
          library = \"libadbc_driver_mysql.so\"\n\
          entry_point = \"AdbcDriverMysqlInit\"\n\
-         version_range = \">=0.6.0, <0.7.0\"\n";
+         version_range = \">=0.6.0, <0.7.0\"\n\
+         [qualifier]\n\
+         segment_count = 1\n";
 
     let message = refusal("no-capabilities", &[("mysql.toml", package_only)]);
 
@@ -253,6 +295,7 @@ fn a_declaration_with_no_capability_list_names_the_file_and_the_field() {
 /// Every file in `drivers/` declares a technology, so one that is not a
 /// declaration at all is a mistake to report rather than a file to skip —
 /// skipping it would drop a driver from the table without saying so.
+#[test]
 fn a_file_that_is_not_a_declaration_names_the_file() {
     let message = refusal(
         "not-a-declaration",
@@ -265,6 +308,7 @@ fn a_file_that_is_not_a_declaration_names_the_file() {
     );
 }
 
+#[test]
 fn a_declaration_whose_name_is_not_a_driver_name_names_the_file() {
     let message = refusal("bad-stem", &[("My SQL.toml", COMPLETE_DECLARATION)]);
 
@@ -278,6 +322,7 @@ fn a_declaration_whose_name_is_not_a_driver_name_names_the_file() {
 /// is not a valid Rust identifier's first character, so `package_constant_name`
 /// would emit an unparseable constant name — a compile error inside
 /// `OUT_DIR/driver_packages.rs` instead of this named refusal.
+#[test]
 fn a_declaration_whose_name_starts_with_a_digit_names_the_file() {
     let message = refusal("leading-digit", &[("9db.toml", COMPLETE_DECLARATION)]);
 
@@ -287,16 +332,22 @@ fn a_declaration_whose_name_starts_with_a_digit_names_the_file() {
     );
 }
 
+#[test]
 fn a_declaration_with_an_empty_capability_list_names_the_file() {
-    let package_only = "[package]\n\
+    let empty_capability_list = "[package]\n\
          registry_path = \"mysql\"\n\
          library = \"libadbc_driver_mysql.so\"\n\
          entry_point = \"AdbcDriverMysqlInit\"\n\
          version_range = \">=0.6.0, <0.7.0\"\n\
+         [qualifier]\n\
+         segment_count = 1\n\
          [capabilities]\n\
          advertised = []\n";
 
-    let message = refusal("empty-capability-list", &[("mysql.toml", package_only)]);
+    let message = refusal(
+        "empty-capability-list",
+        &[("mysql.toml", empty_capability_list)],
+    );
 
     assert!(
         message.contains("mysql.toml"),
@@ -304,16 +355,22 @@ fn a_declaration_with_an_empty_capability_list_names_the_file() {
     );
 }
 
+#[test]
 fn a_declaration_with_a_blank_capability_entry_names_the_file() {
-    let package_only = "[package]\n\
+    let blank_capability_entry = "[package]\n\
          registry_path = \"mysql\"\n\
          library = \"libadbc_driver_mysql.so\"\n\
          entry_point = \"AdbcDriverMysqlInit\"\n\
          version_range = \">=0.6.0, <0.7.0\"\n\
+         [qualifier]\n\
+         segment_count = 1\n\
          [capabilities]\n\
          advertised = [\"\"]\n";
 
-    let message = refusal("blank-capability-entry", &[("mysql.toml", package_only)]);
+    let message = refusal(
+        "blank-capability-entry",
+        &[("mysql.toml", blank_capability_entry)],
+    );
 
     assert!(
         message.contains("mysql.toml"),

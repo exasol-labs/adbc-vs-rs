@@ -24,7 +24,7 @@ use exasol_udf_sdk::connect_back::ConnectionObject;
 use exasol_udf_sdk::context::UdfContext;
 use serde_json::Value;
 
-use crate::adapter_notes::{AdapterNotes, Omission};
+use crate::adapter_notes::{AdapterNotes, Omission, SourceQualifier};
 use crate::exa_type;
 use crate::metadata::{self, DiscoveredTable, MetadataError, MetadataSource};
 use crate::provisioning::{
@@ -107,7 +107,21 @@ pub enum SchemaError {
         name: String,
         cause: String,
     },
-    ConnectionAddressMissingDatabase(String),
+    ConnectionAddressQualifierArity {
+        driver: &'static str,
+        address: String,
+        needed: usize,
+        carried: usize,
+    },
+    /// An address that spells the right number of path elements but names
+    /// nothing with one of them. Reachable only for a driver qualifying with
+    /// more than one segment: a single non-empty path element cannot be
+    /// blank, so a one-segment driver fails the arity check instead.
+    ConnectionAddressQualifierSegment {
+        driver: &'static str,
+        address: String,
+        cause: String,
+    },
     ConnectionAddressMissingScheme {
         driver: &'static str,
         address: String,
@@ -138,10 +152,26 @@ impl fmt::Display for SchemaError {
             Self::ConnectionResolution { name, cause } => {
                 write!(f, "resolving CONNECTION `{name}`: {cause}")
             }
-            Self::ConnectionAddressMissingDatabase(address) => write!(
+            Self::ConnectionAddressQualifierArity {
+                driver,
+                address,
+                needed,
+                carried,
+            } => write!(
                 f,
-                "connection address `{address}` has no database path component; expected \
-                 <driver>://host:port/database"
+                "the {CONNECTION_PROPERTY} connection's address `{address}` spells {carried} \
+                 qualifier segments, but DRIVER `{driver}` qualifies its source tables with \
+                 {needed}; adbc-vs reads one path element per segment, so an address carrying \
+                 another number names a different object than the statement asked for"
+            ),
+            Self::ConnectionAddressQualifierSegment {
+                driver,
+                address,
+                cause,
+            } => write!(
+                f,
+                "the {CONNECTION_PROPERTY} connection's address `{address}` cannot name the \
+                 `{driver}` source qualifier: {cause}"
             ),
             Self::ConnectionAddressMissingScheme { driver, address } => write!(
                 f,
@@ -266,7 +296,7 @@ fn open(
 
     let source_connection_object = resolve_connection(ctx, &connection_name)?;
     check_connection_scheme(&source_connection_object.address, driver)?;
-    let database = parse_database(&source_connection_object.address)?;
+    let qualifier = parse_qualifier(&source_connection_object.address, driver)?;
 
     let library = open_driver_library(ctx, Path::new(BUCKETFS_MOUNT), &source, driver)?;
 
@@ -277,14 +307,15 @@ fn open(
     };
     let adbc_connection = adbc_vs_scan::connection::open(driver, &library.path, &source_connection)
         .map_err(SchemaError::ScanConnection)?;
-    let metadata_source = metadata::source_for(driver, adbc_connection, &database);
+    let metadata_source =
+        metadata::source_for(driver, adbc_connection, &qualifier).map_err(SchemaError::Metadata)?;
 
     let notes = AdapterNotes {
         driver: driver.as_str().to_string(),
         driver_version: library.version,
         driver_path: library.path,
         connection: connection_name,
-        database: metadata_source.namespace().to_string(),
+        database: metadata_source.namespace(),
         omitted: vec![],
     };
     Ok((notes, metadata_source))
@@ -626,7 +657,7 @@ fn check_connection_scheme(address: &str, driver: Driver) -> Result<(), SchemaEr
     let Some((scheme, _)) = address.split_once("://") else {
         return Err(SchemaError::ConnectionAddressMissingScheme {
             driver: driver.as_str(),
-            address: address.to_string(),
+            address: address_without_userinfo(address),
         });
     };
     if scheme.eq_ignore_ascii_case(driver.as_str()) {
@@ -638,20 +669,88 @@ fn check_connection_scheme(address: &str, driver: Driver) -> Result<(), SchemaEr
     })
 }
 
-/// The database name is the path component of the source `CONNECTION`
-/// address (`<driver>://host:port/database`), because the address must
-/// already be a full driver URI, so the database can only come from here,
-/// never from a separate property.
-fn parse_database(address: &str) -> Result<String, SchemaError> {
-    let missing = || SchemaError::ConnectionAddressMissingDatabase(address.to_string());
-
-    let after_scheme = address.split_once("://").map_or(address, |(_, rest)| rest);
-    let (_, path) = after_scheme.split_once('/').ok_or_else(missing)?;
-    let database = path.split(['?', '#']).next().unwrap_or("");
-    if database.is_empty() {
-        return Err(missing());
+/// The source qualifier the `CONNECTION` address's path component spells, one
+/// path element per segment.
+///
+/// The address must already be a full driver URI, so the qualifier can only
+/// come from here and never from a separate property. How many segments it
+/// takes is read off the driver's own declaration rather than decided here, and
+/// both too few and too many fail: taking everything after the first `/` as one
+/// name was safe only while every technology qualified a table with one name,
+/// and under a deeper qualifier that leniency becomes a way to address a
+/// different object than the statement asked for.
+fn parse_qualifier(address: &str, driver: Driver) -> Result<SourceQualifier, SchemaError> {
+    let carried = address_path_elements(address);
+    let needed = driver.qualifier_segment_count();
+    if carried.len() != needed {
+        return Err(SchemaError::ConnectionAddressQualifierArity {
+            driver: driver.as_str(),
+            address: address_without_userinfo(address),
+            needed,
+            carried: carried.len(),
+        });
     }
-    Ok(database.to_string())
+    SourceQualifier::of(carried).map_err(|cause| SchemaError::ConnectionAddressQualifierSegment {
+        driver: driver.as_str(),
+        address: address_without_userinfo(address),
+        cause,
+    })
+}
+
+/// The address with its authority's userinfo component removed, for the errors
+/// that name the address back to the querying session.
+///
+/// A user and password written into the address are not the credential —
+/// Exasol resolves that beside the address — but an operator can still write
+/// one there, and `dispatch` hands a `SchemaError`'s text to the session
+/// unredacted, so an address stored verbatim would return that secret in clear
+/// text. The scan crate strips the same component from the address it opens
+/// with, for the same reason.
+///
+/// The authority runs from the scheme separator to the first `/`, `?`, or `#`,
+/// and its userinfo ends at the last `@` inside it, which is how the driver's
+/// own URL reader delimits both. An address with no scheme separator is
+/// stripped from its first byte, because the errors that name one are reached
+/// precisely when the scheme is absent.
+fn address_without_userinfo(address: &str) -> String {
+    const SCHEME_SEPARATOR: &str = "://";
+
+    let authority_start = address
+        .find(SCHEME_SEPARATOR)
+        .map_or(0, |index| index + SCHEME_SEPARATOR.len());
+    let authority_end = address[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(address.len(), |offset| authority_start + offset);
+
+    match address[authority_start..authority_end].rsplit_once('@') {
+        None => address.to_string(),
+        Some((_, host)) => format!(
+            "{}{host}{}",
+            &address[..authority_start],
+            &address[authority_end..]
+        ),
+    }
+}
+
+/// The elements of a driver URI's path component, in order, with the query
+/// string and the fragment stripped.
+///
+/// An address with no path at all and one whose path is empty both yield no
+/// element, so a missing qualifier is counted rather than treated as a shape of
+/// its own. An empty element is kept rather than dropped, because dropping one
+/// would let `//` inside a path pass a count it does not really spell.
+fn address_path_elements(address: &str) -> Vec<String> {
+    let after_scheme = address.split_once("://").map_or(address, |(_, rest)| rest);
+    let path = after_scheme
+        .split_once('/')
+        .map_or("", |(_, path)| path)
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("");
+    match path {
+        "" => Vec::new(),
+        path => path.split('/').map(str::to_owned).collect(),
+    }
 }
 
 /// Splits the discovered tables into the ones the virtual schema exposes and

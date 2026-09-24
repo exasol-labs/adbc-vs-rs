@@ -22,6 +22,16 @@ fn value_as_str(value: &OptionValue) -> &str {
 /// form, which is why the escaping has to be total rather than per character.
 const AWKWARD_PASSWORD: &str = "pa'b\\c d&e";
 
+/// A password holding each of the seven characters `scan-udf/trino-scan`
+/// names — `@`, `/`, `:`, `?`, `#`, `&`, `%` — and a space.
+///
+/// Every one of them ends, delimits, or escapes something in some URI
+/// component, which is what makes it the right fixture for a credential that
+/// reaches no URI: the assertion is that the bytes arrive unchanged, not that
+/// an encoding of them survives. Gate 2.1 measured this value authenticating
+/// against Trino 483 through the separate options.
+const HOSTILE_ASCII_PASSWORD: &str = "p@ss/w:o?r#d&x% y";
+
 fn connection() -> SourceConnection {
     SourceConnection {
         uri: "mysql://10.0.0.5:3306/adbc_vs".to_string(),
@@ -510,4 +520,139 @@ fn postgres_redaction_survives_a_driver_error_carrying_the_connection_string() {
         message.contains("10.0.0.7") && message.contains("appdb"),
         "the failure must still name the host and the database: {message}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The Trino mechanism `scan-udf/trino-scan` owns
+// ---------------------------------------------------------------------------
+
+fn trino_connection(address: &str) -> SourceConnection {
+    SourceConnection {
+        uri: address.to_string(),
+        username: "adbc_vs_hostile".to_string(),
+        password: HOSTILE_ASCII_PASSWORD.to_string(),
+    }
+}
+
+fn trino_uri(address: &str) -> String {
+    let target = database_target(Driver::Trino, &trino_connection(address))
+        .unwrap_or_else(|error| panic!("`{address}` must build a connection target: {error}"));
+    value_as_str(&target.options[0].1).to_string()
+}
+
+/// `scan-udf/trino-scan`: the driver registers `username` and `password`
+/// beside `uri`, so the credential travels as two options of its own and the
+/// address's own userinfo is dropped rather than carried — it is not the
+/// credential, and keeping it would put a foreign secret into the value the
+/// driver parses and into every message the open produces.
+///
+/// The resolved bytes arrive verbatim. Nothing encodes, escapes, or
+/// transcodes them, because the credential reaches no value any parser reads
+/// and Trino 483 authenticates no password outside ASCII through this
+/// mechanism anyway, so an encoding invented here could only break a working
+/// credential.
+#[test]
+fn an_address_userinfo_is_dropped_and_the_credential_travels_separately() {
+    let connection =
+        trino_connection("trino://someone:wrong@10.0.0.9:8443/memory/adbc_vs?SSLVerification=NONE");
+
+    let target = database_target(Driver::Trino, &connection).expect("Trino's target is built");
+    let options = target.options;
+
+    assert_eq!(options.len(), 3);
+    assert_eq!(options[0].0, OptionDatabase::Uri);
+    assert_eq!(
+        value_as_str(&options[0].1),
+        "trino://10.0.0.9:8443/memory/adbc_vs?SSLVerification=NONE",
+        "the uri option must be the address with its userinfo removed and nothing else changed"
+    );
+    assert_eq!(options[1].0, OptionDatabase::Username);
+    assert_eq!(value_as_str(&options[1].1), "adbc_vs_hostile");
+    assert_eq!(options[2].0, OptionDatabase::Password);
+    assert_eq!(
+        value_as_str(&options[2].1),
+        HOSTILE_ASCII_PASSWORD,
+        "the password option must carry the resolved bytes byte for byte"
+    );
+    assert_eq!(
+        target.subject, "trino://10.0.0.9:8443/memory/adbc_vs?SSLVerification=NONE",
+        "the failure subject is the userinfo-free uri value, so neither the discarded userinfo \
+         nor the resolved credential can reach it"
+    );
+}
+
+/// The strip removes the authority's userinfo and moves no other byte, so
+/// every path element and query parameter the operator wrote reaches the
+/// driver as written.
+///
+/// The authority ends at the first `/`, `?`, or `#` and the userinfo at the
+/// last `@` inside it, which is the parse the driver's own URL reader
+/// performs. An `@` outside the authority is therefore a literal rather than
+/// a delimiter — a strip that searched the whole address for one would drop a
+/// path element or a query parameter that carried it.
+///
+/// The last three cases are the other side of that boundary: a userinfo
+/// carrying an unencoded `/`, `?`, or `#` ends the authority inside the
+/// credential, so no `@` is found and the address is passed through whole.
+/// Such an address is malformed and the driver rejects it, so widening the
+/// strip to recognise it would only pick a different host than the driver
+/// does. They are pinned here so a later change to the boundary fails rather
+/// than silently altering which addresses the strip touches.
+#[test]
+fn trino_drops_the_authoritys_userinfo_and_changes_nothing_else() {
+    let cases = [
+        (
+            "trino://someone:wrong@host:8443/memory/adbc_vs",
+            "trino://host:8443/memory/adbc_vs",
+        ),
+        (
+            "trino://us@er:p@w@host/memory/adbc_vs",
+            "trino://host/memory/adbc_vs",
+        ),
+        (
+            "trino://@host/memory/adbc_vs",
+            "trino://host/memory/adbc_vs",
+        ),
+        ("trino://someone:wrong@host:8443", "trino://host:8443"),
+        (
+            "trino://someone:wrong@host?SSLVerification=NONE",
+            "trino://host?SSLVerification=NONE",
+        ),
+        (
+            "trino://someone:wrong@host#fragment",
+            "trino://host#fragment",
+        ),
+        (
+            "trino://host:8443/memory/adbc_vs?SSLVerification=NONE&tag=a@b",
+            "trino://host:8443/memory/adbc_vs?SSLVerification=NONE&tag=a@b",
+        ),
+        (
+            "trino://host:8443/memory/sch@ema",
+            "trino://host:8443/memory/sch@ema",
+        ),
+        (
+            "trino://10.0.0.5:5432/adbc_vs",
+            "trino://10.0.0.5:5432/adbc_vs",
+        ),
+        (
+            "trino://u:p/w@host:8443/memory/adbc_vs",
+            "trino://u:p/w@host:8443/memory/adbc_vs",
+        ),
+        (
+            "trino://u:p?w@host:8443/memory/adbc_vs",
+            "trino://u:p?w@host:8443/memory/adbc_vs",
+        ),
+        (
+            "trino://u:p#w@host:8443/memory/adbc_vs",
+            "trino://u:p#w@host:8443/memory/adbc_vs",
+        ),
+    ];
+
+    for (address, expected) in cases {
+        assert_eq!(
+            trino_uri(address),
+            expected,
+            "the strip changed `{address}`"
+        );
+    }
 }

@@ -214,13 +214,13 @@ mod tests {
 
     #[test]
     fn container_address_invariants_hold() {
-        super::super::assert_container_address_invariants(
-            &driver_uri(DATABASE),
-            &unreachable_uri(),
-            PUBLISHED_ENDPOINT,
-            PORT,
-            PASSWORD,
-        );
+        super::super::assert_container_address_invariants(super::super::ContainerAddresses {
+            driver_uri: &driver_uri(DATABASE),
+            unreachable_uri: &unreachable_uri(),
+            published_endpoint: PUBLISHED_ENDPOINT,
+            port: PORT,
+            password: PASSWORD,
+        });
     }
 
     #[test]

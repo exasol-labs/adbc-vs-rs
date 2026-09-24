@@ -396,29 +396,111 @@ fn unsupported_driver_value_fails_named() {
     }
 }
 
+/// The address's path spells the source qualifier, one element per segment, and
+/// an address spelling another number of them is refused at the adapter's own
+/// boundary rather than handed to the driver. Both directions fail: release 0.2
+/// took everything after the first `/` as one database name, so
+/// `mysql://host/shop/extra` silently named the database `shop/extra`, and that
+/// leniency becomes a way to address a different object once a qualifier can be
+/// deeper than one segment.
 #[test]
-fn connection_uri_without_database_errors() {
-    let mut ctx = FakeCtx::new().with_connection(
-        "MY_MYSQL_CONNECTION",
-        ConnectionObject {
-            kind: "mysql".to_string(),
-            address: "mysql://172.28.5.10:3306".to_string(),
-            user: "root".to_string(),
-            password: "secret".to_string(),
-        },
-    );
-    let request = create_request(json!({
-        "DRIVER": "mysql",
-        "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
-        "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
-    }));
+fn connection_uri_not_spelling_the_drivers_qualifier_errors() {
+    for (address, carried) in [
+        ("mysql://172.28.5.10:3306", 0),
+        ("mysql://172.28.5.10:3306/shop/extra", 2),
+    ] {
+        let mut ctx = FakeCtx::new().with_connection(
+            "MY_MYSQL_CONNECTION",
+            ConnectionObject {
+                kind: "mysql".to_string(),
+                address: address.to_string(),
+                user: "root".to_string(),
+                password: "secret".to_string(),
+            },
+        );
+        let request = create_request(json!({
+            "DRIVER": "mysql",
+            "CONNECTION_NAME": "MY_MYSQL_CONNECTION",
+            "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
+        }));
 
-    let error = adapter_call(&mut ctx, &request).expect_err("a database-less address must fail");
+        let Err(error) = adapter_call(&mut ctx, &request) else {
+            panic!("`{address}` must not create a virtual schema");
+        };
 
-    assert!(
-        error.to_string().contains("database"),
-        "the error must state that a database path is needed: {error}"
-    );
+        let message = error.to_string();
+        assert!(
+            message.contains("mysql"),
+            "the error must name the driver whose qualifier was not spelled: {message}"
+        );
+        assert!(
+            message.contains(&format!("spells {carried} qualifier segments")),
+            "the error must state how many segments the address carried: {message}"
+        );
+        assert!(
+            message.contains("with 1"),
+            "the error must state how many segments `mysql` needs: {message}"
+        );
+    }
+}
+
+/// `scan-udf/trino-scan`: a credential an operator wrote into the `CONNECTION`
+/// address itself must reach no error message. Each of the three errors that
+/// name the address back to the querying session is exercised here, because
+/// each one stores the address and `dispatch` hands the message to the session
+/// unredacted — the resolved password is stripped elsewhere and cannot help.
+#[test]
+fn an_address_naming_error_carries_no_userinfo_the_operator_wrote() {
+    const LEAKED_PASSWORD: &str = "s3cret";
+
+    for (address, failing_on) in [
+        (
+            "trino://user:s3cret@172.28.5.12:8443/memory",
+            "too few qualifier segments",
+        ),
+        (
+            "trino://user:s3cret@172.28.5.12:8443/memory/",
+            "a blank qualifier segment",
+        ),
+        (
+            "user:s3cret@172.28.5.12:8443/memory/adbc_vs",
+            "a missing scheme",
+        ),
+    ] {
+        let mut ctx = FakeCtx::new().with_connection(
+            "MY_TRINO_CONNECTION",
+            ConnectionObject {
+                kind: "trino".to_string(),
+                address: address.to_string(),
+                user: "adbc_vs".to_string(),
+                password: "resolved-password".to_string(),
+            },
+        );
+        let request = create_request(json!({
+            "DRIVER": "trino",
+            "CONNECTION_NAME": "MY_TRINO_CONNECTION",
+            "BUCKETFS_CONNECTION": "MY_BUCKETFS_CONNECTION",
+        }));
+
+        let Err(error) = adapter_call(&mut ctx, &request) else {
+            panic!("`{address}` must not create a virtual schema");
+        };
+
+        let message = error.to_string();
+        assert!(
+            !message.contains(LEAKED_PASSWORD),
+            "the error for {failing_on} must not carry the password written into the address: \
+             {message}"
+        );
+        assert!(
+            !message.contains("user:"),
+            "the error for {failing_on} must not carry the userinfo component at all: {message}"
+        );
+        assert!(
+            message.contains("172.28.5.12:8443"),
+            "the error for {failing_on} must still name the host the address reaches: {message}"
+        );
+    }
 }
 
 #[test]

@@ -1008,12 +1008,20 @@ fn render_temporal_literal(keyword: &str, value: &str) -> Result<String, RenderE
     Ok(format!("{keyword} '{value}'"))
 }
 
+/// Qualifies a table by the ordered segments the query model carries for it,
+/// each quoted and joined by a dot.
+///
+/// A qualifier of one segment renders exactly as it did before qualifiers
+/// became lists, which is what leaves MySQL's generated statements
+/// unchanged.
 fn qualified_table(table: &SourceTable) -> String {
-    format!(
-        "{}.{}",
-        quote_identifier(&table.schema),
-        quote_identifier(&table.name)
-    )
+    let mut qualified = String::new();
+    for segment in table.namespace.segments() {
+        qualified.push_str(&quote_identifier(segment));
+        qualified.push('.');
+    }
+    qualified.push_str(&quote_identifier(&table.name));
+    qualified
 }
 
 fn quote_identifier(identifier: &str) -> String {

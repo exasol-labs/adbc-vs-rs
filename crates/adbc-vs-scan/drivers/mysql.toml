@@ -24,6 +24,14 @@ entry_point = "AdbcDriverMysqlInit"
 # adapter against a 0.7 driver, not because of a shared rule.
 version_range = ">=0.6.0, <0.7.0"
 
+# How many name segments a MySQL source qualifier carries. A MySQL database
+# *is* its SQL qualifier, so one name qualifies a table and the `CONNECTION`
+# address's path carries exactly one element. This is the one place the count is
+# stated: the address check and the metadata source both read it, and two
+# modules deciding it apart could disagree without either failing.
+[qualifier]
+segment_count = 1
+
 # What the MySQL dialect advertises to Exasol, and therefore what Exasol
 # delegates to it. Exasol re-applies no delegated fragment, so an entry here
 # that `mysql_dialect.rs` cannot render returns wrong rows rather than an

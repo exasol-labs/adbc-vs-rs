@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::adapter_notes::AdapterNotes;
+use crate::adapter_notes::{AdapterNotes, SourceQualifier};
 use crate::exa_type::ExasolType;
 use crate::mysql_dialect::MySqlDialect;
 use crate::pushdown;
@@ -41,7 +41,10 @@ fn parse(
     select_list: Option<Value>,
     select_list_data_types: Option<Value>,
 ) -> Result<pushdown_query::Query, String> {
-    pushdown_query::parse(&request(select_list, select_list_data_types), DATABASE)
+    pushdown_query::parse(
+        &request(select_list, select_list_data_types),
+        &SourceQualifier::single(DATABASE),
+    )
 }
 
 #[test]
@@ -159,7 +162,7 @@ fn boolean_declared_type_reaches_the_emits_clause() {
         driver_version: Some("v0.6.0".to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
-        database: DATABASE.to_string(),
+        database: SourceQualifier::single(DATABASE),
         omitted: vec![],
     };
 

@@ -27,6 +27,7 @@
 
 use adbc_driver_manager::ManagedConnection;
 
+use crate::adapter_notes::SourceQualifier;
 use crate::metadata::{
     assemble_tables, batch_column, i64_cell, required_i64_cell, required_string_cell, run_query,
     string_cell, CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
@@ -79,8 +80,8 @@ impl PostgresSource {
 }
 
 impl MetadataSource for PostgresSource {
-    fn namespace(&self) -> &str {
-        EXPOSED_NAMESPACE
+    fn namespace(&self) -> SourceQualifier {
+        SourceQualifier::single(EXPOSED_NAMESPACE)
     }
 
     /// Refuses a database whose encoding is not [`REQUIRED_ENCODING`].

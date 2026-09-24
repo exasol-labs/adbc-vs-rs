@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::adapter_notes::SourceQualifier;
 use crate::mysql_dialect::MySqlDialect;
 
 fn request(select_list: Option<Value>) -> Value {
@@ -17,7 +18,7 @@ fn request(select_list: Option<Value>) -> Value {
         driver_version: Some("v0.6.0".to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
-        database: "shop".to_string(),
+        database: SourceQualifier::single("shop"),
         omitted: vec![],
     };
 
@@ -77,7 +78,7 @@ fn a_join_projecting_two_columns_of_the_same_name_gets_distinct_positional_names
         driver_version: Some("v0.6.0".to_string()),
         driver_path: "/buckets/bfsdefault/default/adbc-drivers/libadbc_driver_mysql.so".to_string(),
         connection: "MY_MYSQL_CONNECTION".to_string(),
-        database: "shop".to_string(),
+        database: SourceQualifier::single("shop"),
         omitted: vec![],
     };
 

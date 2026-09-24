@@ -31,7 +31,7 @@ bench = []
 registry-live = []
 
 [dependencies]
-adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.4.0" }
+adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.5.0" }
 adbc_core = "0.23"
 adbc_driver_manager = "0.23"
 arrow = "58"
