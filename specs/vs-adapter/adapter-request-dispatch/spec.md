@@ -8,7 +8,7 @@ Routes each Virtual Schema request Exasol sends to the adapter script, and turns
 - Exasol sends exactly six request types, discriminated by the top-level `type` field: `createVirtualSchema`, `refresh`, `setProperties`, `dropVirtualSchema`, `getCapabilities`, and `pushdown`.
 - Every response echoes the request's `type` value in its own `type` field.
 - The adapter holds no state between calls. All state Exasol must hand back later travels in `schemaMetadata.adapterNotes`, including the driver identity every later request resolves its dialect and metadata source from.
-- Dispatch names no concrete dialect. Release 0.2's `getCapabilities` and `pushdown` arms each named `MySqlDialect` directly, which is why the two could not disagree; with two drivers both arms resolve the dialect through `vs-adapter/driver-selection` from one field instead, which preserves that property while letting the answer differ per virtual schema.
+- Dispatch names no concrete dialect. Both the `getCapabilities` arm and the `pushdown` arm resolve the dialect through `vs-adapter/driver-selection` from one recorded field, which is what keeps the advertised set and the renderer from belonging to different drivers while letting the answer differ per virtual schema.
 - Requests are parsed as untyped JSON. The Virtual Schema wire format carries fields the adapter ignores, and a strict typed deserialization would reject a request over an unrelated field.
 
 ## Scenarios
