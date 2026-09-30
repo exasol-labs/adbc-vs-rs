@@ -4,6 +4,12 @@ use super::*;
 
 const DATABASE: &str = "shop";
 
+/// The one-segment qualifier a MySQL virtual schema records, as the model
+/// carries it.
+fn namespace() -> SourceQualifier {
+    SourceQualifier::single(DATABASE)
+}
+
 /// A single-table `pushdown` request over `orders`, carrying the three
 /// involved columns whose types every assertion below reads back.
 fn request(select_list: Option<Value>) -> Value {
@@ -90,17 +96,17 @@ fn note_item() -> SelectItem {
 }
 
 fn parse_failure(request: &Value) -> String {
-    parse(request, DATABASE).expect_err("the request must fail to parse")
+    parse(request, &namespace()).expect_err("the request must fail to parse")
 }
 
 #[test]
 fn the_from_tree_names_the_source_table_and_the_recorded_database() {
-    let query = parse(&request(None), DATABASE).expect("parse must succeed");
+    let query = parse(&request(None), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.from,
         FromClause::Table(SourceTable {
-            schema: "shop".to_string(),
+            namespace: SourceQualifier::single("shop"),
             name: "orders".to_string(),
             alias: None,
         })
@@ -109,7 +115,7 @@ fn the_from_tree_names_the_source_table_and_the_recorded_database() {
 
 #[test]
 fn an_absent_select_list_projects_every_involved_column_in_declared_order() {
-    let query = parse(&request(None), DATABASE).expect("parse must succeed");
+    let query = parse(&request(None), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.select_list,
@@ -124,14 +130,14 @@ fn a_named_select_list_keeps_the_request_order_and_prunes_the_rest() {
         {"type": "column", "name": "id"},
     ]);
 
-    let query = parse(&request(Some(select_list)), DATABASE).expect("parse must succeed");
+    let query = parse(&request(Some(select_list)), &namespace()).expect("parse must succeed");
 
     assert_eq!(query.select_list, vec![note_item(), id_item()]);
 }
 
 #[test]
 fn an_empty_select_list_projects_one_row_marker_declaring_decimal_one_zero() {
-    let query = parse(&request(Some(json!([]))), DATABASE).expect("parse must succeed");
+    let query = parse(&request(Some(json!([]))), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.select_list,
@@ -363,8 +369,8 @@ fn request_with_filter(filter: Value) -> Value {
     request
 }
 
-fn filter_of(request: &Value, database: &str) -> Predicate {
-    parse(request, database)
+fn filter_of(request: &Value, namespace: &SourceQualifier) -> Predicate {
+    parse(request, namespace)
         .expect("parse must succeed")
         .filter
         .expect("the request carries a filter")
@@ -372,7 +378,7 @@ fn filter_of(request: &Value, database: &str) -> Predicate {
 
 #[test]
 fn an_absent_filter_element_parses_to_no_filter() {
-    let query = parse(&request(None), DATABASE).expect("parse must succeed");
+    let query = parse(&request(None), &namespace()).expect("parse must succeed");
 
     assert_eq!(query.filter, None);
 }
@@ -385,7 +391,7 @@ fn a_swapped_comparison_keeps_its_operand_order() {
         "right": {"type": "column", "name": "id"},
     });
 
-    let predicate = filter_of(&request_with_filter(filter), DATABASE);
+    let predicate = filter_of(&request_with_filter(filter), &namespace());
 
     assert_eq!(
         predicate,
@@ -415,7 +421,7 @@ fn each_comparison_kind_parses_its_own_variant() {
             "right": {"type": "literal_exactnumeric", "value": "2"},
         });
 
-        let predicate = filter_of(&request_with_filter(filter), DATABASE);
+        let predicate = filter_of(&request_with_filter(filter), &namespace());
 
         assert_eq!(
             predicate,
@@ -458,7 +464,7 @@ fn and_or_nest_their_expressions_list_and_not_wraps_a_single_predicate() {
         },
     });
 
-    let predicate = filter_of(&request_with_filter(filter), DATABASE);
+    let predicate = filter_of(&request_with_filter(filter), &namespace());
 
     assert_eq!(
         predicate,
@@ -486,11 +492,11 @@ fn is_null_and_is_not_null_wrap_the_operand_expression() {
         json!({"type": "predicate_is_not_null", "expression": {"type": "column", "name": "note"}});
 
     assert_eq!(
-        filter_of(&request_with_filter(is_null), DATABASE),
+        filter_of(&request_with_filter(is_null), &namespace()),
         Predicate::IsNull(column("note"))
     );
     assert_eq!(
-        filter_of(&request_with_filter(is_not_null), DATABASE),
+        filter_of(&request_with_filter(is_not_null), &namespace()),
         Predicate::IsNotNull(column("note"))
     );
 }
@@ -510,7 +516,7 @@ fn like_carries_its_pattern_and_an_optional_escape_char() {
     });
 
     assert_eq!(
-        filter_of(&request_with_filter(with_escape), DATABASE),
+        filter_of(&request_with_filter(with_escape), &namespace()),
         Predicate::Like(LikePredicate {
             expression: column("note"),
             pattern: Expression::Literal(Literal::String("Wid%".to_string())),
@@ -518,7 +524,7 @@ fn like_carries_its_pattern_and_an_optional_escape_char() {
         })
     );
     assert_eq!(
-        filter_of(&request_with_filter(without_escape), DATABASE),
+        filter_of(&request_with_filter(without_escape), &namespace()),
         Predicate::Like(LikePredicate {
             expression: column("note"),
             pattern: Expression::Literal(Literal::String("Wid%".to_string())),
@@ -536,7 +542,7 @@ fn between_keeps_its_bounds_in_request_order() {
         "right": {"type": "literal_exactnumeric", "value": "9"},
     });
 
-    let predicate = filter_of(&request_with_filter(filter), DATABASE);
+    let predicate = filter_of(&request_with_filter(filter), &namespace());
 
     assert_eq!(
         predicate,
@@ -560,7 +566,7 @@ fn in_constlist_keeps_its_arguments_in_request_order() {
         ],
     });
 
-    let predicate = filter_of(&request_with_filter(filter), DATABASE);
+    let predicate = filter_of(&request_with_filter(filter), &namespace());
 
     assert_eq!(
         predicate,
@@ -607,7 +613,7 @@ fn every_delegated_literal_kind_parses_into_its_matching_variant() {
             "expression": literal.clone(),
         });
 
-        let predicate = filter_of(&request_with_filter(filter), DATABASE);
+        let predicate = filter_of(&request_with_filter(filter), &namespace());
 
         assert_eq!(
             predicate,
@@ -705,7 +711,7 @@ fn aggregation_type_single_group_parses_with_no_group_by_columns() {
     let mut request = request(None);
     request["pushdownRequest"]["aggregationType"] = json!("single_group");
 
-    let query = parse(&request, DATABASE).expect("parse must succeed");
+    let query = parse(&request, &namespace()).expect("parse must succeed");
 
     assert_eq!(query.aggregation, Some(Aggregation::SingleGroup));
 }
@@ -719,7 +725,7 @@ fn aggregation_type_group_by_parses_its_columns_in_request_order() {
         {"type": "column", "name": "id"},
     ]);
 
-    let query = parse(&request, DATABASE).expect("parse must succeed");
+    let query = parse(&request, &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.aggregation,
@@ -745,7 +751,7 @@ fn aggregation_type_group_by_parses_its_columns_in_request_order() {
 
 #[test]
 fn an_absent_aggregation_type_parses_to_no_aggregation() {
-    let query = parse(&request(None), DATABASE).expect("parse must succeed");
+    let query = parse(&request(None), &namespace()).expect("parse must succeed");
 
     assert_eq!(query.aggregation, None);
 }
@@ -816,7 +822,7 @@ fn a_function_aggregate_select_item_parses_its_name_argument_and_distinct_flag()
 
     let query = parse(
         &request_with_typed_select_list(select_list, data_types),
-        DATABASE,
+        &namespace(),
     )
     .expect("parse must succeed");
 
@@ -843,7 +849,7 @@ fn a_function_aggregate_carrying_no_arguments_parses_with_no_argument() {
 
     let query = parse(
         &request_with_typed_select_list(select_list, data_types),
-        DATABASE,
+        &namespace(),
     )
     .expect("parse must succeed");
 
@@ -873,11 +879,14 @@ fn a_function_aggregate_name_is_matched_case_insensitively() {
 
     let lower_query = parse(
         &request_with_typed_select_list(lower, data_types.clone()),
-        DATABASE,
+        &namespace(),
     )
     .expect("parse must succeed");
-    let upper_query = parse(&request_with_typed_select_list(upper, data_types), DATABASE)
-        .expect("parse must succeed");
+    let upper_query = parse(
+        &request_with_typed_select_list(upper, data_types),
+        &namespace(),
+    )
+    .expect("parse must succeed");
 
     assert_eq!(
         lower_query, upper_query,
@@ -945,7 +954,7 @@ fn a_predicate_select_list_entry_parses_into_a_predicate_expression() {
 
     let query = parse(
         &request_with_typed_select_list(select_list, data_types),
-        DATABASE,
+        &namespace(),
     )
     .expect("parse must succeed");
 
@@ -972,7 +981,7 @@ fn a_predicate_select_list_entry_wrapping_an_aggregate_operand_parses_the_aggreg
 
     let query = parse(
         &request_with_typed_select_list(select_list, data_types),
-        DATABASE,
+        &namespace(),
     )
     .expect("parse must succeed");
 
@@ -1020,8 +1029,8 @@ fn every_exasol_type_the_adapter_maps_round_trips_into_a_declared_type() {
     ];
 
     for (data_type, expected) in cases {
-        let query =
-            parse(&involved_column("c", data_type.clone()), DATABASE).expect("parse must succeed");
+        let query = parse(&involved_column("c", data_type.clone()), &namespace())
+            .expect("parse must succeed");
         assert_eq!(
             query.select_list[0].declared_type, expected,
             "{data_type} must declare {expected:?}"
@@ -1097,7 +1106,7 @@ fn a_column_node_carries_the_table_name_it_names() {
     let select_list = json!([{"type": "column", "name": "id", "tableName": "customers"}]);
 
     let query =
-        parse(&join_request("inner", Some(select_list)), DATABASE).expect("parse must succeed");
+        parse(&join_request("inner", Some(select_list)), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.select_list,
@@ -1113,19 +1122,19 @@ fn a_column_node_carries_the_table_name_it_names() {
 
 #[test]
 fn a_join_from_element_parses_its_type_left_right_and_condition() {
-    let query = parse(&join_request("inner", None), DATABASE).expect("parse must succeed");
+    let query = parse(&join_request("inner", None), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.from,
         FromClause::Join(Box::new(Join {
             join_type: "inner".to_string(),
             left: Box::new(FromClause::Table(SourceTable {
-                schema: DATABASE.to_string(),
+                namespace: namespace(),
                 name: "orders".to_string(),
                 alias: Some("o".to_string()),
             })),
             right: Box::new(FromClause::Table(SourceTable {
-                schema: DATABASE.to_string(),
+                namespace: namespace(),
                 name: "customers".to_string(),
                 alias: Some("c".to_string()),
             })),
@@ -1144,7 +1153,8 @@ fn a_join_from_element_parses_its_type_left_right_and_condition() {
 #[test]
 fn every_join_type_spelling_parses_verbatim() {
     for join_type in ["inner", "left_outer", "right_outer", "full_outer", "cross"] {
-        let query = parse(&join_request(join_type, None), DATABASE).expect("parse must succeed");
+        let query =
+            parse(&join_request(join_type, None), &namespace()).expect("parse must succeed");
 
         match query.from {
             FromClause::Join(join) => assert_eq!(join.join_type, join_type),
@@ -1168,7 +1178,7 @@ fn a_nested_join_parses_the_inner_join_as_the_left_element() {
         },
     });
 
-    let query = parse(&request, DATABASE).expect("parse must succeed");
+    let query = parse(&request, &namespace()).expect("parse must succeed");
 
     match query.from {
         FromClause::Join(outer) => match *outer.left {
@@ -1285,7 +1295,7 @@ fn select_list_columns_sharing_a_name_resolve_to_their_own_table() {
     ]);
 
     let query =
-        parse(&join_request("inner", Some(select_list)), DATABASE).expect("parse must succeed");
+        parse(&join_request("inner", Some(select_list)), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.select_list,
@@ -1321,7 +1331,7 @@ fn a_table_name_matching_no_involved_table_falls_back_to_resolving_by_column_nam
     ]);
 
     let query =
-        parse(&join_request("inner", Some(select_list)), DATABASE).expect("parse must succeed");
+        parse(&join_request("inner", Some(select_list)), &namespace()).expect("parse must succeed");
 
     assert_eq!(
         query.select_list,

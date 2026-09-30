@@ -16,6 +16,7 @@ fn query_exercising(driver: Driver, capability: &str) -> (&'static str, Query) {
     match driver {
         Driver::MySql => crate::mysql_dialect::tests::query_exercising(capability),
         Driver::Postgres => crate::postgres_dialect::tests::query_exercising(capability),
+        Driver::Trino => crate::trino_dialect::tests::query_exercising(capability),
     }
 }
 
@@ -118,6 +119,7 @@ const MAIN_CAPABILITY_CONSTANTS: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_TUPLE",
     "JOIN",
     "JOIN_TYPE_INNER",
     "JOIN_TYPE_LEFT_OUTER",
@@ -126,11 +128,18 @@ const MAIN_CAPABILITY_CONSTANTS: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// The `MainCapability` constants every dialect advertises, which is
-/// [`MAIN_CAPABILITY_CONSTANTS`] less the one entry the two targets disagree
-/// on. `JOIN_TYPE_FULL_OUTER` is per dialect rather than shared: PostgreSQL
-/// implements the keyword and MySQL does not, and each dialect's own
-/// exact-set test states which side it is on.
+/// The `MainCapability` floor every dialect this release ships holds, which
+/// is [`MAIN_CAPABILITY_CONSTANTS`] less the entries at least one dialect
+/// withholds. Two entries are per dialect rather than shared, each stated
+/// here by which side of it holds which: `JOIN_TYPE_FULL_OUTER` — PostgreSQL
+/// and Trino advertise it, MySQL withholds it, because MySQL implements no
+/// `FULL OUTER JOIN` and emulating one needs the union rewrite mission.md
+/// places out of scope; and `AGGREGATE_GROUP_BY_TUPLE` — Trino alone
+/// advertises it, because gate 2.3(i) measured a multi-column `GROUP BY`
+/// executing on Trino with no rendering change any dialect's `render_grouping`
+/// needs, and neither MySQL nor PostgreSQL was measured or granted the same
+/// widening. Each dialect's own exact-set test states its full advertised
+/// set, this list only the part every one of them shares.
 const SHARED_MAIN_CAPABILITIES: &[&str] = &[
     "SELECTLIST_PROJECTION",
     "SELECTLIST_EXPRESSIONS",
@@ -235,7 +244,7 @@ const RELEASE_0_2_MYSQL_CAPABILITIES: &[&str] = &[
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
     // `FN_PRED_REGEXP_LIKE`, `FN_PRED_IS_JSON`, `FN_PRED_IS_NOT_JSON`, `LITERAL_BOOL`,
-    // `LITERAL_INTERVAL`, and `LITERAL_TIMESTAMP_UTC` are withheld: neither dialect's
+    // `LITERAL_INTERVAL`, and `LITERAL_TIMESTAMP_UTC` are withheld: no dialect's
     // `render_predicate` or `render_literal` has a rendering path for them.
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
@@ -328,6 +337,64 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
 #[test]
 fn postgres_capability_set_is_exact() {
     assert_set_is(Driver::Postgres, POSTGRES_CAPABILITIES);
+}
+
+/// Every capability the Trino dialect advertises, written out independently
+/// of [`POSTGRES_CAPABILITIES`] for the reason [`RELEASE_0_2_MYSQL_CAPABILITIES`]
+/// is: a set that is generated is a set that can be generated wrong, and
+/// deriving this one from PostgreSQL's would be the second capability list
+/// `vs-adapter/pushdown-dialect` forbids.
+///
+/// `drivers/trino.toml` states the set as PostgreSQL's 35 entries plus
+/// `AGGREGATE_GROUP_BY_TUPLE`, and that is exactly what this list spells out:
+/// every entry [`POSTGRES_CAPABILITIES`] carries, plus the one entry gate
+/// 2.3(i) measured Trino alone able to advertise — a multi-column `GROUP BY`
+/// executes on Trino and needs no rendering change `render_grouping` does not
+/// already have.
+const TRINO_CAPABILITIES: &[&str] = &[
+    "SELECTLIST_PROJECTION",
+    "SELECTLIST_EXPRESSIONS",
+    "FILTER_EXPRESSIONS",
+    "AGGREGATE_SINGLE_GROUP",
+    "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_TUPLE",
+    "FN_AGG_COUNT",
+    "FN_AGG_COUNT_STAR",
+    "FN_AGG_COUNT_DISTINCT",
+    "FN_AGG_MIN",
+    "FN_AGG_MAX",
+    "FN_PRED_AND",
+    "FN_PRED_OR",
+    "FN_PRED_NOT",
+    "FN_PRED_EQUAL",
+    "FN_PRED_NOTEQUAL",
+    "FN_PRED_LESS",
+    "FN_PRED_LESSEQUAL",
+    "FN_PRED_IS_NULL",
+    "FN_PRED_IS_NOT_NULL",
+    "FN_PRED_LIKE",
+    "FN_PRED_LIKE_ESCAPE",
+    "FN_PRED_BETWEEN",
+    "FN_PRED_IN_CONSTLIST",
+    "LITERAL_NULL",
+    "LITERAL_EXACTNUMERIC",
+    "LITERAL_DOUBLE",
+    "LITERAL_STRING",
+    "LITERAL_DATE",
+    "LITERAL_TIMESTAMP",
+    "JOIN",
+    "JOIN_TYPE_INNER",
+    "JOIN_TYPE_LEFT_OUTER",
+    "JOIN_TYPE_RIGHT_OUTER",
+    "JOIN_TYPE_FULL_OUTER",
+    "JOIN_CONDITION_EQUI",
+];
+
+/// `vs-adapter/trino-pushdown`: Trino advertises exactly the set
+/// `drivers/trino.toml` declares, element for element.
+#[test]
+fn trino_capability_set_is_exact() {
+    assert_set_is(Driver::Trino, TRINO_CAPABILITIES);
 }
 
 /// Asserts that `driver` advertises exactly `expected`, compared as sets.

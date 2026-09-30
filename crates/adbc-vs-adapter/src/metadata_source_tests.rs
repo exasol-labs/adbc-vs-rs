@@ -9,6 +9,7 @@ use super::*;
 use crate::exa_type::{self, ExasolType};
 use crate::mysql_source::{self, COLLATION_NAMES_QUERY, SERVER_VERSION_QUERY};
 use crate::postgres_source;
+use crate::trino_source;
 use crate::type_mapping::MappedType;
 
 /// One table assembled out of catalog rows in the shape the named source's own
@@ -24,6 +25,7 @@ fn discovered(driver: Driver) -> DiscoveredTable {
     let mut tables = match driver {
         Driver::MySql => mysql_source::tests::one_mapped_and_one_unmapped_column(),
         Driver::Postgres => postgres_source::tests::one_mapped_and_one_unmapped_column(),
+        Driver::Trino => trino_source::tests::one_mapped_and_one_unmapped_column(),
     };
     tables.pop().expect("the named table is always reported")
 }
@@ -100,6 +102,10 @@ fn precondition(driver: Driver) -> Precondition {
             queries: vec![postgres_source::server_encoding_query()],
             subjects: vec!["server_encoding"],
         },
+        Driver::Trino => Precondition {
+            queries: vec![],
+            subjects: vec![],
+        },
     }
 }
 
@@ -116,6 +122,16 @@ fn precondition(driver: Driver) -> Precondition {
 fn each_sources_precondition_reads_only_its_own_catalog() {
     for driver in Driver::ALL {
         let own = precondition(*driver);
+
+        assert_eq!(
+            own.subjects.is_empty(),
+            own.queries.is_empty(),
+            "`{}` must either name the subjects it reads or run no query at all; Trino \
+             deliberately runs no precondition query, and a source that gained a query without \
+             naming its subject would otherwise pass both loops below vacuously: {:?}",
+            driver.as_str(),
+            own.queries
+        );
 
         for subject in &own.subjects {
             assert!(
@@ -136,6 +152,58 @@ fn each_sources_precondition_reads_only_its_own_catalog() {
                     own.queries
                 );
             }
+        }
+    }
+}
+
+/// A source's namespace is checked against the segment count its own
+/// declaration states, and that declaration is the one owner of the count: the
+/// other reader is the check that a `CONNECTION` address's path spells it. The
+/// two run at different moments — the address check before a connection exists,
+/// this one only once a source has answered — so a technology whose depth the
+/// two disagreed about would have no single point at which the disagreement
+/// showed.
+///
+/// Both directions are driven per identity. The too-shallow one is reachable
+/// only for an identity declaring more than one segment — Trino is the first —
+/// because a qualifier of no segment cannot be built at all, so for a
+/// one-segment identity the shallow case stays the address check's
+/// `carried == 0` case.
+#[test]
+fn a_namespace_disagreeing_with_its_drivers_declared_depth_is_refused_naming_both_counts() {
+    for driver in Driver::ALL {
+        let declared = driver.qualifier_segment_count();
+        let segments = |count: usize| {
+            SourceQualifier::of((0..count).map(|index| format!("n{index}")).collect())
+                .expect("a qualifier of at least one segment is well formed")
+        };
+        let refusal_names_both_counts = |produced: usize| {
+            let error = check_namespace_arity(*driver, &segments(produced))
+                .expect_err("a namespace disagreeing with the declaration must be refused");
+            let message = error.to_string();
+            assert!(
+                matches!(error, MetadataError::NamespaceArity { .. }),
+                "the refusal must be the namespace-arity one: {message}"
+            );
+            assert!(
+                message.contains(driver.as_str())
+                    && message.contains(&declared.to_string())
+                    && message.contains(&produced.to_string()),
+                "the error must name the driver, the depth declared, and the depth produced: \
+                 {message}"
+            );
+        };
+
+        check_namespace_arity(*driver, &segments(declared)).unwrap_or_else(|error| {
+            panic!(
+                "`{}` must accept the depth it declares: {error}",
+                driver.as_str()
+            )
+        });
+
+        refusal_names_both_counts(declared + 1);
+        if declared > 1 {
+            refusal_names_both_counts(declared - 1);
         }
     }
 }

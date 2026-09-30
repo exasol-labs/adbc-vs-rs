@@ -12,7 +12,8 @@
 //!
 //! The facts themselves live beside the code, one `drivers/<name>.toml` per
 //! technology, and `build.rs` turns them into the `&'static` tables this module
-//! includes — the package row and the capability set its dialect advertises.
+//! includes — the package row, the capability set its dialect advertises, and
+//! how many name segments its source qualifier carries.
 //! They are read at build time and never at run time: a technology
 //! adbc-vs did not ship Rust for cannot be reached by dropping a file onto a
 //! cluster, and a malformed declaration fails the build instead of the first
@@ -58,15 +59,19 @@ include!(concat!(env!("OUT_DIR"), "/driver_packages.rs"));
 /// script that reads the files cannot see this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Driver {
+    /// The `DRIVER` property value `mysql`.
     MySql,
+    /// The `DRIVER` property value `postgresql`.
     Postgres,
+    /// The `DRIVER` property value `trino`.
+    Trino,
 }
 
 impl Driver {
     /// Every technology this release can load, in a fixed order so anything
     /// enumerated from it — a supported-value list, a per-driver test arm — is
     /// the same between calls.
-    pub const ALL: &'static [Driver] = &[Driver::MySql, Driver::Postgres];
+    pub const ALL: &'static [Driver] = &[Driver::MySql, Driver::Postgres, Driver::Trino];
 
     /// The canonical, lower-case name of this technology: the value `DRIVER`
     /// takes, the value `adapterNotes.driver` records, and the name of its
@@ -75,6 +80,7 @@ impl Driver {
         match self {
             Driver::MySql => "mysql",
             Driver::Postgres => "postgresql",
+            Driver::Trino => "trino",
         }
     }
 
@@ -83,6 +89,7 @@ impl Driver {
         match self {
             Driver::MySql => &MYSQL_PACKAGE,
             Driver::Postgres => &POSTGRESQL_PACKAGE,
+            Driver::Trino => &TRINO_PACKAGE,
         }
     }
 
@@ -99,6 +106,25 @@ impl Driver {
         match self {
             Driver::MySql => MYSQL_CAPABILITIES,
             Driver::Postgres => POSTGRESQL_CAPABILITIES,
+            Driver::Trino => TRINO_CAPABILITIES,
+        }
+    }
+
+    /// How many name segments this technology's source qualifier carries, as
+    /// its declaration states it.
+    ///
+    /// One owner, two readers, and they answer at moments that cannot check
+    /// each other: `create_schema` reads it to decide whether a `CONNECTION`
+    /// address's path spells the qualifier, before any connection exists, and
+    /// `metadata` reads it to decide whether the source produced one, only
+    /// after a connection does. Two modules deciding how deeply a technology
+    /// nests its tables could disagree, and a statement built on the
+    /// disagreement would name a different object rather than fail.
+    pub fn qualifier_segment_count(self) -> usize {
+        match self {
+            Driver::MySql => MYSQL_QUALIFIER_SEGMENTS,
+            Driver::Postgres => POSTGRESQL_QUALIFIER_SEGMENTS,
+            Driver::Trino => TRINO_QUALIFIER_SEGMENTS,
         }
     }
 

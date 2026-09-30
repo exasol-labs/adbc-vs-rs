@@ -84,6 +84,18 @@ fn every_identity_declares_a_complete_package() {
     }
 }
 
+/// Both technologies this release shipped before the qualifier became a segment
+/// list name a table with one segment, and their generated statements and
+/// recorded notes stay byte-identical only while that is what they declare. A
+/// MySQL database *is* its SQL qualifier; a PostgreSQL virtual schema exposes
+/// the `public` schema alone, and the database its address names selects the
+/// connection target rather than qualifying anything.
+#[test]
+fn mysql_and_postgresql_each_qualify_a_table_with_one_name() {
+    assert_eq!(Driver::MySql.qualifier_segment_count(), 1);
+    assert_eq!(Driver::Postgres.qualifier_segment_count(), 1);
+}
+
 /// The `drivers/` directory is the whole list of technologies this release
 /// ships, so a file with no identity — or an identity with no file — is a
 /// half-added driver rather than a working one.
@@ -128,6 +140,27 @@ fn the_postgresql_row_carries_the_measured_package_facts() {
     assert_eq!(package.version_range, ">=1.12.0, <2.0.0");
 }
 
+/// The Trino package facts were read out of the published `v0.5.3` package's
+/// own `MANIFEST` and exported symbol table rather than derived from the
+/// registry path. Pinned here so a row edited to a plausible-looking spelling
+/// fails a test rather than a download.
+#[test]
+fn the_trino_row_carries_the_measured_package_facts() {
+    let package = Driver::Trino.package();
+
+    assert_eq!(package.registry_path, "trino");
+    assert_eq!(package.library, "libadbc_driver_trino.so");
+    assert_eq!(package.entry_point, "AdbcDriverTrinoInit");
+    assert_eq!(package.version_range, ">=0.5.3, <0.6.0");
+}
+
+/// Trino tables are `catalog.schema.table`, so its qualifier carries two
+/// segments where MySQL's and PostgreSQL's each carry one.
+#[test]
+fn trino_qualifies_a_table_with_two_names() {
+    assert_eq!(Driver::Trino.qualifier_segment_count(), 2);
+}
+
 /// The generated tables are what the checked-in declaration says, field for
 /// field and capability for capability.
 ///
@@ -164,6 +197,14 @@ fn generated_tables_match_the_checked_in_toml() {
                 driver.as_str()
             );
         }
+
+        let segments = driver.qualifier_segment_count();
+        assert!(
+            declaration.contains(&format!("segment_count = {segments}")),
+            "the generated qualifier segment count of `{}` is {segments}, which {path} does not \
+             declare",
+            driver.as_str()
+        );
 
         let capabilities = driver.capabilities();
         assert!(

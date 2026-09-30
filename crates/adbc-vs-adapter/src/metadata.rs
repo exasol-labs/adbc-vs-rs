@@ -26,9 +26,9 @@
 //! pure and tested without a database; only the queries and their Arrow result
 //! parsing touch ADBC.
 //!
-//! This module holds no technology's source. MySQL's is `mysql_source` and
-//! PostgreSQL's is `postgres_source`; each is reached only through
-//! [`source_for`].
+//! This module holds no technology's source. MySQL's is `mysql_source`,
+//! PostgreSQL's is `postgres_source`, and Trino's is `trino_source`; each is
+//! reached only through [`source_for`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -43,9 +43,10 @@ use arrow::array::{
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
-use crate::adapter_notes::Omission;
+use crate::adapter_notes::{Omission, SourceQualifier};
 use crate::mysql_source::MySqlSource;
 use crate::postgres_source::PostgresSource;
+use crate::trino_source::TrinoSource;
 use crate::type_mapping::MappedColumn;
 
 /// A source column that maps, and the Exasol column definition it maps to.
@@ -65,16 +66,25 @@ pub struct DiscoveredTable {
 
 /// Why a source could not serve a virtual schema.
 ///
-/// The three are different outcomes for an operator, so they are different
+/// The four are different outcomes for an operator, so they are different
 /// variants: a catalog read that failed may succeed on the next attempt, a
 /// source the rendering cannot be used against is answered by changing the
-/// server, and a namespace this source cannot query for is answered by
-/// changing the `CONNECTION` address.
+/// server, a namespace this source cannot query for is answered by changing
+/// the `CONNECTION` address, and a namespace of the wrong depth is a defect in
+/// the release rather than in anything an operator supplied.
 #[derive(Debug)]
 pub enum MetadataError {
     Catalog(String),
     UnsupportedSource(String),
-    UnsafeDatabaseName { database: String, character: char },
+    UnsafeDatabaseName {
+        database: String,
+        character: char,
+    },
+    NamespaceArity {
+        driver: &'static str,
+        declared: usize,
+        produced: usize,
+    },
 }
 
 impl MetadataError {
@@ -97,6 +107,17 @@ impl fmt::Display for MetadataError {
                  source connection's address, contains `{character}`, which the \
                  information_schema queries built from it cannot safely quote"
             ),
+            Self::NamespaceArity {
+                driver,
+                declared,
+                produced,
+            } => write!(
+                f,
+                "the `{driver}` metadata source produced a source qualifier of {produced} \
+                 segments, but `{driver}` declares {declared}; the connection address was \
+                 checked against that declaration, so a statement rendered from this qualifier \
+                 would name a different object than the address selected"
+            ),
         }
     }
 }
@@ -112,11 +133,18 @@ pub trait MetadataSource {
     /// source's own business: MySQL's namespace is the database the connection
     /// address names, because a MySQL database *is* its SQL qualifier, while
     /// PostgreSQL's is the `public` schema, because a PostgreSQL database is
-    /// not one. Answering it here rather than at the call site is what keeps
+    /// not one, and Trino's is the catalog and the schema its `CONNECTION`
+    /// address's path spells, because Trino qualifies a table with both and
+    /// neither has a default. Answering it here rather than at the call site is what keeps
     /// that difference inside the technology that has it — the schema
     /// assembles the same response whichever answer it gets, and the dialect
     /// qualifies its tables with whatever was recorded.
-    fn namespace(&self) -> &str;
+    ///
+    /// How many segments the answer carries is that technology's declared count
+    /// rather than this source's choice, which is why [`source_for`] checks it:
+    /// a source answering with one segment where its dialect qualifies with two
+    /// would generate a statement addressing another object.
+    fn namespace(&self) -> SourceQualifier;
 
     /// Refuses a source this release's rendering cannot be used against.
     ///
@@ -140,23 +168,58 @@ pub trait MetadataSource {
 /// The metadata source that reads `driver`'s catalog, over an already-open
 /// ADBC connection to it.
 ///
-/// `address_database` is the database component of the `CONNECTION` object's
-/// address. Whether that is also the namespace the virtual schema exposes is
-/// the source's own answer, not this function's: MySQL keeps it, PostgreSQL
-/// exposes `public` and uses the database only as the connection target.
+/// `address` is the qualifier the `CONNECTION` object's address path spells,
+/// already checked against `driver`'s declared segment count. Whether it is
+/// also the namespace the virtual schema exposes is the source's own answer,
+/// not this function's: MySQL keeps it, PostgreSQL exposes `public` and uses
+/// the address only as the connection target.
 ///
 /// One table, matched exhaustively, so a technology added to the identity has
 /// to bring a source that answers its own catalog — no other implementation
 /// can, and a fallback would answer one catalog's questions against another.
+///
+/// The arity guard runs twice, on two different values. It runs on `address`
+/// before the match, because an arm reads the address's segments positionally
+/// and a qualifier shallower than the declaration would index past its end —
+/// inside a UDF that is a "VM crashed" with no subject, the least diagnosable
+/// outcome this codebase has. It runs again on the constructed source's own
+/// namespace, so nothing downstream ever holds a source whose qualifier
+/// disagrees with the declaration.
 pub fn source_for(
     driver: Driver,
     connection: ManagedConnection,
-    address_database: &str,
-) -> Box<dyn MetadataSource> {
-    match driver {
-        Driver::MySql => Box::new(MySqlSource::new(connection, address_database)),
+    address: &SourceQualifier,
+) -> Result<Box<dyn MetadataSource>, MetadataError> {
+    check_namespace_arity(driver, address)?;
+    let source: Box<dyn MetadataSource> = match driver {
+        Driver::MySql => Box::new(MySqlSource::new(connection, address.first())),
         Driver::Postgres => Box::new(PostgresSource::new(connection)),
+        Driver::Trino => Box::new(TrinoSource::new(connection, address.clone())),
+    };
+    check_namespace_arity(driver, &source.namespace())?;
+    Ok(source)
+}
+
+/// Refuses a source whose namespace carries a different number of segments than
+/// its technology declares.
+///
+/// The declared count has one owner, and this is its second reader: the first
+/// is the check that a `CONNECTION` address's path spells that many segments.
+/// Both read the same value because the address check runs before a connection
+/// exists and the source answers only once one does, and two modules deciding
+/// how deeply a technology nests its tables could disagree without either of
+/// them failing.
+fn check_namespace_arity(driver: Driver, namespace: &SourceQualifier) -> Result<(), MetadataError> {
+    let declared = driver.qualifier_segment_count();
+    let produced = namespace.segments().len();
+    if produced == declared {
+        return Ok(());
     }
+    Err(MetadataError::NamespaceArity {
+        driver: driver.as_str(),
+        declared,
+        produced,
+    })
 }
 
 /// The four things [`assemble_tables`] reads off a catalog row, whichever

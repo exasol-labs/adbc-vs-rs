@@ -215,8 +215,10 @@ fn policy_and_container_jobs_call_make() {
     for (name, target) in [
         ("integration-tests", "test-it"),
         ("integration-tests-postgres", "test-it-postgres"),
+        ("integration-tests-trino", "test-it-trino"),
         ("e2e", "test-e2e"),
         ("e2e-postgres", "test-e2e-postgres"),
+        ("e2e-trino", "test-e2e-trino"),
     ] {
         let invoked = make_targets_invoked(job(&workflow, name));
         assert!(
@@ -229,8 +231,10 @@ fn policy_and_container_jobs_call_make() {
         for (other, other_target) in [
             ("integration-tests", "test-it"),
             ("integration-tests-postgres", "test-it-postgres"),
+            ("integration-tests-trino", "test-it-trino"),
             ("e2e", "test-e2e"),
             ("e2e-postgres", "test-e2e-postgres"),
+            ("e2e-trino", "test-e2e-trino"),
         ] {
             if other == name {
                 continue;
@@ -308,8 +312,10 @@ fn release_job_is_gated_and_packages_artifacts() {
         "deny",
         "integration-tests",
         "integration-tests-postgres",
+        "integration-tests-trino",
         "e2e",
         "e2e-postgres",
+        "e2e-trino",
     ] {
         assert!(
             needs.iter().any(|n| n.as_str() == Some(required)),
@@ -360,7 +366,7 @@ fn release_job_is_gated_and_packages_artifacts() {
 fn every_e2e_job_relaxes_apparmor_and_frees_disk() {
     let workflow = workflow();
 
-    for name in ["e2e", "e2e-postgres"] {
+    for name in ["e2e", "e2e-postgres", "e2e-trino"] {
         let e2e = job(&workflow, name);
         let runs = step_run_strings(e2e);
 

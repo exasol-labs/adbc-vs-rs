@@ -24,6 +24,14 @@ entry_point = "AdbcDriverPostgresqlInit"
 # that have nothing to do with this one.
 version_range = ">=1.12.0, <2.0.0"
 
+# How many name segments a PostgreSQL source qualifier carries. A virtual
+# schema exposes the `public` schema alone, and a schema name qualifies a table
+# by itself, so one name does it — the database the address names selects the
+# connection target rather than qualifying anything. Stated once here, and read
+# by both the address check and the metadata source.
+[qualifier]
+segment_count = 1
+
 # What the PostgreSQL dialect advertises to Exasol, and therefore what Exasol
 # delegates to it. Exasol re-applies no delegated fragment, so an entry here
 # that `postgres_dialect.rs` cannot render returns wrong rows rather than an
