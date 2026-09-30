@@ -726,18 +726,24 @@ fn two_drivers_install_distinct_libraries_and_each_query_reaches_its_own_source(
     );
 }
 
-/// Enumerated from [`Driver::ALL`] rather than hand-listed, so a third driver
-/// this release ships inherits the assertion the moment it joins the identity.
-/// Replaces no earlier scenario: this file never carried a PostgreSQL-only
-/// "driver value is accepted" test.
+/// Enumerated from [`Driver::ALL`] rather than hand-listed, so a driver this
+/// stack actually provisions inherits the assertion the moment it joins the
+/// identity. Replaces no earlier scenario: this file never carried a
+/// PostgreSQL-only "driver value is accepted" test.
+///
+/// Trino is skipped rather than matched: this binary's stack provisions no
+/// Trino connection, and `e2e_trino_test.rs` carries its own version of this
+/// assertion, scoped to the two drivers its own stack provisions (Trino and
+/// MySQL), the same way this one is scoped to PostgreSQL and MySQL.
 #[test]
-fn every_supported_driver_creates_a_virtual_schema() {
+fn every_driver_this_stack_provisions_creates_a_virtual_schema() {
     let stack = stack::shared();
 
     for driver in Driver::ALL {
         let connection = match driver {
             Driver::Postgres => stack::POSTGRES_CONNECTION,
             Driver::MySql => stack::MYSQL_CONNECTION,
+            Driver::Trino => continue,
         };
         let schema_name = format!("EVERYDRIVER_{}", driver.as_str().to_ascii_uppercase());
 

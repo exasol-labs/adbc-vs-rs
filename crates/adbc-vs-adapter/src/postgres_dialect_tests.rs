@@ -1,6 +1,11 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::adapter_notes::SourceQualifier;
+use crate::dialect_test_fixtures as fixtures;
+use crate::dialect_test_fixtures::{
+    column, equal, filtered_request, less, numeric_literal, orders_columns, request, string_literal,
+};
 use crate::exa_type::ExasolType;
 use crate::pushdown_query;
 
@@ -9,41 +14,17 @@ use crate::pushdown_query;
 /// address names.
 const NAMESPACE: &str = "public";
 
-/// A single-table `pushdown` request over `orders`, rendered through the
-/// parser so each assertion below covers the request shape Exasol sends
-/// rather than a hand-built model.
-fn request(columns: Value, select_list: Option<Value>) -> Value {
-    let mut pushdown_request = json!({
-        "type": "select",
-        "from": {"type": "table", "name": "orders"},
-    });
-    if let Some(select_list) = select_list {
-        pushdown_request["selectList"] = select_list;
-    }
-
-    json!({
-        "type": "pushdown",
-        "pushdownRequest": pushdown_request,
-        "involvedTables": [{"name": "orders", "columns": columns}],
-    })
-}
-
-fn orders_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "total", "dataType": {"type": "DECIMAL", "precision": 12, "scale": 4}},
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
+/// The namespace a PostgreSQL virtual schema records and every rendered table
+/// is qualified by.
+fn namespace() -> SourceQualifier {
+    SourceQualifier::single(NAMESPACE)
 }
 
 /// The PostgreSQL statement `request` renders to, parsed first so every
 /// assertion covers the request shape Exasol sends rather than a hand-built
 /// model.
 fn render_statement(request: &Value) -> String {
-    let query = pushdown_query::parse(request, NAMESPACE).expect("the request must parse");
-    PostgresDialect
-        .render(&query)
-        .expect("the query must render to PostgreSQL")
+    fixtures::render_statement(&PostgresDialect, &namespace(), request)
 }
 
 fn render(columns: Value, select_list: Option<Value>) -> String {
@@ -53,42 +34,13 @@ fn render(columns: Value, select_list: Option<Value>) -> String {
 /// The error rendering `request` fails with, for a request the parser accepts
 /// and this dialect has no form for.
 fn render_error(request: &Value) -> String {
-    let query = pushdown_query::parse(request, NAMESPACE).expect("the request must parse");
-    PostgresDialect
-        .render(&query)
-        .expect_err("the query must fail to render")
-        .to_string()
-}
-
-fn column(name: &str) -> Value {
-    json!({"type": "column", "name": name})
-}
-
-/// A `pushdown` request carrying a `filter` element, projecting one column so
-/// every assertion below reads the `WHERE` clause rather than the projection
-/// around it.
-fn filtered_request(columns: Value, filter: Value) -> Value {
-    let projected = columns[0]["name"].clone();
-    json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": {"type": "table", "name": "orders"},
-            "selectList": [{"type": "column", "name": projected}],
-            "filter": filter,
-        },
-        "involvedTables": [{"name": "orders", "columns": columns}],
-    })
+    fixtures::render_error(&PostgresDialect, &namespace(), request)
 }
 
 /// The `WHERE` clause `filter` renders to over `columns`, parsed from a
 /// request first so each assertion covers the shape Exasol sends.
 fn where_clause_over(columns: Value, filter: Value) -> String {
-    let sql = render_statement(&filtered_request(columns, filter));
-    let (_, clause) = sql
-        .split_once(" WHERE ")
-        .unwrap_or_else(|| panic!("the rendered statement must carry a WHERE clause: {sql}"));
-    clause.to_string()
+    fixtures::where_clause_over(&PostgresDialect, &namespace(), columns, filter)
 }
 
 /// The `WHERE` clause `filter` renders to over the `orders` columns.
@@ -100,24 +52,6 @@ fn where_clause(filter: Value) -> String {
 /// and PostgreSQL has no form for.
 fn filter_render_error(filter: Value) -> String {
     render_error(&filtered_request(orders_columns(), filter))
-}
-
-fn numeric_literal(value: &str) -> Value {
-    json!({"type": "literal_exactnumeric", "value": value})
-}
-
-fn string_literal(value: &str) -> Value {
-    json!({"type": "literal_string", "value": value})
-}
-
-fn equal(left: Value, right: Value) -> Value {
-    json!({"type": "predicate_equal", "left": left, "right": right})
-}
-
-/// A `predicate_less`, the node Exasol normalizes `>` into with the operands
-/// swapped, so a literal reaches `left` and the column `right`.
-fn less(left: Value, right: Value) -> Value {
-    json!({"type": "predicate_less", "left": left, "right": right})
 }
 
 /// The columns whose declared types the collation rule reads: one character,
@@ -758,7 +692,7 @@ fn unsupported_join_type_named_per_dialect() {
                     orders_to_customers("full_outer"),
                     json!([joined_column("id", "orders")]),
                 ),
-                NAMESPACE,
+                &SourceQualifier::single(NAMESPACE),
             )
             .expect("the request must parse"),
         )
@@ -1392,7 +1326,7 @@ fn order_by_and_limit_elements_fail_named() {
         let mut request = request(orders_columns(), Some(json!([column("id")])));
         request["pushdownRequest"][element] = value;
 
-        let error = pushdown_query::parse(&request, NAMESPACE)
+        let error = pushdown_query::parse(&request, &SourceQualifier::single(NAMESPACE))
             .expect_err("a request carrying an undelegated element must fail");
 
         assert!(
@@ -1451,7 +1385,7 @@ fn a_query_projecting_nothing_fails_rather_than_rendering_an_empty_projection() 
         filter: None,
         aggregation: None,
         from: FromClause::Table(SourceTable {
-            schema: NAMESPACE.to_string(),
+            namespace: SourceQualifier::single(NAMESPACE),
             name: "orders".to_string(),
             alias: None,
         }),
@@ -1484,7 +1418,7 @@ fn a_literal_select_list_entry_renders_through_the_literal_renderer() {
         filter: None,
         aggregation: None,
         from: FromClause::Table(SourceTable {
-            schema: NAMESPACE.to_string(),
+            namespace: SourceQualifier::single(NAMESPACE),
             name: "orders".to_string(),
             alias: None,
         }),
@@ -1514,7 +1448,8 @@ fn a_request_renders_byte_identically_on_every_call() {
     request["pushdownRequest"]["aggregationType"] = json!("group_by");
     request["pushdownRequest"]["groupBy"] = json!([joined_column("name", "customers")]);
 
-    let query = pushdown_query::parse(&request, NAMESPACE).expect("the request must parse");
+    let query = pushdown_query::parse(&request, &SourceQualifier::single(NAMESPACE))
+        .expect("the request must parse");
     let first = PostgresDialect.render(&query).expect("render must succeed");
     let second = PostgresDialect.render(&query).expect("render must succeed");
 
@@ -1537,161 +1472,25 @@ fn a_request_renders_byte_identically_on_every_call() {
 /// the statement its own capability contributes, travelling in the same arm as
 /// the fixture it is true of.
 pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
-    fn decimal_column() -> pushdown_query::ColumnRef {
-        pushdown_query::ColumnRef {
-            name: "id".to_string(),
-            declared_type: ExasolType::Decimal {
-                precision: 19,
-                scale: 0,
-            },
-            table_name: None,
-            table_alias: None,
-        }
-    }
-
-    fn varchar_column() -> pushdown_query::ColumnRef {
-        pushdown_query::ColumnRef {
-            name: "note".to_string(),
-            declared_type: ExasolType::Varchar { size: 100 },
-            table_name: None,
-            table_alias: None,
-        }
-    }
-
-    fn date_column() -> pushdown_query::ColumnRef {
-        pushdown_query::ColumnRef {
-            name: "shipped".to_string(),
-            declared_type: ExasolType::Date,
-            table_name: None,
-            table_alias: None,
-        }
-    }
-
-    fn timestamp_column() -> pushdown_query::ColumnRef {
-        pushdown_query::ColumnRef {
-            name: "logged".to_string(),
-            declared_type: ExasolType::Timestamp,
-            table_name: None,
-            table_alias: None,
-        }
-    }
-
-    fn select_list() -> Vec<SelectItem> {
-        let column = decimal_column();
-        vec![SelectItem {
-            expression: Expression::Column(column.clone()),
-            declared_type: column.declared_type,
-        }]
-    }
+    use fixtures::{
+        aggregate_call, aggregate_item, count_star, date_column, decimal_column, id_equals,
+        numeric, select_list, timestamp_column, varchar_column,
+    };
 
     fn from() -> FromClause {
-        FromClause::Table(SourceTable {
-            schema: NAMESPACE.to_string(),
-            name: "orders".to_string(),
-            alias: None,
-        })
+        fixtures::from(&namespace())
     }
 
     fn filtered(filter: Predicate) -> Query {
-        Query {
-            select_list: select_list(),
-            filter: Some(filter),
-            aggregation: None,
-            from: from(),
-        }
-    }
-
-    fn id_equals(right: Expression) -> Predicate {
-        Predicate::Equal(Comparison {
-            left: Expression::Column(decimal_column()),
-            right,
-        })
-    }
-
-    fn numeric(value: &str) -> Expression {
-        Expression::Literal(Literal::ExactNumeric(value.to_string()))
+        fixtures::filtered(&namespace(), filter)
     }
 
     fn aggregated(select_list: Vec<SelectItem>) -> Query {
-        Query {
-            select_list,
-            filter: None,
-            aggregation: Some(pushdown_query::Aggregation::SingleGroup),
-            from: from(),
-        }
-    }
-
-    fn aggregate_item(call: pushdown_query::AggregateCall) -> SelectItem {
-        SelectItem {
-            expression: Expression::Aggregate(call),
-            declared_type: ExasolType::Decimal {
-                precision: 18,
-                scale: 0,
-            },
-        }
-    }
-
-    fn count_star() -> pushdown_query::AggregateCall {
-        pushdown_query::AggregateCall {
-            function: "COUNT".to_string(),
-            argument: None,
-            distinct: false,
-        }
-    }
-
-    fn aggregate_call(
-        function: &str,
-        argument: Expression,
-        distinct: bool,
-    ) -> pushdown_query::AggregateCall {
-        pushdown_query::AggregateCall {
-            function: function.to_string(),
-            argument: Some(Box::new(argument)),
-            distinct,
-        }
-    }
-
-    fn joined_column_ref(name: &str, table: &str) -> pushdown_query::ColumnRef {
-        pushdown_query::ColumnRef {
-            name: name.to_string(),
-            declared_type: ExasolType::Decimal {
-                precision: 19,
-                scale: 0,
-            },
-            table_name: Some(table.to_string()),
-            table_alias: None,
-        }
+        fixtures::aggregated(&namespace(), select_list)
     }
 
     fn joined_query(join_type: &str) -> Query {
-        Query {
-            select_list: vec![SelectItem {
-                expression: Expression::Column(joined_column_ref("id", "orders")),
-                declared_type: ExasolType::Decimal {
-                    precision: 19,
-                    scale: 0,
-                },
-            }],
-            filter: None,
-            aggregation: None,
-            from: FromClause::Join(Box::new(pushdown_query::Join {
-                join_type: join_type.to_string(),
-                left: Box::new(FromClause::Table(SourceTable {
-                    schema: NAMESPACE.to_string(),
-                    name: "orders".to_string(),
-                    alias: None,
-                })),
-                right: Box::new(FromClause::Table(SourceTable {
-                    schema: NAMESPACE.to_string(),
-                    name: "customers".to_string(),
-                    alias: None,
-                })),
-                condition: Predicate::Equal(Comparison {
-                    left: Expression::Column(joined_column_ref("customer_id", "orders")),
-                    right: Expression::Column(joined_column_ref("id", "customers")),
-                }),
-            })),
-        }
+        fixtures::joined_query(&namespace(), join_type)
     }
 
     match capability {

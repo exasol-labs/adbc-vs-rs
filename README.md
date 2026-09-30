@@ -24,7 +24,7 @@ CREATE VIRTUAL SCHEMA MYSQLVS USING ADBC_VS.ADBC_ADAPTER WITH
 SELECT * FROM MYSQLVS.customers;
 ```
 
-`CONNECTION_NAME` names an Exasol `CONNECTION` object whose address is a `mysql://host:port/database` URI, carrying the source user and password. Self-installing the driver needs a BucketFS write credential, resolved through one precedence chain. The adapter first tries the reserved `CONNECTION` object `ADBC_VS_BUCKETFS` — no property required. Setting `BUCKETFS_CONNECTION` overrides that reserved connection and never falls back to it, or to anything else, on failure. Below both routes sits a pre-placed library at `adbc-drivers/<driver>/supplied/<library>` on the BucketFS mount, reached on either of two conditions: the reserved connection does not resolve at all, or it resolves but the driver registry's index is unreachable through it. An operator who kept `ADBC_VS_BUCKETFS` but has no HTTPS egress meets the second condition, so pre-placing the library there needs no property either.
+`CONNECTION_NAME` names an Exasol `CONNECTION` object whose address is a `mysql://host:port/database` URI, carrying the source user and password. A Trino source uses the address form `trino://host[:port]/<catalog>/<schema>[?parameters]` instead, with the source user and password in the `CONNECTION` object's own fields rather than in the address — no credential, encoded or otherwise, belongs in a Trino `CONNECTION`'s URI. Self-installing the driver needs a BucketFS write credential, resolved through one precedence chain. The adapter first tries the reserved `CONNECTION` object `ADBC_VS_BUCKETFS` — no property required. Setting `BUCKETFS_CONNECTION` overrides that reserved connection and never falls back to it, or to anything else, on failure. Below both routes sits a pre-placed library at `adbc-drivers/<driver>/supplied/<library>` on the BucketFS mount, reached on either of two conditions: the reserved connection does not resolve at all, or it resolves but the driver registry's index is unreachable through it. An operator who kept `ADBC_VS_BUCKETFS` but has no HTTPS egress meets the second condition, so pre-placing the library there needs no property either.
 
 ---
 
@@ -45,6 +45,7 @@ ADBC-backed databases supported today, and the v1 driver set this project is wor
 
 - [x] MySQL
 - [x] PostgreSQL
+- [x] Trino
 - [ ] Snowflake
 - [ ] Databricks
 - [ ] DuckDB

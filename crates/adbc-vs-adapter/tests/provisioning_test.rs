@@ -571,8 +571,15 @@ fn only_the_manifest_named_file_is_uploaded_whatever_the_license_file_is_spelled
     );
 }
 
+/// Two claims, proved in one run because they need different fixtures. The
+/// install assertions need the stub registry and the mount, because they prove
+/// two drivers actually install side by side at their own paths. The
+/// pairwise-distinctness claim needs neither: it is a property of every driver
+/// identity this release declares, not only the two just provisioned, and a
+/// stack carrying two drivers cannot observe whether a third would collide
+/// with one of them.
 #[test]
-fn two_drivers_install_side_by_side_at_distinct_driver_and_version_segments() {
+fn two_drivers_install_side_by_side_and_every_driver_identity_is_pairwise_distinct() {
     let mount = MountDirectory::new();
     let registry = StubServer::serving(routes(&[
         (
@@ -632,6 +639,37 @@ fn two_drivers_install_side_by_side_at_distinct_driver_and_version_segments() {
         ],
         "each driver is written once, at its own path; neither driver's presence check is \
          satisfied by the other's file, and neither write overwrites the other's"
+    );
+
+    let libraries: Vec<&str> = Driver::ALL
+        .iter()
+        .map(|driver| driver.package().library)
+        .collect();
+    let mut distinct_libraries = libraries.clone();
+    distinct_libraries.sort_unstable();
+    distinct_libraries.dedup();
+    assert_eq!(
+        distinct_libraries.len(),
+        libraries.len(),
+        "every supported driver's shared-library filename must be pairwise distinct, or a \
+         shared value would make each driver's presence check answer for the other: \
+         {libraries:?}"
+    );
+
+    const A_SHARED_VERSION: &str = "0.0.0";
+    let install_paths: Vec<PathBuf> = Driver::ALL
+        .iter()
+        .map(|driver| mount.driver_path_for(*driver, A_SHARED_VERSION))
+        .collect();
+    let mut distinct_paths = install_paths.clone();
+    distinct_paths.sort_unstable();
+    distinct_paths.dedup();
+    assert_eq!(
+        distinct_paths.len(),
+        install_paths.len(),
+        "every supported driver's BucketFS install path must be pairwise distinct across \
+         every driver this release supports, not only the two provisioned above: \
+         {install_paths:?}"
     );
 }
 
