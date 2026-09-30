@@ -25,7 +25,7 @@ HOST_GID := $(shell id -g)
 # version MUST track exasol-udf-sdk's own version exactly (see
 # crates/adbc-vs-adapter/Cargo.toml and crates/adbc-vs-adapter/tests/common's
 # SLC_VERSION) or a correct .so reports a false mismatch.
-SLC_VERSION := 0.23.0
+SLC_VERSION := 0.23.1
 
 # Installed cargo subcommand binaries live under the same registry volume
 # (its own subdirectory, since only .../registry is mounted, not the whole

@@ -36,7 +36,7 @@ adbc_core = "0.23"
 adbc_driver_manager = "0.23"
 arrow = "58"
 exasol-udf-macros = "0.23.0"
-exasol-udf-sdk = { version = "0.23.0", features = ["emit-arrow"] }
+exasol-udf-sdk = { version = "0.23.1", features = ["emit-arrow"] }
 flate2 = "1.1.9"
 # rustls with the bundled webpki root store and the ring provider: the UDF
 # sandbox guarantees no CA bundle, and ring needs no cmake in the SLC build
