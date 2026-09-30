@@ -19,7 +19,7 @@ pub const LANGUAGE_ALIAS: &str = "RUST";
 /// A UDF shared object only loads into the container built from the same
 /// `exasol-udf-sdk`, so this MUST stay equal to the `exasol-udf-sdk` version
 /// the crates depend on.
-pub const SLC_VERSION: &str = "0.23.0";
+pub const SLC_VERSION: &str = "0.23.1";
 
 /// Where the tarball lands in the bucket, and — once BucketFS extracts it —
 /// the directory the alias points at.
