@@ -43,7 +43,7 @@ See [`specs/mission.md`](specs/mission.md) for the full problem statement, archi
 
 ADBC-backed databases supported today, and the v1 driver set this project is working toward:
 
-- [x] MySQL
+- [x] MySQL (8.0.17 or newer). MariaDB is not a supported source: the upstream MySQL ADBC driver connects to it, but no adbc-vs test tier verifies pushdown results against it. See [`specs/vs-adapter/mysql-type-mapping`](specs/vs-adapter/mysql-type-mapping/spec.md) for which MariaDB versions the source check refuses.
 - [x] PostgreSQL
 - [x] Trino
 - [ ] Snowflake

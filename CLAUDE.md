@@ -66,6 +66,15 @@ Rust Exasol Virtual Schema over ADBC sources. Two crates (`adbc-vs-adapter`, `ad
 - Stack lifecycle: `make stack-up-mysql` (MySQL alone, `compose up -d --wait`), `make stack-up-postgres` (PostgreSQL alone, same pattern), `make stack-up-trino` (Trino alone — generates a gitignored self-signed keystore on first run, then a bounded readiness poll running the authenticated seed against `docker/trino/init.sql`, since the image's own `HEALTHCHECK` cannot be trusted once `PASSWORD` authentication is on), `make stack-up-exasol` (Exasol alone, the same bounded `exapump sql` poll `test-e2e` always used, now its own target), `make stack-up` (depends on all four of the above), `make stack-down` (removes every service). Never a fixed `sleep`.
 - `docker/postgres/init.sql` seeds the PostgreSQL fixture only against a fresh volume — Postgres' own entrypoint skips it on a container reused from before the change. Editing that file requires `docker compose rm -sfv postgres && make stack-up-postgres` to apply it. `SEEDED_OBJECTS` in `crates/adbc-vs-adapter/tests/common/postgres.rs` is what turns a stale container into a named failure rather than a mystery one: `Postgres::check_fixture` asserts every name in that list exists before a test runs.
 
+## MariaDB verification (manual, 2026-10-02)
+
+- No Make target, no CI job, no committed test. MariaDB is not a supported source; `specs/vs-adapter/mysql-type-mapping` states what the source check does with it. Re-run this by hand before changing that status.
+- Upstream claim: `adbc-drivers/mysql` (`go/docs/mysql.md`, "MySQL/MariaDB Driver") documents MariaDB support, and its own CI runs `mariadb:12.2`.
+- Procedure: `docker run` `mariadb:12.2` on `127.0.0.1:3307` with the `MARIADB_*` equivalents of the compose `mysql` service's environment, seeded with `docker/mysql/init.sql` unchanged (no syntax adaptation needed). Run a temporary, uncommitted copy of `crates/adbc-vs-scan/tests/mysql_it_test.rs` whose URI points at port 3307, plus probes for every fixture column, `DATETIME(6)`, `UNSIGNED` literals, `COLLATE` fragments, and `MySqlSource::check_source` + `discover_tables`. Remove the container afterwards.
+- Result on MariaDB 12.2.2 with driver 0.6.1 (resolved from `>=0.6.0, <0.7.0`): all six `mysql_it_test.rs` tests pass, every probe passes, and the results match a `mysql:8.4` (8.4.11) baseline. `check_source` returns `Ok`, and discovery maps all eight fixture columns as on MySQL.
+- MariaDB 11.4.13 and 11.8.9 list both required collations. MariaDB 10.11.19 lists neither: `check_source` fails with "missing collation `utf8mb4_0900_as_cs`", and a delegated `COLLATE utf8mb4_0900_as_cs` fails with error 1273.
+- Not verified: the E2E tier (pushdown and collation differentials through Exasol) against any MariaDB.
+
 ## E2E testing
 
 - `make test-e2e` → prereqs `cross-udf-build` + `stack-up`, then `cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_mysql_test -- --test-threads=1`.
