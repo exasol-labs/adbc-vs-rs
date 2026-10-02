@@ -102,9 +102,12 @@ services:
       TRINO_HOSTILE_PASSWORD: "${TRINO_HOSTILE_PASSWORD:-p@ss/w:o?r#d&x% y}"
     volumes:
       # Individual files only, never the whole /etc/trino: the stock image's
-      # `memory`/`jmx`/`tpch`/`tpcds` catalogs and node.properties are left
-      # exactly as the image ships them.
+      # `jmx`/`tpch`/`tpcds` catalogs and node.properties are left exactly as
+      # the image ships them. `memory.properties` is the one catalog file
+      # replaced, only to raise `memory.max-data-per-node` above its 128MB
+      # default for the benchmark's resident tiers (see that file).
       - ./docker/trino/config.properties:/etc/trino/config.properties:ro
+      - ./docker/trino/memory.properties:/etc/trino/catalog/memory.properties:ro
       - ./docker/trino/password-authenticator.properties:/etc/trino/password-authenticator.properties:ro
       - ./docker/trino/password.db:/etc/trino/password.db:ro
       - ./docker/trino/init.sql:/etc/trino/init.sql:ro
