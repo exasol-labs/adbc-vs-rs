@@ -555,23 +555,142 @@ fn test_e2e_postgres_depends_on_cross_udf_build_and_stack_up() {
     );
 }
 
+const BENCH_SOURCES: [&str; 3] = ["mysql", "postgres", "trino"];
+
+/// CLAUDE.md ("Benchmarking"): each source's bench depends on Exasol plus
+/// only its own source, and runs only its own binary.
 #[test]
-fn bench_target_has_expected_prerequisites_and_recipe() {
+fn each_bench_source_target_has_expected_prerequisites_and_recipe() {
+    let text = makefile_text();
+    for source in BENCH_SOURCES {
+        let target = format!("bench-{source}");
+        let bench = rule(&text, &target);
+        assert_eq!(
+            bench.prerequisites,
+            vec![
+                "cross-udf-build".to_string(),
+                "stack-up-exasol".to_string(),
+                format!("stack-up-{source}"),
+            ],
+            "{target} must depend on exactly the stack its own binary queries"
+        );
+        assert!(
+            bench.recipe.contains(&format!(
+                "cargo test -p adbc-vs-adapter --features bench --test bench_{source}_test"
+            )),
+            "{target} must run bench_{source}_test: {}",
+            bench.recipe
+        );
+        for other in BENCH_SOURCES.iter().filter(|other| **other != source) {
+            assert!(
+                !bench.recipe.contains(&format!("bench_{other}_test")),
+                "{target} must run only its own binary: {}",
+                bench.recipe
+            );
+        }
+        assert!(bench.recipe.contains("--test-threads=1"));
+        assert!(bench.recipe.contains("--nocapture"));
+    }
+}
+
+/// `make bench` runs every source one after another and the summary last.
+/// It has no prerequisites of its own, so `make -j bench` cannot schedule two
+/// sources' timings onto the same cores at once.
+#[test]
+fn bench_runs_every_source_sequentially_then_the_summary() {
     let text = makefile_text();
     let bench = rule(&text, "bench");
-    assert_eq!(
-        bench.prerequisites,
-        vec![
-            "cross-udf-build".to_string(),
-            "stack-up-exasol".to_string(),
-            "stack-up-mysql".to_string(),
-        ]
+    assert!(
+        bench.prerequisites.is_empty(),
+        "bench must sequence its sources in its recipe, not as prerequisites make -j \
+         could run in parallel: {:?}",
+        bench.prerequisites
     );
-    assert!(bench
-        .recipe
-        .contains("cargo test -p adbc-vs-adapter --features bench --test bench_mysql_test"));
-    assert!(bench.recipe.contains("--test-threads=1"));
-    assert!(bench.recipe.contains("--nocapture"));
+
+    let dry_run = dry_run_stdout("bench");
+    let mut steps: Vec<String> = BENCH_SOURCES
+        .iter()
+        .map(|source| format!("--test bench_{source}_test"))
+        .collect();
+    steps.push("scripts/bench_summary.py".to_string());
+    let positions: Vec<usize> = steps
+        .iter()
+        .map(|step| {
+            dry_run
+                .find(step.as_str())
+                .unwrap_or_else(|| panic!("`make -n bench` must reach `{step}`:\n{dry_run}"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "`make bench` must run {steps:?} in that order:\n{dry_run}"
+    );
+}
+
+/// Actually runs `bench-summary` (Python, no container) against fixture CSVs:
+/// the newest CSV per source wins, warm-up samples are excluded from the
+/// median, and an ADBC-only source shows `n/a` instead of a ratio.
+#[test]
+fn bench_summary_combines_the_newest_csv_per_source() {
+    let dir = std::env::temp_dir().join(format!("adbc-vs-bench-summary-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("failed to create the fixture directory");
+    let header =
+        "source,tier,adapter,run_index,warm_up,rows,bytes,duration_seconds,rows_per_sec,mib_per_sec\n";
+    let write = |name: &str, rows: &str| {
+        fs::write(dir.join(name), format!("{header}{rows}")).expect("failed to write fixture CSV");
+    };
+    write(
+        "results-mysql-2026-01-01T00-00-00Z.csv",
+        "mysql,narrow_small,adbc,0,false,1,1,1,1,1\nmysql,narrow_small,jdbc,0,false,1,1,1,1,1\n",
+    );
+    write(
+        "results-mysql-2026-02-01T00-00-00Z.csv",
+        "mysql,narrow_small,adbc,0,true,1,1,1,999999,1\n\
+         mysql,narrow_small,adbc,0,false,1,1,1,300,1\n\
+         mysql,narrow_small,adbc,1,false,1,1,1,400,1\n\
+         mysql,narrow_small,adbc,2,false,1,1,1,500,1\n\
+         mysql,narrow_small,jdbc,0,false,1,1,1,100,1\n\
+         mysql,narrow_small,jdbc,1,false,1,1,1,200,1\n\
+         mysql,narrow_small,jdbc,2,false,1,1,1,50,1\n",
+    );
+    write(
+        "results-trino-2026-02-01T00-00-00Z.csv",
+        "trino,wide,adbc,0,false,1,1,1,700,1\n",
+    );
+
+    let output = run_make(&["bench-summary", &format!("BENCH_DIR={}", dir.display())]);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let summaries: Vec<_> = fs::read_dir(&dir)
+        .expect("fixture directory must still exist")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("summary-"))
+        .collect();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(output.status.success(), "bench-summary failed: {stderr}");
+    assert!(
+        stdout.contains("| mysql | narrow_small | 400 | 100 | 4.000 |"),
+        "the newest MySQL CSV's measured medians must be summarized: {stdout}"
+    );
+    assert!(
+        stdout.contains("| trino | wide | 700 | n/a | n/a |"),
+        "an ADBC-only source must show n/a for JDBC and the ratio: {stdout}"
+    );
+    assert!(
+        !stdout.contains("2026-01-01"),
+        "an older CSV must not be an input: {stdout}"
+    );
+    assert!(
+        stderr.contains("postgres left out"),
+        "a missing source must be named: {stderr}"
+    );
+    assert_eq!(
+        summaries.len(),
+        1,
+        "exactly one summary file must be written"
+    );
 }
 
 /// CLAUDE.md ("Test tiers"): every non-unit tier sits behind a default-off

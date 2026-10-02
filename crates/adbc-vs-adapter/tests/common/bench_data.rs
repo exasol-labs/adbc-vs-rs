@@ -1,49 +1,149 @@
-//! The benchmark's MySQL data tiers: what each one is, how it is seeded, and
-//! the gate that proves both adapters see it identically before anything is
-//! timed.
+//! The benchmark's data tiers: what each one is, how it is seeded into each
+//! [`Source`], and the gate that proves every compared adapter sees it
+//! identically before anything is timed.
 //!
 //! Two halves, deliberately kept apart. Everything above [`ensure_seeded`] is
-//! pure — it builds SQL text and computes byte widths, touching no MySQL, no
+//! pure — it builds SQL text and computes byte widths, touching no source, no
 //! Docker, and no live row count, which is what puts the exact statements this
 //! benchmark issues under `make test` with no stack running. [`ensure_seeded`]
 //! and [`assert_matching_columns`] are the only two functions that reach a live
 //! stack, and each delegates every judgement it makes to a pure function
 //! beside them, so the reasoning stays testable and only the I/O does not.
 //!
-//! # Doubling-insert seeding
+//! # One logical tier, three dialects
 //!
-//! Each [`Tier`] is seeded by a small deterministic base batch
-//! ([`seed_insert`]), then grown by repeated `INSERT INTO t SELECT ... FROM
-//! t` steps ([`doubling_step`]) that double the row count, and finally
-//! trimmed to the exact target ([`seeding_plan`]'s trim statement). This
-//! keeps seeding to a handful of constant-size statements per tier instead of
-//! streaming millions of literal `INSERT` values from Rust.
+//! A [`Tier`] declares its columns once, as a [`ColumnType`] per column.
+//! [`ddl_type`] and [`value_expression`] translate that declaration into each
+//! source's own spelling with a plain `match` on ([`Source`], [`ColumnType`]),
+//! so every source holds the same rows: contiguous ids `1..=target_rows`, and
+//! every other column a deterministic function of the row's id (the id itself,
+//! its decimal string, `2020-01-01` plus that many days, or
+//! `2020-01-01 00:00:00` plus that many minutes). The sink checksum
+//! `bench.rs` verifies therefore has the same closed form for every source.
 //!
-//! Every column's value in both the base batch and every doubling step is
-//! derived from the same per-type formula ([`value_expression`]), applied to
-//! a single "row number" input: a literal row index for the base batch, or
-//! `(id + offset)` — the pre-doubling id, offset by the row count so far —
-//! for a doubling step. Reusing one formula for both means a doubling step
-//! never needs column-specific logic, and every column stays a deterministic
-//! function of the row's `id`, so re-running seeding from scratch reproduces
-//! identical data and no doubling step can mint a duplicate primary key.
+//! [`ColumnType::Char`] is declared `CHAR(n)` on MySQL only. PostgreSQL and
+//! Trino blank-pad `CHAR`, so this repo's adapter leaves such a column
+//! unmapped for both (see `vs-adapter/postgresql-type-mapping` and
+//! `vs-adapter/trino-type-mapping`); declaring it `VARCHAR(n)` there keeps the
+//! column — and its value — in the comparison.
+//!
+//! # Seeding per source
+//!
+//! - **MySQL** — a small deterministic base batch ([`seed_insert`]), grown by
+//!   repeated `INSERT INTO t SELECT ... FROM t` steps ([`doubling_step`]) that
+//!   double the row count, then trimmed to the exact target
+//!   ([`seeding_plan`]'s trim statement). MySQL 8.4 has no row generator, so
+//!   this keeps seeding to a handful of constant-size statements per tier
+//!   instead of streaming millions of literal `INSERT` values from Rust.
+//! - **PostgreSQL** — one `INSERT ... SELECT ... FROM generate_series(1, N)`.
+//! - **Trino** — one `CREATE TABLE ... AS SELECT` into the `memory` catalog,
+//!   over two cross-joined `UNNEST(sequence(...))` blocks, since Trino caps one
+//!   `sequence` at 10,000 elements and its `memory` connector supports no
+//!   `DELETE` a trim would need.
+//!
+//! [`seed_statements`] is the one entry point: the full ordered statement list
+//! a rebuild runs for a (source, tier) pair.
 //!
 //! # Nominal byte width
 //!
 //! [`nominal_row_width`] sums one fixed byte estimate per column, for the
 //! report's MiB/sec figure. It is deliberately not byte-perfect — assumptions
 //! (documented on [`nominal_column_width`]) mirror common fixed-width
-//! estimates for these MySQL types, nothing more precise.
+//! estimates for these types, nothing more precise — and it is the same for
+//! every source, so MiB/sec figures stay comparable across sources.
 
 use std::collections::BTreeSet;
 
-use super::bench_stack::{ADBC_VIRTUAL_SCHEMA, JDBC_VIRTUAL_SCHEMA};
+use super::bench_stack::BenchStack;
 use super::exasol::{cell, Exasol};
 use super::mysql::MySql;
+use super::postgres::Postgres;
+use super::trino::{self, Trino};
+
+/// The source database a benchmark run seeds and reads through its virtual
+/// schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Mysql,
+    Postgres,
+    Trino,
+}
+
+impl Source {
+    /// The lowercase name every rendered output and report filename uses —
+    /// also the `docker-compose.yml` service that hosts the source.
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Mysql => "mysql",
+            Source::Postgres => "postgres",
+            Source::Trino => "trino",
+        }
+    }
+
+    /// The product name a human-facing report line uses.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Source::Mysql => "MySQL",
+            Source::Postgres => "PostgreSQL",
+            Source::Trino => "Trino",
+        }
+    }
+}
+
+/// A live connection to one benchmark source, owning the harness client that
+/// reaches it. Every method dispatches with a plain `match`.
+pub enum SourceDb {
+    Mysql(MySql),
+    Postgres(Postgres),
+    Trino(Trino),
+}
+
+impl SourceDb {
+    pub fn source(&self) -> Source {
+        match self {
+            SourceDb::Mysql(_) => Source::Mysql,
+            SourceDb::Postgres(_) => Source::Postgres,
+            SourceDb::Trino(_) => Source::Trino,
+        }
+    }
+
+    /// Runs one statement; a rejected statement panics.
+    pub fn execute(&self, sql: &str) {
+        match self {
+            SourceDb::Mysql(db) => db.execute(sql),
+            SourceDb::Postgres(db) => db.execute(sql),
+            SourceDb::Trino(db) => db.execute(sql),
+        }
+    }
+
+    /// Runs a one-row, one-column query and returns its rendered value; a
+    /// rejected query panics.
+    pub fn query_scalar(&self, sql: &str) -> String {
+        match self {
+            SourceDb::Mysql(db) => db.query_scalar(sql),
+            SourceDb::Postgres(db) => db.query_scalar(sql),
+            SourceDb::Trino(db) => db.query_scalar(sql),
+        }
+    }
+}
+
+/// A tier column's logical type, translated into each source's DDL by
+/// [`ddl_type`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    Int,
+    BigInt,
+    Decimal(u32, u32),
+    Varchar(u32),
+    Char(u32),
+    Date,
+    Timestamp,
+    Double,
+}
 
 /// One data tier the benchmark seeds and scans.
 ///
-/// `name` is both the tier's identifier and the MySQL table name it seeds
+/// `name` is both the tier's identifier and the source table name it seeds
 /// into. `columns` is ordered, and by convention its first entry is the
 /// row-number-driving primary key column (named `id` in every tier below) —
 /// every builder in this module keys off `columns[0]` for that role rather
@@ -52,46 +152,51 @@ use super::mysql::MySql;
 pub struct Tier {
     pub name: &'static str,
     pub target_rows: u64,
-    pub columns: &'static [(&'static str, &'static str)],
+    pub columns: &'static [(&'static str, ColumnType)],
 }
 
 /// The 8-column, ~100B/row shape shared by `narrow_small` and `narrow_large`
 /// — matches the MySQL type set `adbc-vs-scan`'s coercion already proves it
 /// maps (see `tests/common/mysql.rs`'s `orders` fixture): `INT`, `BIGINT`,
 /// `DECIMAL`, `VARCHAR`, `CHAR`, `DATE`, `DATETIME`, `DOUBLE`.
-const NARROW_COLUMNS: &[(&str, &str)] = &[
-    ("id", "INT"),
-    ("big_id", "BIGINT"),
-    ("amount", "DECIMAL(10,2)"),
-    ("name", "VARCHAR(40)"),
-    ("code", "CHAR(8)"),
-    ("order_date", "DATE"),
-    ("created_at", "DATETIME"),
-    ("price", "DOUBLE"),
+const NARROW_COLUMNS: &[(&str, ColumnType)] = &[
+    ("id", ColumnType::Int),
+    ("big_id", ColumnType::BigInt),
+    ("amount", ColumnType::Decimal(10, 2)),
+    ("name", ColumnType::Varchar(40)),
+    ("code", ColumnType::Char(8)),
+    ("order_date", ColumnType::Date),
+    ("created_at", ColumnType::Timestamp),
+    ("price", ColumnType::Double),
 ];
 
 /// The ~1KB/row shape for `wide`: the same proven type set as
 /// [`NARROW_COLUMNS`], widened with more `VARCHAR(200)` and `DECIMAL` columns
 /// rather than any new type.
-const WIDE_COLUMNS: &[(&str, &str)] = &[
-    ("id", "INT"),
-    ("big_id", "BIGINT"),
-    ("amount_a", "DECIMAL(12,4)"),
-    ("amount_b", "DECIMAL(12,4)"),
-    ("amount_c", "DECIMAL(12,4)"),
-    ("description_a", "VARCHAR(200)"),
-    ("description_b", "VARCHAR(200)"),
-    ("description_c", "VARCHAR(200)"),
-    ("description_d", "VARCHAR(200)"),
-    ("code", "CHAR(8)"),
-    ("order_date", "DATE"),
-    ("created_at", "DATETIME"),
-    ("price", "DOUBLE"),
+const WIDE_COLUMNS: &[(&str, ColumnType)] = &[
+    ("id", ColumnType::Int),
+    ("big_id", ColumnType::BigInt),
+    ("amount_a", ColumnType::Decimal(12, 4)),
+    ("amount_b", ColumnType::Decimal(12, 4)),
+    ("amount_c", ColumnType::Decimal(12, 4)),
+    ("description_a", ColumnType::Varchar(200)),
+    ("description_b", ColumnType::Varchar(200)),
+    ("description_c", ColumnType::Varchar(200)),
+    ("description_d", ColumnType::Varchar(200)),
+    ("code", ColumnType::Char(8)),
+    ("order_date", ColumnType::Date),
+    ("created_at", ColumnType::Timestamp),
+    ("price", ColumnType::Double),
 ];
 
-/// The size of the deterministic base batch every tier is seeded from before
-/// any doubling step runs.
+/// The size of the deterministic base batch every MySQL tier is seeded from
+/// before any doubling step runs.
 const BASE_SEED_ROWS: u64 = 4;
+
+/// The size of one Trino `sequence` block: Trino rejects a `sequence` longer
+/// than 10,000 elements, so a tier's row numbers are built as
+/// `block * TRINO_BLOCK_ROWS + offset` over two cross-joined sequences.
+const TRINO_BLOCK_ROWS: u64 = 10_000;
 
 impl Tier {
     /// The three medium-scale tiers the benchmark runs, in the order the
@@ -118,73 +223,188 @@ impl Tier {
 
     /// The row-number-driving primary key column's name — `columns[0]` by
     /// convention.
-    fn id_column(&self) -> &'static str {
+    pub fn id_column(&self) -> &'static str {
         self.columns[0].0
     }
 }
 
-/// Builds the `CREATE TABLE IF NOT EXISTS` DDL for `tier`, with its id column
-/// as the primary key.
-pub fn create_table_ddl(tier: &Tier) -> String {
+/// The table name `source` addresses `tier` by in every seeding statement.
+///
+/// Trino's CLI session names no catalog or schema, so its tables are
+/// qualified by the `memory` catalog and schema `docker/trino/init.sql`
+/// creates. MySQL and PostgreSQL sessions already default to the database
+/// (and `public` schema) the virtual schemas read.
+pub fn source_table(source: Source, tier: &Tier) -> String {
+    match source {
+        Source::Mysql | Source::Postgres => tier.name.to_string(),
+        Source::Trino => format!("{}.{}.{}", trino::CATALOG, trino::SCHEMA, tier.name),
+    }
+}
+
+/// `column_type`'s DDL spelling in `source`.
+pub fn ddl_type(source: Source, column_type: ColumnType) -> String {
+    use ColumnType::*;
+    match (source, column_type) {
+        (Source::Mysql, Int) => "INT".to_string(),
+        (Source::Postgres | Source::Trino, Int) => "INTEGER".to_string(),
+        (_, BigInt) => "BIGINT".to_string(),
+        (Source::Postgres, Decimal(precision, scale)) => format!("NUMERIC({precision},{scale})"),
+        (Source::Mysql | Source::Trino, Decimal(precision, scale)) => {
+            format!("DECIMAL({precision},{scale})")
+        }
+        (_, Varchar(length)) => format!("VARCHAR({length})"),
+        (Source::Mysql, Char(length)) => format!("CHAR({length})"),
+        (Source::Postgres | Source::Trino, Char(length)) => format!("VARCHAR({length})"),
+        (_, Date) => "DATE".to_string(),
+        (Source::Mysql, Timestamp) => "DATETIME".to_string(),
+        (Source::Postgres, Timestamp) => "TIMESTAMP".to_string(),
+        (Source::Trino, Timestamp) => "TIMESTAMP(3)".to_string(),
+        (Source::Mysql | Source::Trino, Double) => "DOUBLE".to_string(),
+        (Source::Postgres, Double) => "DOUBLE PRECISION".to_string(),
+    }
+}
+
+/// The full ordered statement list that rebuilds `tier` from nothing in
+/// `source`: drop, create, fill, and (MySQL only) trim onto the exact target.
+pub fn seed_statements(source: Source, tier: &Tier) -> Vec<String> {
+    let mut statements = vec![drop_table_statement(source, tier)];
+    match source {
+        Source::Mysql => {
+            let plan = seeding_plan(tier);
+            statements.push(create_table_ddl(source, tier));
+            statements.push(seed_insert(tier));
+            statements.extend(
+                plan.doubling_offsets
+                    .into_iter()
+                    .map(|offset| doubling_step(tier, offset)),
+            );
+            statements.extend(plan.trim_statement);
+        }
+        Source::Postgres => {
+            statements.push(create_table_ddl(source, tier));
+            statements.push(postgres_generate_insert(tier));
+        }
+        Source::Trino => statements.push(trino_generate_ctas(tier)),
+    }
+    statements
+}
+
+/// Builds the `CREATE TABLE IF NOT EXISTS` DDL for `tier` in `source`, with
+/// its id column as the primary key. Trino tables are created by
+/// [`trino_generate_ctas`] instead: its `memory` connector has no primary key.
+pub fn create_table_ddl(source: Source, tier: &Tier) -> String {
     let column_defs: Vec<String> = tier
         .columns
         .iter()
-        .map(|(name, ddl_type)| format!("{name} {ddl_type} NOT NULL"))
+        .map(|(name, column_type)| format!("{name} {} NOT NULL", ddl_type(source, *column_type)))
         .collect();
     format!(
         "CREATE TABLE IF NOT EXISTS {} ({}, PRIMARY KEY ({}))",
-        tier.name,
+        source_table(source, tier),
         column_defs.join(", "),
         tier.id_column()
     )
 }
 
-/// Builds the base-seed `INSERT` statement: [`BASE_SEED_ROWS`] deterministic
-/// rows, row `n`'s columns each derived from the literal row number `n` by
-/// [`value_expression`].
+/// The `SELECT` list computing every column of `tier` from `row_number_expr`
+/// in `source`'s dialect.
+fn select_list(source: Source, tier: &Tier, row_number_expr: &str) -> String {
+    tier.columns
+        .iter()
+        .map(|(_, column_type)| value_expression(source, *column_type, row_number_expr))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn column_names(tier: &Tier) -> String {
+    tier.columns
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Builds the MySQL base-seed `INSERT` statement: [`BASE_SEED_ROWS`]
+/// deterministic rows, row `n`'s columns each derived from the literal row
+/// number `n` by [`value_expression`].
 pub fn seed_insert(tier: &Tier) -> String {
-    let column_names: Vec<&str> = tier.columns.iter().map(|(name, _)| *name).collect();
     let rows: Vec<String> = (1..=BASE_SEED_ROWS)
         .map(|row_number| {
-            let values: Vec<String> = tier
-                .columns
-                .iter()
-                .map(|(_, ddl_type)| value_expression(ddl_type, &row_number.to_string()))
-                .collect();
-            format!("({})", values.join(", "))
+            format!(
+                "({})",
+                select_list(Source::Mysql, tier, &row_number.to_string())
+            )
         })
         .collect();
     format!(
         "INSERT INTO {} ({}) VALUES {}",
         tier.name,
-        column_names.join(", "),
+        column_names(tier),
         rows.join(", ")
     )
 }
 
-/// Builds one doubling step: `INSERT INTO <table> SELECT ... FROM <table>`,
-/// where every column is recomputed from `(id + offset)` by
+/// Builds one MySQL doubling step: `INSERT INTO <table> SELECT ... FROM
+/// <table>`, where every column is recomputed from `(id + offset)` by
 /// [`value_expression`] — the same formula [`seed_insert`] applies to a
 /// literal row number. `offset` must be the table's current row count, so
 /// every new id lands strictly above every existing one and no doubling step
 /// can mint a duplicate primary key.
 pub fn doubling_step(tier: &Tier, offset: u64) -> String {
     let row_number_expr = format!("({} + {offset})", tier.id_column());
-    let select_list: Vec<String> = tier
-        .columns
-        .iter()
-        .map(|(_, ddl_type)| value_expression(ddl_type, &row_number_expr))
-        .collect();
     format!(
         "INSERT INTO {} SELECT {} FROM {}",
         tier.name,
-        select_list.join(", "),
+        select_list(Source::Mysql, tier, &row_number_expr),
         tier.name
     )
 }
 
-/// The ordered doubling steps and optional trim needed to take `tier` from
-/// [`BASE_SEED_ROWS`] to exactly `tier.target_rows`.
+/// The PostgreSQL fill: every row `1..=target_rows` in one statement, each
+/// column computed from `generate_series`'s `n`.
+fn postgres_generate_insert(tier: &Tier) -> String {
+    format!(
+        "INSERT INTO {} ({}) SELECT {} FROM generate_series(1, {}) AS g(n)",
+        source_table(Source::Postgres, tier),
+        column_names(tier),
+        select_list(Source::Postgres, tier, "n"),
+        tier.target_rows
+    )
+}
+
+/// The Trino create-and-fill: one CTAS whose row numbers `1..=target_rows`
+/// come from `block * TRINO_BLOCK_ROWS + offset` over two cross-joined
+/// `sequence`s, each within Trino's 10,000-element `sequence` limit for every
+/// tier below 100,000,000 rows. Every column is `CAST` to its exact
+/// [`ddl_type`], since a CTAS takes its column types from the expressions.
+fn trino_generate_ctas(tier: &Tier) -> String {
+    let last_block = tier
+        .target_rows
+        .div_ceil(TRINO_BLOCK_ROWS)
+        .saturating_sub(1);
+    let named_columns: Vec<String> = tier
+        .columns
+        .iter()
+        .map(|(name, column_type)| {
+            format!(
+                "{} AS {name}",
+                value_expression(Source::Trino, *column_type, "n")
+            )
+        })
+        .collect();
+    format!(
+        "CREATE TABLE {} AS SELECT {} FROM (SELECT block_index * {TRINO_BLOCK_ROWS} + block_row AS n \
+         FROM UNNEST(sequence(0, {last_block})) AS blocks(block_index) \
+         CROSS JOIN UNNEST(sequence(1, {TRINO_BLOCK_ROWS})) AS block_rows(block_row)) AS g \
+         WHERE n <= {}",
+        source_table(Source::Trino, tier),
+        named_columns.join(", "),
+        tier.target_rows
+    )
+}
+
+/// The ordered doubling steps and optional trim needed to take a MySQL `tier`
+/// from [`BASE_SEED_ROWS`] to exactly `tier.target_rows`.
 pub struct SeedingPlan {
     /// The row-count offset to pass to [`doubling_step`], one per step, in
     /// the order they must run.
@@ -212,9 +432,9 @@ pub fn seeding_plan(tier: &Tier) -> SeedingPlan {
     }
 }
 
-/// Builds the `DELETE` statement that trims `tier`'s table down to exactly
-/// `tier.target_rows`, by deleting every row whose id exceeds the target.
-/// Sound because every id [`doubling_step`] mints is offset above the
+/// Builds the `DELETE` statement that trims `tier`'s MySQL table down to
+/// exactly `tier.target_rows`, by deleting every row whose id exceeds the
+/// target. Sound because every id [`doubling_step`] mints is offset above the
 /// previous row count, so ids stay in seed order with no gaps: the rows below
 /// the target are exactly the rows to keep.
 fn trim_statement_for(tier: &Tier) -> String {
@@ -231,94 +451,114 @@ fn trim_statement_for(tier: &Tier) -> String {
 pub fn nominal_row_width(tier: &Tier) -> u32 {
     tier.columns
         .iter()
-        .map(|(_, ddl_type)| nominal_column_width(ddl_type))
+        .map(|(_, column_type)| nominal_column_width(*column_type))
         .sum()
 }
 
-/// A defensible, fixed byte estimate for one MySQL column type — not
-/// byte-perfect, just consistent enough to make MiB/sec figures comparable
-/// across tiers and across a re-run:
+/// A defensible, fixed byte estimate for one column type — not byte-perfect,
+/// just consistent enough to make MiB/sec figures comparable across tiers,
+/// sources, and re-runs:
 ///
-/// - `INT` = 4, `BIGINT` = 8: native fixed-width integers.
-/// - `DECIMAL(p,s)` ≈ `p / 2 + 1`: a packed-decimal-style estimate (roughly
+/// - `Int` = 4, `BigInt` = 8: native fixed-width integers.
+/// - `Decimal(p,s)` ≈ `p / 2 + 1`: a packed-decimal-style estimate (roughly
 ///   two digits per byte) plus one byte for sign, independent of scale.
-/// - `VARCHAR(n)` = `n`, `CHAR(n)` = `n`: worst-case (`VARCHAR`) or exact
+/// - `Varchar(n)` = `n`, `Char(n)` = `n`: worst-case (`VARCHAR`) or exact
 ///   (`CHAR`) character count, one byte per character.
-/// - `DATE` = 3, `DATETIME` = 8, `DOUBLE` = 8: native fixed-width temporal
+/// - `Date` = 3, `Timestamp` = 8, `Double` = 8: native fixed-width temporal
 ///   and floating-point encodings.
-fn nominal_column_width(ddl_type: &str) -> u32 {
-    let upper = ddl_type.to_ascii_uppercase();
-    if upper.starts_with("BIGINT") {
-        8
-    } else if upper.starts_with("INT") {
-        4
-    } else if upper.starts_with("DATETIME") {
-        8
-    } else if upper.starts_with("DATE") {
-        3
-    } else if upper.starts_with("DOUBLE") {
-        8
-    } else if upper.starts_with("DECIMAL") {
-        let precision = paren_number(&upper)
-            .unwrap_or_else(|| panic!("DECIMAL type `{ddl_type}` declares no precision"));
-        precision / 2 + 1
-    } else if upper.starts_with("VARCHAR") || upper.starts_with("CHAR") {
-        paren_number(&upper)
-            .unwrap_or_else(|| panic!("{ddl_type} type `{ddl_type}` declares no length"))
-    } else {
-        panic!("no nominal byte width rule for MySQL type `{ddl_type}`")
+fn nominal_column_width(column_type: ColumnType) -> u32 {
+    match column_type {
+        ColumnType::Int => 4,
+        ColumnType::BigInt | ColumnType::Timestamp | ColumnType::Double => 8,
+        ColumnType::Date => 3,
+        ColumnType::Decimal(precision, _) => precision / 2 + 1,
+        ColumnType::Varchar(length) | ColumnType::Char(length) => length,
     }
 }
 
 /// Builds the SQL expression that computes one column's deterministic value
-/// from `row_number_expr` — a literal row index from [`seed_insert`], or an
-/// `(id + offset)` expression from [`doubling_step`] — so both call sites
-/// share one per-type formula instead of each column needing bespoke
-/// transform logic:
+/// from `row_number_expr` in `source`'s dialect — a literal row index or an
+/// `(id + offset)` expression for MySQL, the generator's `n` for PostgreSQL
+/// and Trino. Every source computes the same logical value:
 ///
-/// - `DATETIME`/`DATE`: an absolute date offset by `row_number_expr` via
-///   `DATE_ADD`, since neither is a valid `CAST` target in MySQL.
-/// - `VARCHAR`/`CHAR`: the row number's decimal-string form via
-///   `CAST(... AS CHAR)`, always well within these tiers' declared widths at
-///   their target row counts.
-/// - `INT`/`BIGINT`: `CAST(... AS SIGNED)` — MySQL's `CAST` has no `INT` or
-///   `BIGINT` target type; `SIGNED` is the 64-bit signed integer cast, which
-///   narrows on assignment into an `INT` column exactly as a literal would.
-/// - `DOUBLE`/`DECIMAL(p,s)`: `CAST(... AS <ddl_type>)` directly — both are
-///   valid `CAST` target types in MySQL 8.0.17+.
-fn value_expression(ddl_type: &str, row_number_expr: &str) -> String {
-    let upper = ddl_type.to_ascii_uppercase();
-    if upper.starts_with("DATETIME") {
-        format!("DATE_ADD('2020-01-01 00:00:00', INTERVAL {row_number_expr} MINUTE)")
-    } else if upper.starts_with("DATE") {
-        format!("DATE_ADD('2020-01-01', INTERVAL {row_number_expr} DAY)")
-    } else if upper.starts_with("VARCHAR") || upper.starts_with("CHAR") {
-        format!("CAST({row_number_expr} AS CHAR)")
-    } else if upper.starts_with("INT") || upper.starts_with("BIGINT") {
-        format!("CAST({row_number_expr} AS SIGNED)")
-    } else if upper.starts_with("DOUBLE") || upper.starts_with("DECIMAL") {
-        format!("CAST({row_number_expr} AS {ddl_type})")
-    } else {
-        panic!("no value-expression rule for MySQL type `{ddl_type}`")
-    }
-}
+/// - `Int`/`BigInt`/`Decimal`/`Double`: the row number itself. MySQL's `CAST`
+///   has no `INT` or `BIGINT` target type; `SIGNED` is its 64-bit signed
+///   integer cast, which narrows on assignment into an `INT` column.
+/// - `Varchar`/`Char`: the row number's decimal-string form, always well
+///   within these tiers' declared widths at their target row counts.
+/// - `Date`: `2020-01-01` plus the row number in days.
+/// - `Timestamp`: `2020-01-01 00:00:00` plus the row number in minutes.
+///
+/// Trino casts every value to its exact [`ddl_type`], since its tables are
+/// created by CTAS and take their column types from these expressions.
+fn value_expression(source: Source, column_type: ColumnType, row_number_expr: &str) -> String {
+    use ColumnType::*;
+    let n = row_number_expr;
+    match (source, column_type) {
+        (Source::Mysql, Timestamp) => {
+            format!("DATE_ADD('2020-01-01 00:00:00', INTERVAL {n} MINUTE)")
+        }
+        (Source::Mysql, Date) => format!("DATE_ADD('2020-01-01', INTERVAL {n} DAY)"),
+        (Source::Mysql, Varchar(_) | Char(_)) => format!("CAST({n} AS CHAR)"),
+        (Source::Mysql, Int | BigInt) => format!("CAST({n} AS SIGNED)"),
+        (Source::Mysql, Double | Decimal(..)) => {
+            format!("CAST({n} AS {})", ddl_type(source, column_type))
+        }
 
-/// Parses the first number inside a type's parentheses, e.g. `12` out of
-/// `"DECIMAL(12,4)"` or `"VARCHAR(12)"`.
-fn paren_number(ddl_type: &str) -> Option<u32> {
-    let after_open = ddl_type.split_once('(')?.1;
-    let digits = after_open.split([',', ')']).next()?;
-    digits.trim().parse().ok()
+        (Source::Postgres, Timestamp) => {
+            format!("TIMESTAMP '2020-01-01 00:00:00' + {n} * INTERVAL '1 minute'")
+        }
+        (Source::Postgres, Date) => format!("DATE '2020-01-01' + CAST({n} AS INTEGER)"),
+        (Source::Postgres, Varchar(_) | Char(_)) => format!("CAST({n} AS VARCHAR)"),
+        (Source::Postgres, Int | BigInt | Decimal(..) | Double) => {
+            format!("CAST({n} AS {})", ddl_type(source, column_type))
+        }
+
+        (Source::Trino, Timestamp) => format!(
+            "CAST(date_add('minute', {n}, TIMESTAMP '2020-01-01 00:00:00') AS {})",
+            ddl_type(source, column_type)
+        ),
+        (Source::Trino, Date) => format!("date_add('day', {n}, DATE '2020-01-01')"),
+        (Source::Trino, Varchar(_) | Char(_)) => format!(
+            "CAST(CAST({n} AS VARCHAR) AS {})",
+            ddl_type(source, column_type)
+        ),
+        (Source::Trino, Int | BigInt | Decimal(..) | Double) => {
+            format!("CAST({n} AS {})", ddl_type(source, column_type))
+        }
+    }
 }
 
 /// The statement that removes `tier`'s table before it is rebuilt, tolerating
 /// a table that was never there.
-fn drop_table_statement(tier: &Tier) -> String {
-    format!("DROP TABLE IF EXISTS {}", tier.name)
+fn drop_table_statement(source: Source, tier: &Tier) -> String {
+    format!("DROP TABLE IF EXISTS {}", source_table(source, tier))
 }
 
-/// Brings `tier`'s MySQL table to exactly `tier.target_rows` rows, and proves
-/// it got there before returning.
+/// The one-value query counting whether `tier`'s table exists in `source`,
+/// answered from the source's own `information_schema`.
+fn table_exists_query(source: Source, tier: &Tier) -> String {
+    let table = tier.name;
+    match source {
+        Source::Mysql => format!(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{table}'"
+        ),
+        Source::Postgres => format!(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_name = '{table}'"
+        ),
+        Source::Trino => format!(
+            "SELECT count(*) FROM {}.information_schema.tables \
+             WHERE table_schema = '{}' AND table_name = '{table}'",
+            trino::CATALOG,
+            trino::SCHEMA
+        ),
+    }
+}
+
+/// Brings `tier`'s source table to exactly `tier.target_rows` rows, and
+/// proves it got there before returning.
 ///
 /// A table already holding exactly the target count is left untouched, so a
 /// benchmark re-run against a stack an earlier one seeded starts timing
@@ -331,106 +571,96 @@ fn drop_table_statement(tier: &Tier) -> String {
 /// The count is re-read after the rebuild and disagreement fails the run.
 /// Seeding that silently produced the wrong number of rows would not surface
 /// as an error later: it would surface as a throughput figure, which is worse.
-pub fn ensure_seeded(mysql: &MySql, tier: &Tier) {
-    if seeded_rows(mysql, tier) == Some(tier.target_rows) {
+pub fn ensure_seeded(db: &SourceDb, tier: &Tier) {
+    let source = db.source();
+    if seeded_rows(db, tier) == Some(tier.target_rows) {
         return;
     }
 
-    rebuild(mysql, tier);
+    for statement in seed_statements(source, tier) {
+        db.execute(&statement);
+    }
 
-    let seeded = seeded_rows(mysql, tier).unwrap_or_else(|| {
+    let seeded = seeded_rows(db, tier).unwrap_or_else(|| {
         panic!(
-            "seeding tier `{}` left no table `{}` in MySQL",
-            tier.name, tier.name
+            "seeding tier `{}` left no table `{}` in {}",
+            tier.name,
+            source_table(source, tier),
+            source.display_name()
         )
     });
     assert_eq!(
-        seeded, tier.target_rows,
-        "seeding tier `{}` left {seeded} row(s) in MySQL table `{}`, not the {} it targets",
-        tier.name, tier.name, tier.target_rows
+        seeded,
+        tier.target_rows,
+        "seeding tier `{}` left {seeded} row(s) in {} table `{}`, not the {} it targets",
+        tier.name,
+        source.display_name(),
+        source_table(source, tier),
+        tier.target_rows
     );
 }
 
 /// The row count of `tier`'s table, or `None` when the table is not there.
 ///
 /// Absence is answered from `information_schema` rather than from a failed
-/// `COUNT(*)`, so a MySQL that cannot answer at all fails the run instead of
+/// `COUNT(*)`, so a source that cannot answer at all fails the run instead of
 /// being read as an empty tier that needs reseeding.
-fn seeded_rows(mysql: &MySql, tier: &Tier) -> Option<u64> {
-    table_exists(mysql, tier.name).then(|| {
+fn seeded_rows(db: &SourceDb, tier: &Tier) -> Option<u64> {
+    let source = db.source();
+    let table = source_table(source, tier);
+    let exists = row_count_of(&db.query_scalar(&table_exists_query(source, tier)), &table) > 0;
+    exists.then(|| {
         row_count_of(
-            &mysql.query_scalar(&format!("SELECT COUNT(*) FROM {}", tier.name)),
-            tier.name,
+            &db.query_scalar(&format!("SELECT COUNT(*) FROM {table}")),
+            &table,
         )
     })
 }
 
-fn table_exists(mysql: &MySql, table: &str) -> bool {
-    let rendered = mysql.query_scalar(&format!(
-        "SELECT COUNT(*) FROM information_schema.tables \
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{table}'"
-    ));
-    row_count_of(&rendered, table) > 0
-}
-
-/// Reads the count MySQL rendered for `table`, failing the run on anything
+/// Reads the count a source rendered for `table`, failing the run on anything
 /// that is not one.
 fn row_count_of(rendered: &str, table: &str) -> u64 {
     rendered.parse().unwrap_or_else(|error| {
-        panic!("MySQL answered a count over `{table}` with `{rendered}`, not a row count: {error}")
+        panic!("the source answered a count over `{table}` with `{rendered}`, not a row count: {error}")
     })
 }
 
-/// Regenerates `tier`'s table from nothing: the base batch, every doubling
-/// step [`seeding_plan`] calls for, then the trim onto the exact target.
-fn rebuild(mysql: &MySql, tier: &Tier) {
-    let plan = seeding_plan(tier);
-
-    mysql.execute(&drop_table_statement(tier));
-    mysql.execute(&create_table_ddl(tier));
-    mysql.execute(&seed_insert(tier));
-    for offset in plan.doubling_offsets {
-        mysql.execute(&doubling_step(tier, offset));
-    }
-    if let Some(trim) = &plan.trim_statement {
-        mysql.execute(trim);
-    }
-}
-
-/// Fails the run unless both virtual schemas the benchmark compares expose
+/// Fails the run unless every virtual schema the benchmark compares exposes
 /// exactly the columns `tier` declares.
 ///
 /// This is the benchmark's fairness gate, and it belongs before a tier's first
 /// timed sample rather than after it: an adapter that quietly omitted a column
 /// it could not map would move less data for the same query and report the
-/// difference as speed. Holding both sides to the tier's own declaration
+/// difference as speed. Holding every side to the tier's own declaration
 /// rather than only to each other also catches the case where both narrow
 /// identically — still a fair race, but one whose MiB/sec figure would be
-/// computed from bytes nothing transferred.
+/// computed from bytes nothing transferred. An ADBC-only run (no JDBC
+/// baseline) still runs the gate over its one schema, for the second reason.
 ///
-/// Both schemas are refreshed first. They cache their source's metadata at
+/// Every schema is refreshed first. They cache their source's metadata at
 /// creation, so a column set read without refreshing is a snapshot from before
 /// this tier's table existed; republishing it is part of reading the live
 /// answer, not a step a caller could sensibly skip.
 ///
-/// Column names are compared case-sensitively. Both virtual schemas expose
-/// MySQL identifiers in lower case and every benchmark query therefore
+/// Column names are compared case-sensitively. Every virtual schema must
+/// expose the source identifiers in lower case, since every benchmark query
 /// double-quotes them, so `"id"` and `"ID"` are different identifiers to
 /// Exasol — a casing difference between the sides is one a query built for
 /// either side could not survive against the other.
-pub fn assert_matching_columns(exasol: &Exasol, tier: &Tier) {
-    let sides: Vec<ExposedColumns> = [ADBC_VIRTUAL_SCHEMA, JDBC_VIRTUAL_SCHEMA]
+pub fn assert_matching_columns(stack: &BenchStack, tier: &Tier) {
+    let sides: Vec<ExposedColumns> = stack
+        .virtual_schemas()
         .into_iter()
         .map(|schema| {
-            exasol.execute(&refresh_statement(schema));
+            stack.exasol.execute(&refresh_statement(schema));
             ExposedColumns {
                 schema: schema.to_owned(),
-                columns: exposed_columns(exasol, schema, tier.name),
+                columns: exposed_columns(&stack.exasol, schema, tier.name),
             }
         })
         .collect();
 
-    if let Some(mismatch) = column_set_mismatch(tier, &sides) {
+    if let Some(mismatch) = column_set_mismatch(stack.source.source(), tier, &sides) {
         panic!("{mismatch}");
     }
 }
@@ -479,7 +709,7 @@ impl ColumnDivergence {
 /// Pure, so the gate's own diffing is covered without a container: only
 /// [`assert_matching_columns`] talks to a live stack, and it does nothing with
 /// the answer but hand it here.
-fn column_set_mismatch(tier: &Tier, sides: &[ExposedColumns]) -> Option<String> {
+fn column_set_mismatch(source: Source, tier: &Tier, sides: &[ExposedColumns]) -> Option<String> {
     let declared: BTreeSet<&str> = tier.columns.iter().map(|(name, _)| *name).collect();
     let divergences: Vec<(&ExposedColumns, ColumnDivergence)> = sides
         .iter()
@@ -498,11 +728,12 @@ fn column_set_mismatch(tier: &Tier, sides: &[ExposedColumns]) -> Option<String> 
         .map(|(side, divergence)| side_line(side, divergence))
         .collect();
     Some(format!(
-        "tier `{}`: the two virtual schemas do not both expose exactly the {} column(s) \
-         declared for MySQL table `{}`, so timing a query over them would not compare the \
-         same work:\n{}",
+        "tier `{}`: the virtual schemas do not all expose exactly the {} column(s) \
+         declared for {} table `{}`, so timing a query over them would not measure the \
+         declared work:\n{}",
         tier.name,
         declared.len(),
+        source.display_name(),
         tier.name,
         report.join("\n")
     ))
@@ -545,6 +776,12 @@ mod tests {
 
     use super::*;
 
+    const ALL_SOURCES: [Source; 3] = [Source::Mysql, Source::Postgres, Source::Trino];
+
+    fn narrow_small() -> Tier {
+        Tier::all()[0]
+    }
+
     #[test]
     fn all_tiers_match_the_medium_scale_names_and_targets() {
         let tiers = Tier::all();
@@ -561,36 +798,92 @@ mod tests {
         let tiers = Tier::all();
         assert_eq!(tiers[0].columns.len(), 8);
         assert_eq!(tiers[0].columns, tiers[1].columns);
+        assert_eq!(tiers[2].columns.len(), 13);
     }
 
     #[test]
-    fn every_tier_restricts_columns_to_the_proven_type_set() {
-        let allowed_prefixes = [
-            "INT", "BIGINT", "DECIMAL", "VARCHAR", "CHAR", "DATE", "DATETIME", "DOUBLE",
-        ];
-        for tier in Tier::all() {
-            for (name, ddl_type) in tier.columns {
-                let upper = ddl_type.to_ascii_uppercase();
-                assert!(
-                    allowed_prefixes
-                        .iter()
-                        .any(|prefix| upper.starts_with(prefix)),
-                    "{}.{name} declares `{ddl_type}`, outside the proven type set",
-                    tier.name
-                );
-            }
+    fn source_names_match_their_compose_services() {
+        assert_eq!(Source::Mysql.name(), "mysql");
+        assert_eq!(Source::Postgres.name(), "postgres");
+        assert_eq!(Source::Trino.name(), "trino");
+    }
+
+    #[test]
+    fn mysql_ddl_types_keep_the_original_spellings() {
+        let spelled: Vec<String> = NARROW_COLUMNS
+            .iter()
+            .map(|(_, column_type)| ddl_type(Source::Mysql, *column_type))
+            .collect();
+        assert_eq!(
+            spelled,
+            [
+                "INT",
+                "BIGINT",
+                "DECIMAL(10,2)",
+                "VARCHAR(40)",
+                "CHAR(8)",
+                "DATE",
+                "DATETIME",
+                "DOUBLE"
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_and_trino_declare_char_as_varchar_since_their_char_is_unmapped() {
+        assert_eq!(
+            ddl_type(Source::Postgres, ColumnType::Char(8)),
+            "VARCHAR(8)"
+        );
+        assert_eq!(ddl_type(Source::Trino, ColumnType::Char(8)), "VARCHAR(8)");
+    }
+
+    #[test]
+    fn every_source_declares_only_types_its_adbc_mapping_accepts() {
+        let postgres: Vec<String> = WIDE_COLUMNS
+            .iter()
+            .map(|(_, column_type)| ddl_type(Source::Postgres, *column_type))
+            .collect();
+        for spelled in &postgres {
+            assert!(
+                [
+                    "INTEGER",
+                    "BIGINT",
+                    "NUMERIC(",
+                    "VARCHAR(",
+                    "DATE",
+                    "TIMESTAMP",
+                    "DOUBLE PRECISION"
+                ]
+                .iter()
+                .any(|prefix| spelled.starts_with(prefix)),
+                "PostgreSQL type `{spelled}` is outside postgresql-type-mapping"
+            );
+            assert!(!spelled.starts_with("CHAR("), "{spelled}");
+        }
+        for (_, column_type) in WIDE_COLUMNS {
+            let spelled = ddl_type(Source::Trino, *column_type);
+            assert!(
+                [
+                    "INTEGER",
+                    "BIGINT",
+                    "DECIMAL(",
+                    "VARCHAR(",
+                    "DATE",
+                    "TIMESTAMP(",
+                    "DOUBLE"
+                ]
+                .iter()
+                .any(|prefix| spelled.starts_with(prefix)),
+                "Trino type `{spelled}` is outside trino-type-mapping"
+            );
         }
     }
 
     #[test]
     fn create_table_ddl_declares_every_column_not_null_with_the_id_primary_key() {
-        let tier = Tier {
-            name: "narrow_small",
-            target_rows: 100_000,
-            columns: NARROW_COLUMNS,
-        };
         assert_eq!(
-            create_table_ddl(&tier),
+            create_table_ddl(Source::Mysql, &narrow_small()),
             "CREATE TABLE IF NOT EXISTS narrow_small (id INT NOT NULL, \
              big_id BIGINT NOT NULL, amount DECIMAL(10,2) NOT NULL, \
              name VARCHAR(40) NOT NULL, code CHAR(8) NOT NULL, \
@@ -600,19 +893,20 @@ mod tests {
     }
 
     #[test]
-    fn create_table_ddl_is_idempotent_via_if_not_exists() {
-        let tier = Tier::all()[2];
-        assert!(create_table_ddl(&tier).starts_with("CREATE TABLE IF NOT EXISTS wide "));
+    fn postgres_create_table_ddl_uses_postgres_spellings() {
+        assert_eq!(
+            create_table_ddl(Source::Postgres, &narrow_small()),
+            "CREATE TABLE IF NOT EXISTS narrow_small (id INTEGER NOT NULL, \
+             big_id BIGINT NOT NULL, amount NUMERIC(10,2) NOT NULL, \
+             name VARCHAR(40) NOT NULL, code VARCHAR(8) NOT NULL, \
+             order_date DATE NOT NULL, created_at TIMESTAMP NOT NULL, \
+             price DOUBLE PRECISION NOT NULL, PRIMARY KEY (id))"
+        );
     }
 
     #[test]
     fn seed_insert_names_every_column_and_seeds_base_seed_rows_row_tuples() {
-        let tier = Tier {
-            name: "narrow_small",
-            target_rows: 100_000,
-            columns: NARROW_COLUMNS,
-        };
-        let sql = seed_insert(&tier);
+        let sql = seed_insert(&narrow_small());
         assert!(sql.starts_with(
             "INSERT INTO narrow_small (id, big_id, amount, name, code, order_date, \
              created_at, price) VALUES "
@@ -622,12 +916,7 @@ mod tests {
 
     #[test]
     fn seed_insert_derives_every_column_from_the_literal_row_number() {
-        let tier = Tier {
-            name: "narrow_small",
-            target_rows: 100_000,
-            columns: NARROW_COLUMNS,
-        };
-        let sql = seed_insert(&tier);
+        let sql = seed_insert(&narrow_small());
         assert!(sql.contains("CAST(1 AS SIGNED)"), "id/big_id row 1: {sql}");
         assert!(
             sql.contains("CAST(1 AS DECIMAL(10,2))"),
@@ -648,24 +937,14 @@ mod tests {
 
     #[test]
     fn doubling_step_selects_from_and_into_the_same_table() {
-        let tier = Tier {
-            name: "wide",
-            target_rows: 200_000,
-            columns: WIDE_COLUMNS,
-        };
-        let sql = doubling_step(&tier, 500);
+        let sql = doubling_step(&Tier::all()[2], 500);
         assert!(sql.starts_with("INSERT INTO wide SELECT "));
         assert!(sql.ends_with(" FROM wide"));
     }
 
     #[test]
     fn doubling_step_offsets_every_column_by_the_current_row_count() {
-        let tier = Tier {
-            name: "narrow_small",
-            target_rows: 100_000,
-            columns: NARROW_COLUMNS,
-        };
-        let sql = doubling_step(&tier, 500);
+        let sql = doubling_step(&narrow_small(), 500);
         assert!(
             sql.contains("CAST((id + 500) AS SIGNED)"),
             "id/big_id offset: {sql}"
@@ -692,6 +971,110 @@ mod tests {
             select_list.matches("CAST(").count() + select_list.matches("DATE_ADD(").count(),
             tier.columns.len()
         );
+    }
+
+    #[test]
+    fn mysql_seed_statements_keep_the_doubling_shape() {
+        let tier = Tier::all()[1];
+        let plan = seeding_plan(&tier);
+        let statements = seed_statements(Source::Mysql, &tier);
+        assert_eq!(statements[0], "DROP TABLE IF EXISTS narrow_large");
+        assert_eq!(statements[1], create_table_ddl(Source::Mysql, &tier));
+        assert_eq!(statements[2], seed_insert(&tier));
+        assert_eq!(statements.len(), 3 + plan.doubling_offsets.len() + 1);
+        assert_eq!(
+            statements.last().map(String::as_str),
+            Some("DELETE FROM narrow_large WHERE id > 1000000")
+        );
+    }
+
+    #[test]
+    fn postgres_seed_statements_fill_from_generate_series_in_one_insert() {
+        let statements = seed_statements(Source::Postgres, &narrow_small());
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0], "DROP TABLE IF EXISTS narrow_small");
+        let fill = &statements[2];
+        assert!(
+            fill.starts_with(
+                "INSERT INTO narrow_small (id, big_id, amount, name, code, order_date, \
+                 created_at, price) SELECT CAST(n AS INTEGER), CAST(n AS BIGINT), \
+                 CAST(n AS NUMERIC(10,2)), CAST(n AS VARCHAR), CAST(n AS VARCHAR), \
+                 DATE '2020-01-01' + CAST(n AS INTEGER), \
+                 TIMESTAMP '2020-01-01 00:00:00' + n * INTERVAL '1 minute', \
+                 CAST(n AS DOUBLE PRECISION)"
+            ),
+            "{fill}"
+        );
+        assert!(
+            fill.ends_with(" FROM generate_series(1, 100000) AS g(n)"),
+            "{fill}"
+        );
+    }
+
+    #[test]
+    fn trino_seed_statements_drop_then_ctas_into_the_memory_catalog() {
+        let statements = seed_statements(Source::Trino, &narrow_small());
+        assert_eq!(
+            statements,
+            [
+                "DROP TABLE IF EXISTS memory.adbc_vs.narrow_small".to_string(),
+                "CREATE TABLE memory.adbc_vs.narrow_small AS SELECT \
+                 CAST(n AS INTEGER) AS id, CAST(n AS BIGINT) AS big_id, \
+                 CAST(n AS DECIMAL(10,2)) AS amount, \
+                 CAST(CAST(n AS VARCHAR) AS VARCHAR(40)) AS name, \
+                 CAST(CAST(n AS VARCHAR) AS VARCHAR(8)) AS code, \
+                 date_add('day', n, DATE '2020-01-01') AS order_date, \
+                 CAST(date_add('minute', n, TIMESTAMP '2020-01-01 00:00:00') AS TIMESTAMP(3)) \
+                 AS created_at, CAST(n AS DOUBLE) AS price \
+                 FROM (SELECT block_index * 10000 + block_row AS n \
+                 FROM UNNEST(sequence(0, 9)) AS blocks(block_index) \
+                 CROSS JOIN UNNEST(sequence(1, 10000)) AS block_rows(block_row)) AS g \
+                 WHERE n <= 100000"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn trino_ctas_blocks_cover_every_real_tier_exactly_once() {
+        for tier in Tier::all() {
+            let last_block = tier.target_rows.div_ceil(TRINO_BLOCK_ROWS) - 1;
+            assert!(
+                (last_block + 1) * TRINO_BLOCK_ROWS >= tier.target_rows,
+                "tier {} generates too few row numbers",
+                tier.name
+            );
+            assert!(
+                last_block < TRINO_BLOCK_ROWS,
+                "tier {} needs a block sequence over Trino's 10,000-element limit",
+                tier.name
+            );
+            assert!(trino_generate_ctas(&tier).contains(&format!("sequence(0, {last_block})")));
+        }
+    }
+
+    #[test]
+    fn every_source_seeds_every_column_of_every_tier() {
+        for source in ALL_SOURCES {
+            for tier in Tier::all() {
+                let expected: Vec<String> = tier
+                    .columns
+                    .iter()
+                    .map(|(_, column_type)| value_expression(source, *column_type, "n"))
+                    .collect();
+                assert_eq!(select_list(source, &tier, "n"), expected.join(", "));
+                assert_eq!(expected.len(), tier.columns.len());
+            }
+        }
+    }
+
+    #[test]
+    fn table_exists_query_reads_each_sources_own_catalog() {
+        let tier = narrow_small();
+        assert!(table_exists_query(Source::Mysql, &tier).contains("TABLE_SCHEMA = DATABASE()"));
+        assert!(table_exists_query(Source::Postgres, &tier).contains("table_schema = 'public'"));
+        assert!(table_exists_query(Source::Trino, &tier)
+            .contains("FROM memory.information_schema.tables WHERE table_schema = 'adbc_vs'"));
     }
 
     fn simulate_final_row_count(tier: &Tier, plan: &SeedingPlan) -> u64 {
@@ -770,12 +1153,7 @@ mod tests {
 
     #[test]
     fn trim_statement_deletes_by_the_tiers_own_id_column_and_target() {
-        let tier = Tier {
-            name: "narrow_large",
-            target_rows: 1_000_000,
-            columns: NARROW_COLUMNS,
-        };
-        let plan = seeding_plan(&tier);
+        let plan = seeding_plan(&Tier::all()[1]);
         assert_eq!(
             plan.trim_statement,
             Some("DELETE FROM narrow_large WHERE id > 1000000".to_string())
@@ -784,32 +1162,23 @@ mod tests {
 
     #[test]
     fn nominal_row_width_sums_the_documented_fixed_estimate_per_column() {
-        let narrow = Tier {
-            name: "narrow_small",
-            target_rows: 100_000,
-            columns: NARROW_COLUMNS,
-        };
         // id(4) + big_id(8) + amount DECIMAL(10,2)(10/2+1=6) + name VARCHAR(40)(40)
         // + code CHAR(8)(8) + order_date DATE(3) + created_at DATETIME(8) + price DOUBLE(8)
-        assert_eq!(nominal_row_width(&narrow), 4 + 8 + 6 + 40 + 8 + 3 + 8 + 8);
-
-        let wide = Tier {
-            name: "wide",
-            target_rows: 200_000,
-            columns: WIDE_COLUMNS,
-        };
+        assert_eq!(
+            nominal_row_width(&narrow_small()),
+            4 + 8 + 6 + 40 + 8 + 3 + 8 + 8
+        );
         // id(4) + big_id(8) + 3×DECIMAL(12,4)(12/2+1=7 each) + 4×VARCHAR(200)(200 each)
         // + code CHAR(8)(8) + order_date DATE(3) + created_at DATETIME(8) + price DOUBLE(8)
         assert_eq!(
-            nominal_row_width(&wide),
+            nominal_row_width(&Tier::all()[2]),
             4 + 8 + 7 * 3 + 200 * 4 + 8 + 3 + 8 + 8
         );
     }
 
     #[test]
     fn narrow_row_width_lands_near_the_planned_hundred_bytes_per_row() {
-        let tier = Tier::all()[0];
-        let width = nominal_row_width(&tier);
+        let width = nominal_row_width(&narrow_small());
         assert!(
             (50..=150).contains(&width),
             "narrow_small's nominal width {width} is far from the ~100B/row the plan expects"
@@ -818,8 +1187,7 @@ mod tests {
 
     #[test]
     fn wide_row_width_lands_near_the_planned_kilobyte_per_row() {
-        let tier = Tier::all()[2];
-        let width = nominal_row_width(&tier);
+        let width = nominal_row_width(&Tier::all()[2]);
         assert!(
             (500..=1500).contains(&width),
             "wide's nominal width {width} is far from the ~1KB/row the plan expects"
@@ -827,17 +1195,14 @@ mod tests {
     }
 
     #[test]
-    fn paren_number_reads_the_first_number_inside_parentheses() {
-        assert_eq!(paren_number("DECIMAL(12,4)"), Some(12));
-        assert_eq!(paren_number("VARCHAR(200)"), Some(200));
-        assert_eq!(paren_number("INT"), None);
-    }
-
-    #[test]
     fn drop_table_statement_names_the_tiers_table_and_tolerates_its_absence() {
         assert_eq!(
-            drop_table_statement(&Tier::all()[0]),
+            drop_table_statement(Source::Mysql, &narrow_small()),
             "DROP TABLE IF EXISTS narrow_small"
+        );
+        assert_eq!(
+            drop_table_statement(Source::Trino, &narrow_small()),
+            "DROP TABLE IF EXISTS memory.adbc_vs.narrow_small"
         );
     }
 
@@ -850,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn row_count_of_reads_the_number_mysql_rendered() {
+    fn row_count_of_reads_the_number_the_source_rendered() {
         assert_eq!(row_count_of("100000", "narrow_small"), 100_000);
     }
 
@@ -881,19 +1246,29 @@ mod tests {
 
     #[test]
     fn no_mismatch_when_every_side_exposes_exactly_the_declared_columns() {
-        let tier = Tier::all()[0];
         let names = narrow_column_names();
         let sides = [
             exposing("MYSQLVS_ADBC", &names),
             exposing("MYSQLVS_JDBC", &names),
         ];
 
-        assert_eq!(column_set_mismatch(&tier, &sides), None);
+        assert_eq!(
+            column_set_mismatch(Source::Mysql, &narrow_small(), &sides),
+            None
+        );
+    }
+
+    #[test]
+    fn no_mismatch_for_a_single_adbc_only_side_exposing_the_declared_columns() {
+        let sides = [exposing("TRINOVS_ADBC", &narrow_column_names())];
+        assert_eq!(
+            column_set_mismatch(Source::Trino, &narrow_small(), &sides),
+            None
+        );
     }
 
     #[test]
     fn no_mismatch_when_a_side_exposes_the_declared_columns_in_another_order() {
-        let tier = Tier::all()[0];
         let mut reordered = narrow_column_names();
         reordered.reverse();
         let sides = [
@@ -902,7 +1277,7 @@ mod tests {
         ];
 
         assert_eq!(
-            column_set_mismatch(&tier, &sides),
+            column_set_mismatch(Source::Mysql, &narrow_small(), &sides),
             None,
             "ordinal position is not part of the column set the benchmark compares"
         );
@@ -910,31 +1285,29 @@ mod tests {
 
     #[test]
     fn a_side_omitting_a_declared_column_is_named_with_the_column_it_dropped() {
-        let tier = Tier::all()[0];
         let narrowed: Vec<&str> = narrow_column_names()
             .into_iter()
             .filter(|name| *name != "code")
             .collect();
         let sides = [
-            exposing("MYSQLVS_ADBC", &narrowed),
-            exposing("MYSQLVS_JDBC", &narrow_column_names()),
+            exposing("PGVS_ADBC", &narrowed),
+            exposing("PGVS_JDBC", &narrow_column_names()),
         ];
 
-        let mismatch =
-            column_set_mismatch(&tier, &sides).expect("a narrower side is not a fair comparison");
+        let mismatch = column_set_mismatch(Source::Postgres, &narrow_small(), &sides)
+            .expect("a narrower side is not a fair comparison");
         assert!(
-            mismatch.contains("MYSQLVS_ADBC") && mismatch.contains("missing: code"),
+            mismatch.contains("PGVS_ADBC") && mismatch.contains("missing: code"),
             "the report must name the side and the column it dropped: {mismatch}"
         );
         assert!(
-            mismatch.contains("narrow_small"),
-            "the report must name the tier it fails: {mismatch}"
+            mismatch.contains("narrow_small") && mismatch.contains("PostgreSQL"),
+            "the report must name the tier and source it fails: {mismatch}"
         );
     }
 
     #[test]
     fn a_side_exposing_a_column_beyond_the_declaration_is_named_with_it() {
-        let tier = Tier::all()[0];
         let mut widened = narrow_column_names();
         widened.push("stowaway");
         let sides = [
@@ -942,8 +1315,8 @@ mod tests {
             exposing("MYSQLVS_JDBC", &widened),
         ];
 
-        let mismatch =
-            column_set_mismatch(&tier, &sides).expect("a wider side is not a fair comparison");
+        let mismatch = column_set_mismatch(Source::Mysql, &narrow_small(), &sides)
+            .expect("a wider side is not a fair comparison");
         assert!(
             mismatch.contains("MYSQLVS_JDBC") && mismatch.contains("unexpected: stowaway"),
             "the report must name the side and the column it added: {mismatch}"
@@ -952,13 +1325,13 @@ mod tests {
 
     #[test]
     fn a_report_accounts_for_every_side_even_when_only_one_diverges() {
-        let tier = Tier::all()[0];
         let sides = [
             exposing("MYSQLVS_ADBC", &[]),
             exposing("MYSQLVS_JDBC", &narrow_column_names()),
         ];
 
-        let mismatch = column_set_mismatch(&tier, &sides).expect("an empty side is a divergence");
+        let mismatch = column_set_mismatch(Source::Mysql, &narrow_small(), &sides)
+            .expect("an empty side is a divergence");
         assert!(
             mismatch.contains("MYSQLVS_JDBC"),
             "a reader must be able to tell the matching side apart from an unreported one: \
@@ -975,7 +1348,6 @@ mod tests {
 
     #[test]
     fn a_case_difference_between_the_sides_is_a_divergence() {
-        let tier = Tier::all()[0];
         let upper_cased: Vec<String> = narrow_column_names()
             .iter()
             .map(|name| name.to_ascii_uppercase())
@@ -988,7 +1360,7 @@ mod tests {
             exposing("MYSQLVS_JDBC", &narrow_column_names()),
         ];
 
-        let mismatch = column_set_mismatch(&tier, &sides).expect(
+        let mismatch = column_set_mismatch(Source::Mysql, &narrow_small(), &sides).expect(
             "the benchmark double-quotes every column name, so `\"ID\"` and `\"id\"` are \
              different identifiers and a query built for one side would fail on the other",
         );

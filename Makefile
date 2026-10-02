@@ -127,9 +127,34 @@ test-e2e-trino: cross-udf-build stack-up-exasol stack-up-trino stack-up-mysql
 test-registry-live:
 	cargo test -p adbc-vs-adapter --features registry-live --test provisioning_test -- registry_live
 
+# One target per source, each depending on Exasol plus only its own source.
+# `bench` runs them one after another through sub-makes rather than as its
+# own prerequisites, so even `make -j` never times two sources at once on
+# the same cores, then combines the newest per-source CSVs into one table.
+BENCH_DIR ?= dist/bench
+
 .PHONY: bench
-bench: cross-udf-build stack-up-exasol stack-up-mysql
+bench:
+	$(MAKE) bench-mysql
+	$(MAKE) bench-postgres
+	$(MAKE) bench-trino
+	$(MAKE) bench-summary
+
+.PHONY: bench-mysql
+bench-mysql: cross-udf-build stack-up-exasol stack-up-mysql
 	cargo test -p adbc-vs-adapter --features bench --test bench_mysql_test -- --test-threads=1 --nocapture
+
+.PHONY: bench-postgres
+bench-postgres: cross-udf-build stack-up-exasol stack-up-postgres
+	cargo test -p adbc-vs-adapter --features bench --test bench_postgres_test -- --test-threads=1 --nocapture
+
+.PHONY: bench-trino
+bench-trino: cross-udf-build stack-up-exasol stack-up-trino
+	cargo test -p adbc-vs-adapter --features bench --test bench_trino_test -- --test-threads=1 --nocapture
+
+.PHONY: bench-summary
+bench-summary:
+	python3 scripts/bench_summary.py $(BENCH_DIR)
 
 # --- release packaging --------------------------------------------------------
 #
