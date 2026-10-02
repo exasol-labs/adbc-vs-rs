@@ -90,6 +90,14 @@ pub struct Dialect {
     properties: &'static [(&'static str, &'static str)],
 }
 
+/// Virtual-schema property that turns the JDBC adapter's usage telemetry off.
+///
+/// Both pinned virtual-schema jars read it (`AdapterTelemetryConfiguration`
+/// in `virtual-schema-common-java`: any non-`true` value disables). Without
+/// it the adapter script posts to a remote endpoint during planning, which a
+/// throughput benchmark must not depend on.
+const TELEMETRY_OFF: (&str, &str) = ("TELEMETRY", "false");
+
 /// The fixed bucket directory ExaLoader reads JDBC driver registrations from.
 ///
 /// Fixed by the database rather than by this benchmark: the loader looks for
@@ -142,7 +150,7 @@ pub const MYSQL: Dialect = Dialect {
     url_database: "",
     user: mysql::USER,
     password: mysql::PASSWORD,
-    properties: &[("CATALOG_NAME", mysql::DATABASE)],
+    properties: &[("CATALOG_NAME", mysql::DATABASE), TELEMETRY_OFF],
 };
 
 /// Exasol's `postgresql-virtual-schema` over pgJDBC.
@@ -192,6 +200,7 @@ pub const POSTGRES: Dialect = Dialect {
         // default — the column gate and every benchmark query compare
         // double-quoted lowercase names.
         ("POSTGRESQL_IDENTIFIER_MAPPING", "PRESERVE_ORIGINAL_CASE"),
+        TELEMETRY_OFF,
     ],
 };
 
@@ -605,7 +614,8 @@ mod tests {
         assert_eq!(
             create_virtual_schema_statement(&MYSQL, "MYSQLVS_JDBC"),
             "CREATE VIRTUAL SCHEMA MYSQLVS_JDBC USING SCHEMA_FOR_VS_SCRIPT.ADAPTER_SCRIPT_MYSQL \
-             WITH CONNECTION_NAME = 'MYSQL_JDBC_CONNECTION' CATALOG_NAME = 'adbc_vs'"
+             WITH CONNECTION_NAME = 'MYSQL_JDBC_CONNECTION' CATALOG_NAME = 'adbc_vs' \
+             TELEMETRY = 'false'"
         );
     }
 
@@ -615,7 +625,8 @@ mod tests {
             create_virtual_schema_statement(&POSTGRES, "PGVS_JDBC"),
             "CREATE VIRTUAL SCHEMA PGVS_JDBC USING SCHEMA_FOR_VS_SCRIPT.ADAPTER_SCRIPT_POSTGRESQL \
              WITH CONNECTION_NAME = 'POSTGRESQL_JDBC_CONNECTION' CATALOG_NAME = 'adbc_vs' \
-             SCHEMA_NAME = 'public' POSTGRESQL_IDENTIFIER_MAPPING = 'PRESERVE_ORIGINAL_CASE'"
+             SCHEMA_NAME = 'public' POSTGRESQL_IDENTIFIER_MAPPING = 'PRESERVE_ORIGINAL_CASE' \
+             TELEMETRY = 'false'"
         );
     }
 
