@@ -1,4 +1,4 @@
-//! Runs the full transmission-throughput benchmark against the Docker
+//! Runs the full MySQL transmission-throughput benchmark against the Docker
 //! Compose stack: every tier `bench_data::Tier::all()` declares, alternating
 //! ADBC and JDBC samples, then writes the CSV and Markdown report under
 //! `dist/bench/`.
@@ -20,7 +20,7 @@ use common::{bench, bench_stack, exasol, report};
 
 #[test]
 fn benchmark() {
-    let stack = bench_stack::shared();
+    let stack = bench_stack::shared_mysql();
 
     let samples = bench::run(stack);
     let provenance = bench::gather_provenance(stack);
