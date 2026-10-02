@@ -21,7 +21,7 @@ exasol-e2e = []
 policy-check = []
 # The transmission-throughput benchmark against the full Docker Compose
 # stack. `make bench` enables it; a plain `cargo test --workspace` leaves
-# `tests/bench_mysql_test.rs` empty, so the fast tier never needs a container.
+# every `tests/bench_*_test.rs` empty, so the fast tier never needs a container.
 bench = []
 # The one check that reaches the public driver registry: it resolves every
 # driver's declared version range against the index the CDN publishes today,

@@ -130,3 +130,65 @@ fn bring_up_mysql() -> BenchStack {
         jdbc: Some(MYSQL_JDBC_BASELINE),
     }
 }
+
+// ---------------------------------------------------------------------------
+// PostgreSQL
+// ---------------------------------------------------------------------------
+
+/// The ADBC-fronted virtual schema over the PostgreSQL bench source.
+///
+/// Named apart from [`super::postgres_stack::POSTGRES_VIRTUAL_SCHEMA`] for the
+/// same reason as [`ADBC_VIRTUAL_SCHEMA`].
+pub const POSTGRES_ADBC_VIRTUAL_SCHEMA: &str = "PGVS_ADBC";
+
+/// The JDBC-based `postgresql-virtual-schema` — the PostgreSQL benchmark's
+/// comparison target.
+pub const POSTGRES_JDBC_VIRTUAL_SCHEMA: &str = "PGVS_JDBC";
+
+/// The `CONNECTION` object the PostgreSQL ADBC virtual schema resolves.
+pub const POSTGRES_CONNECTION: &str = "ADBC_VS_POSTGRES_BENCH";
+
+/// The PostgreSQL benchmark's JDBC baseline, as [`super::jdbc_vs`] provisions
+/// it (`jdbc_vs::POSTGRES`). `FETCHSIZE` is the same as MySQL's.
+pub const POSTGRES_JDBC_BASELINE: JdbcBaseline = JdbcBaseline {
+    virtual_schema: POSTGRES_JDBC_VIRTUAL_SCHEMA,
+    vs_jar_name: "postgresql-virtual-schema",
+    vs_jar_version: "4.0.2",
+    driver_name: "PostgreSQL JDBC Driver (pgJDBC)",
+    driver_version: "42.7.13",
+    fetchsize: "100000",
+};
+
+/// The PostgreSQL benchmark stack, brought up on first use; the twin of
+/// [`shared_mysql`], with its own [`OnceLock`].
+pub fn shared_postgres() -> &'static BenchStack {
+    static STACK: OnceLock<BenchStack> = OnceLock::new();
+    STACK.get_or_init(bring_up_postgres)
+}
+
+fn bring_up_postgres() -> BenchStack {
+    let exasol = Exasol::from_stack();
+    let postgres = super::postgres::Postgres::from_stack();
+
+    slc::install(&exasol);
+    udf::deploy(&exasol);
+    schema::create_bucketfs_connection(&exasol);
+    schema::create_postgres_connection(&exasol, POSTGRES_CONNECTION, super::postgres::DATABASE);
+    schema::create_virtual_schema(
+        &exasol,
+        adbc_vs_scan::driver::Driver::Postgres,
+        POSTGRES_ADBC_VIRTUAL_SCHEMA,
+        POSTGRES_CONNECTION,
+    );
+
+    jdbc_vs::install_postgres(&exasol, POSTGRES_JDBC_VIRTUAL_SCHEMA);
+
+    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SINK_SCHEMA}"));
+
+    BenchStack {
+        exasol,
+        source: SourceDb::Postgres(postgres),
+        adbc_virtual_schema: POSTGRES_ADBC_VIRTUAL_SCHEMA,
+        jdbc: Some(POSTGRES_JDBC_BASELINE),
+    }
+}
