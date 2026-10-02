@@ -192,3 +192,68 @@ fn bring_up_postgres() -> BenchStack {
         jdbc: Some(POSTGRES_JDBC_BASELINE),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Trino: an ADBC-only benchmark stack.
+//
+// Exasol publishes no JDBC-based virtual schema for Trino as a source, so
+// there is no comparison target to provision and the Trino stack carries
+// `jdbc: None`; the runner then times and reports the ADBC side alone.
+// ---------------------------------------------------------------------------
+
+use super::trino::{self, Trino};
+
+/// The ADBC-fronted virtual schema over the Trino source.
+///
+/// Named apart from [`super::trino_stack::TRINO_VIRTUAL_SCHEMA`] so a local
+/// session that left the e2e stack standing never has its schema replaced by
+/// the benchmark's, or the other way round.
+pub const TRINO_ADBC_VIRTUAL_SCHEMA: &str = "TRINOVS_ADBC";
+
+/// The `CONNECTION` object the Trino virtual schema resolves, addressing the
+/// seeded `memory` catalog and schema as the benign principal.
+///
+/// Named apart from [`super::trino_stack::TRINO_CONNECTION`] for the same
+/// reason as [`TRINO_ADBC_VIRTUAL_SCHEMA`].
+pub const TRINO_CONNECTION: &str = "ADBC_VS_TRINO_BENCH";
+
+/// The Trino benchmark stack, brought up on first use.
+///
+/// A failure anywhere in setup panics rather than returning, so no benchmark
+/// sample can be timed — or reported — against a stack that never came up.
+/// [`Trino::from_stack`] is also the readiness gate: it waits, bounded, until
+/// Trino answers an authenticated query before any tier is seeded.
+pub fn shared_trino() -> &'static BenchStack {
+    static STACK: OnceLock<BenchStack> = OnceLock::new();
+    STACK.get_or_init(bring_up_trino)
+}
+
+fn bring_up_trino() -> BenchStack {
+    let exasol = Exasol::from_stack();
+    let trino = Trino::from_stack();
+
+    slc::install(&exasol);
+    udf::deploy(&exasol);
+    schema::create_bucketfs_connection(&exasol);
+    exasol.execute(&format!(
+        "CREATE OR REPLACE CONNECTION {TRINO_CONNECTION} TO {} USER {} IDENTIFIED BY {}",
+        schema::quote_literal(&trino::driver_uri()),
+        schema::quote_literal(trino::USER),
+        schema::quote_literal(trino::PASSWORD)
+    ));
+    schema::create_virtual_schema(
+        &exasol,
+        adbc_vs_scan::driver::Driver::Trino,
+        TRINO_ADBC_VIRTUAL_SCHEMA,
+        TRINO_CONNECTION,
+    );
+
+    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SINK_SCHEMA}"));
+
+    BenchStack {
+        exasol,
+        source: SourceDb::Trino(trino),
+        adbc_virtual_schema: TRINO_ADBC_VIRTUAL_SCHEMA,
+        jdbc: None,
+    }
+}
