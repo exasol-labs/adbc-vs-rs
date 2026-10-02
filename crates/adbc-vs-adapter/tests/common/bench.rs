@@ -13,7 +13,8 @@
 //!
 //! Each [`Tier`] runs [`ROUNDS`] rounds — one discarded warm-up followed by
 //! [`MEASURED_ROUNDS`] measured rounds — and every round runs both adapters,
-//! one after the other. [`round_order`] swaps which adapter goes first on
+//! one after the other (or the ADBC side alone, when the stack carries no
+//! JDBC baseline). [`round_order`] swaps which adapter goes first on
 //! every round (ADBC, JDBC, ADBC, JDBC becomes JDBC-first on the odd rounds),
 //! so a systematic effect that favors "whichever adapter runs first" — cache
 //! state, thermal drift, background load easing off — lands on both adapters
@@ -22,9 +23,9 @@
 //! # Checksum
 //!
 //! [`bench_data`] seeds every tier with contiguous ids `1..=target_rows` (see
-//! its own module doc), so the sum of a tier's id column has a closed form —
-//! [`expected_checksum`] — that needs no extra round trip to MySQL to compute
-//! and no dependency on which adapter answered it.
+//! its own module doc) in every source, so the sum of a tier's id column has
+//! a closed form — [`expected_checksum`] — that needs no extra round trip to
+//! the source to compute and no dependency on which adapter answered it.
 //!
 //! # Warm-up samples
 //!
@@ -39,8 +40,8 @@
 use std::fs;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::bench_data::{self, Tier};
-use super::bench_stack::{self, BenchStack};
+use super::bench_data::{self, Source, Tier};
+use super::bench_stack::{self, BenchStack, JdbcBaseline};
 use super::exasol::{self, Exasol};
 use super::report::{Adapter, Provenance, Sample};
 
@@ -53,29 +54,16 @@ const ROUNDS: u32 = WARM_UP_ROUNDS + MEASURED_ROUNDS;
 /// sample replaces.
 const SINK_TABLE: &str = "SINK";
 
-/// The `mysql-virtual-schema` jar version and MySQL Connector/J version
-/// [`super::jdbc_vs`] provisions, and the `FETCHSIZE` its `settings.cfg`
-/// registers.
-///
-/// Mirrored here rather than imported: `jdbc_vs`'s jar constants and the
-/// `FETCHSIZE` literal inside its generated `settings.cfg` are private to
-/// that module, existing only to build BucketFS upload paths and driver
-/// registration text. Reporting a human-readable provenance string is this
-/// module's own concern, not a reason to expose a new public item there —
-/// but it does mean the two modules must be bumped together if either one's
-/// version or `FETCHSIZE` ever changes.
-const VS_JAR_VERSION: &str = "6.0.3";
-const CONNECTOR_J_VERSION: &str = "9.6.0";
-const JDBC_FETCHSIZE: &str = "100000";
-
 /// The shared object `make cross-udf-build` produces, relative to the
 /// workspace root — mirrored from [`super::udf`], whose own copy of this
 /// path is private to its BucketFS upload.
 const BUILT_LIBRARY: &str = "target/release/libadbc_vs_adapter.so";
 
-/// Runs every [`Tier`] the benchmark defines: seeds it, gates it on the
-/// fairness column-set check, then times [`ROUNDS`] alternating rounds of
-/// both adapters, verifying and echoing every sample as it completes.
+/// Runs every [`Tier`] the benchmark defines against `stack`'s source: seeds
+/// it, gates it on the fairness column-set check, then times [`ROUNDS`]
+/// alternating rounds of every adapter the stack carries (ADBC, plus JDBC
+/// when it has a baseline), verifying and echoing every sample as it
+/// completes.
 ///
 /// A failure anywhere — an unseeded tier, a column mismatch, a dropped row, a
 /// wrong checksum — panics rather than being recorded, so nothing this
@@ -85,8 +73,8 @@ pub fn run(stack: &BenchStack) -> Vec<Sample> {
     let mut samples = Vec::new();
 
     for tier in Tier::all() {
-        bench_data::ensure_seeded(&stack.mysql, &tier);
-        bench_data::assert_matching_columns(&stack.exasol, &tier);
+        bench_data::ensure_seeded(&stack.source, &tier);
+        bench_data::assert_matching_columns(stack, &tier);
 
         let expected_checksum = expected_checksum(tier.target_rows);
 
@@ -94,7 +82,7 @@ pub fn run(stack: &BenchStack) -> Vec<Sample> {
             let warm_up = is_warm_up_round(round_index);
             let run_index = round_index.saturating_sub(WARM_UP_ROUNDS);
 
-            for adapter in round_order(round_index) {
+            for adapter in adapters_for_round(round_index, stack.jdbc.is_some()) {
                 let sample =
                     time_sample(stack, &tier, adapter, run_index, warm_up, expected_checksum);
                 super::report::print_sample(&sample);
@@ -116,7 +104,10 @@ fn time_sample(
     warm_up: bool,
     expected_checksum: u64,
 ) -> Sample {
-    let statement = sink_ctas_statement(tier, virtual_schema_for(adapter));
+    let statement = sink_ctas_statement(
+        tier,
+        virtual_schema_for(adapter, stack.adbc_virtual_schema, stack.jdbc.as_ref()),
+    );
 
     let started = Instant::now();
     stack.exasol.execute(&statement);
@@ -183,10 +174,8 @@ fn verify_sink(exasol: &Exasol, tier: &Tier, expected_checksum: u64) {
     );
 }
 
-/// The row-number-driving primary key column's name — `columns[0]` by the
-/// convention [`Tier`] documents.
 fn id_column(tier: &Tier) -> &'static str {
-    tier.columns[0].0
+    tier.id_column()
 }
 
 /// The sum of every id from 1 to `target_rows`, the checksum a tier's
@@ -227,10 +216,20 @@ fn sink_table() -> String {
     format!("{}.{SINK_TABLE}", bench_stack::SINK_SCHEMA)
 }
 
-fn virtual_schema_for(adapter: Adapter) -> &'static str {
+/// The virtual schema `adapter`'s samples read through. A JDBC sample on a
+/// stack with no JDBC baseline is a harness bug, never a run to time.
+fn virtual_schema_for<'a>(
+    adapter: Adapter,
+    adbc_virtual_schema: &'a str,
+    jdbc: Option<&'a JdbcBaseline>,
+) -> &'a str {
     match adapter {
-        Adapter::Abc => bench_stack::ADBC_VIRTUAL_SCHEMA,
-        Adapter::Jdbc => bench_stack::JDBC_VIRTUAL_SCHEMA,
+        Adapter::Abc => adbc_virtual_schema,
+        Adapter::Jdbc => jdbc
+            .map(|baseline| baseline.virtual_schema)
+            .unwrap_or_else(|| {
+                panic!("a JDBC sample was requested on a stack with no JDBC baseline")
+            }),
     }
 }
 
@@ -250,6 +249,30 @@ fn round_order(round_index: u32) -> [Adapter; 2] {
         [Adapter::Abc, Adapter::Jdbc]
     } else {
         [Adapter::Jdbc, Adapter::Abc]
+    }
+}
+
+/// The adapters round `round_index` runs, in order: [`round_order`] when the
+/// stack has a JDBC baseline, the ADBC side alone when it has none.
+fn adapters_for_round(round_index: u32, has_jdbc: bool) -> Vec<Adapter> {
+    if has_jdbc {
+        round_order(round_index).to_vec()
+    } else {
+        vec![Adapter::Abc]
+    }
+}
+
+/// The source-specific tuning setting a report records beside the source
+/// image, as (label, one-value query), or `None` when the source has none
+/// worth recording.
+fn source_setting_query(source: Source) -> Option<(&'static str, &'static str)> {
+    match source {
+        Source::Mysql => Some((
+            "MySQL innodb_buffer_pool_size",
+            "SELECT @@innodb_buffer_pool_size",
+        )),
+        Source::Postgres => Some(("PostgreSQL shared_buffers", "SHOW shared_buffers")),
+        Source::Trino => None,
     }
 }
 
@@ -276,22 +299,33 @@ pub fn gather_provenance(stack: &BenchStack) -> Provenance {
         .unwrap_or_else(|error| panic!("reading the host CPU count: {error}"))
         .get();
 
+    let host_load_average = parse_load_average(
+        &fs::read_to_string("/proc/loadavg")
+            .unwrap_or_else(|error| panic!("reading /proc/loadavg: {error}")),
+    );
+
     let docker_version = parse_docker_version(&super::run(
         "reading the docker version",
         "docker",
         &["--version"],
     ));
 
+    let source = stack.source.source();
+    let source_settings = source_setting_query(source)
+        .map(|(label, query)| (label.to_string(), stack.source.query_scalar(query)))
+        .into_iter()
+        .collect();
+
     Provenance {
+        source,
         exasol_image: parse_service_image(&compose_text, "exasol"),
-        mysql_image: parse_service_image(&compose_text, "mysql"),
-        vs_jar_version: VS_JAR_VERSION.to_string(),
-        connector_j_version: CONNECTOR_J_VERSION.to_string(),
-        jdbc_fetchsize: JDBC_FETCHSIZE.to_string(),
+        source_image: parse_service_image(&compose_text, source.name()),
+        jdbc: stack.jdbc,
         so_size_bytes: so_metadata.len(),
         so_mtime: format_utc(so_modified),
-        mysql_innodb_buffer_pool_size: stack.mysql.query_scalar("SELECT @@innodb_buffer_pool_size"),
+        source_settings,
         host_cpu_count,
+        host_load_average,
         docker_version,
         generated_at_utc: format_utc(SystemTime::now()),
     }
@@ -345,6 +379,19 @@ fn parse_docker_version(raw: &str) -> String {
         .unwrap_or(after_prefix)
         .trim()
         .to_string()
+}
+
+/// The 1/5/15-minute load averages out of `/proc/loadavg`'s first three
+/// fields, so a report shows how busy the host was while it sampled.
+fn parse_load_average(raw: &str) -> String {
+    let fields: Vec<&str> = raw.split_whitespace().take(3).collect();
+    assert_eq!(
+        fields.len(),
+        3,
+        "/proc/loadavg answered `{}`, not three load averages",
+        raw.trim()
+    );
+    fields.join(" / ")
 }
 
 fn parse_row_count(rendered: &str, tier_name: &str) -> u64 {
@@ -464,8 +511,65 @@ mod tests {
 
     #[test]
     fn virtual_schema_for_maps_each_adapter_to_its_own_virtual_schema() {
-        assert_eq!(virtual_schema_for(Adapter::Abc), "MYSQLVS_ADBC");
-        assert_eq!(virtual_schema_for(Adapter::Jdbc), "MYSQLVS_JDBC");
+        let jdbc = Some(&bench_stack::MYSQL_JDBC_BASELINE);
+        assert_eq!(
+            virtual_schema_for(Adapter::Abc, bench_stack::ADBC_VIRTUAL_SCHEMA, jdbc),
+            "MYSQLVS_ADBC"
+        );
+        assert_eq!(
+            virtual_schema_for(Adapter::Jdbc, bench_stack::ADBC_VIRTUAL_SCHEMA, jdbc),
+            "MYSQLVS_JDBC"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "no JDBC baseline")]
+    fn virtual_schema_for_refuses_a_jdbc_sample_without_a_baseline() {
+        virtual_schema_for(Adapter::Jdbc, "TRINOVS_ADBC", None);
+    }
+
+    #[test]
+    fn adapters_for_round_alternates_both_adapters_with_a_jdbc_baseline() {
+        for round in 0..ROUNDS {
+            assert_eq!(adapters_for_round(round, true), round_order(round).to_vec());
+        }
+    }
+
+    #[test]
+    fn adapters_for_round_runs_adbc_alone_without_a_jdbc_baseline() {
+        for round in 0..ROUNDS {
+            assert_eq!(adapters_for_round(round, false), vec![Adapter::Abc]);
+        }
+    }
+
+    #[test]
+    fn source_setting_query_keeps_the_mysql_buffer_pool_row() {
+        assert_eq!(
+            source_setting_query(Source::Mysql),
+            Some((
+                "MySQL innodb_buffer_pool_size",
+                "SELECT @@innodb_buffer_pool_size"
+            ))
+        );
+        assert_eq!(source_setting_query(Source::Trino), None);
+    }
+
+    #[test]
+    fn parse_load_average_reads_the_first_three_fields() {
+        assert_eq!(
+            parse_load_average("0.52 0.58 0.59 1/467 12345\n"),
+            "0.52 / 0.58 / 0.59"
+        );
+    }
+
+    #[test]
+    fn parse_service_image_reads_the_postgres_and_trino_services() {
+        let compose = "services:\n  postgres:\n    image: postgres:18.6-trixie\n  trino:\n    image: trinodb/trino:483\n";
+        assert_eq!(
+            parse_service_image(compose, "postgres"),
+            "postgres:18.6-trixie"
+        );
+        assert_eq!(parse_service_image(compose, "trino"), "trinodb/trino:483");
     }
 
     #[test]
