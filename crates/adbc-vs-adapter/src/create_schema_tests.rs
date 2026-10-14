@@ -1086,7 +1086,7 @@ fn a_statement_naming_no_driver_reports_the_missing_property() {
 /// is read from a source that failed it is this module's.
 #[test]
 fn a_source_failing_its_precondition_is_refused_before_any_table_is_discovered() {
-    let mut source = FakeMetadataSource::refusing("this server is missing collation `c`");
+    let mut source = FakeMetadataSource::refusing("this source fails its own precondition `p`");
 
     let Err(error) = discover_supported_source(&mut source) else {
         panic!("a source that fails its own precondition must be refused");
@@ -1094,7 +1094,7 @@ fn a_source_failing_its_precondition_is_refused_before_any_table_is_discovered()
 
     let message = error.to_string();
     assert!(
-        message.contains("this server is missing collation `c`"),
+        message.contains("this source fails its own precondition `p`"),
         "the source's own reason must reach the operator unchanged: {message}"
     );
     assert!(

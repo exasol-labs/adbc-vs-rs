@@ -30,9 +30,9 @@ use adbc_driver_manager::ManagedConnection;
 use crate::adapter_notes::SourceQualifier;
 use crate::metadata::{
     assemble_tables, batch_column, i64_cell, required_i64_cell, required_string_cell, run_query,
-    string_cell, CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
+    CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
 };
-use crate::postgres_type_mapping::{self, ColumnCollation, PostgresColumn};
+use crate::postgres_type_mapping::{self, PostgresColumn};
 
 /// The one PostgreSQL schema a virtual schema exposes, and the namespace
 /// `adapterNotes` records.
@@ -49,19 +49,10 @@ const NULLABLE: &str = "YES";
 /// The one database encoding this release maps a PostgreSQL source from.
 ///
 /// The mapping declares every character column Exasol `VARCHAR` with character
-/// set `UTF8`, and the `COLLATE "C"` suffix `postgres_dialect` renders for an
-/// ordering comparison reproduces Exasol's code-point order only while the
-/// server compares UTF-8 bytes. Under another encoding both are wrong in ways
-/// that surface as wrong rows rather than as an error, which is why the
-/// database is refused instead.
+/// set `UTF8`. Under another encoding that declaration is wrong in a way that
+/// surfaces as wrong rows rather than as an error, which is why the database
+/// is refused instead.
 const REQUIRED_ENCODING: &str = "UTF8";
-
-/// The two spellings a `boolean` takes once cast to text, which is how the
-/// columns query returns `pg_collation.collisdeterministic` — cast rather than
-/// read as a boolean, so no Arrow representation of one has to be assumed of
-/// the driver.
-const DETERMINISTIC: &str = "true";
-const NONDETERMINISTIC: &str = "false";
 
 /// Discovers PostgreSQL metadata over an open ADBC connection.
 pub struct PostgresSource {
@@ -86,9 +77,9 @@ impl MetadataSource for PostgresSource {
 
     /// Refuses a database whose encoding is not [`REQUIRED_ENCODING`].
     ///
-    /// This is the precondition PostgreSQL's rendering states, and it is the
-    /// whole of it: MySQL's collation-and-version check belongs to MySQL's own
-    /// source and does not run here, just as this one does not run there.
+    /// This is the whole of the precondition this source states: the mapping
+    /// declares every character column `UTF8`, and nothing else about the
+    /// server is checked.
     fn check_source(&mut self) -> Result<(), MetadataError> {
         let encoding = query_server_encoding(&mut self.connection)?;
         check_server_encoding(&encoding)
@@ -105,11 +96,6 @@ impl MetadataSource for PostgresSource {
 
 /// One row of the `information_schema.columns` query, before it is grouped
 /// into a [`DiscoveredTable`].
-///
-/// `collation_is_deterministic` is the one field no `information_schema` view
-/// reports: the standard names a column's collation but says nothing about its
-/// determinism, so the query resolves it out of `pg_catalog` and it is absent
-/// for a column declaring no collation of its own.
 struct ColumnRow {
     table: String,
     column: String,
@@ -118,8 +104,6 @@ struct ColumnRow {
     character_maximum_length: Option<i64>,
     numeric_precision: Option<i64>,
     numeric_scale: Option<i64>,
-    collation_name: Option<String>,
-    collation_is_deterministic: Option<bool>,
     is_nullable: bool,
 }
 
@@ -141,22 +125,6 @@ impl CatalogRow for ColumnRow {
     }
 }
 
-/// Reads the determinism flag the columns query returns as text.
-///
-/// Absent means deterministic — the column declares no collation of its own,
-/// or the server predates the flag and so has no nondeterministic collation to
-/// distinguish — and so does anything but the two spellings a `boolean` casts
-/// to, because refusing every character column of a source whose catalog
-/// answered unexpectedly is a worse outcome than trusting the release-wide
-/// fact that every collation PostgreSQL ships is deterministic.
-fn determinism_flag(reported: Option<String>) -> Option<bool> {
-    match reported.as_deref() {
-        Some(DETERMINISTIC) => Some(true),
-        Some(NONDETERMINISTIC) => Some(false),
-        _ => None,
-    }
-}
-
 /// The fields PostgreSQL's type mapping reads, off one `information_schema`
 /// row.
 ///
@@ -171,10 +139,6 @@ fn postgres_column(row: ColumnRow) -> PostgresColumn {
             .and_then(|n| u32::try_from(n).ok()),
         numeric_precision: row.numeric_precision.and_then(|n| u32::try_from(n).ok()),
         numeric_scale: row.numeric_scale.and_then(|n| u32::try_from(n).ok()),
-        collation: row.collation_name.map(|name| ColumnCollation {
-            name,
-            is_deterministic: row.collation_is_deterministic,
-        }),
         is_nullable: row.is_nullable,
     }
 }
@@ -196,12 +160,7 @@ fn table_names_query() -> String {
 /// The statement listing the exposed namespace's columns, in the order the
 /// virtual tables declare them.
 ///
-/// `information_schema.columns` answers everything the mapping reads except
-/// one thing: it names a column's collation but not whether that collation is
-/// deterministic, which only `pg_catalog.pg_collation` reports. The outer join
-/// resolves it there, matched on the collation's schema as well as its name
-/// because two schemas may hold collations sharing one, and left so a column
-/// declaring no collation of its own still produces a row.
+/// `information_schema.columns` answers everything the mapping reads.
 fn columns_query() -> String {
     format!(
         "SELECT c.table_name::text AS table_name, c.column_name::text AS column_name, \
@@ -209,14 +168,8 @@ fn columns_query() -> String {
          c.character_maximum_length::bigint AS character_maximum_length, \
          c.numeric_precision::bigint AS numeric_precision, \
          c.numeric_scale::bigint AS numeric_scale, \
-         c.is_nullable::text AS is_nullable, \
-         c.collation_name::text AS collation_name, \
-         pgc.collisdeterministic::text AS collation_is_deterministic \
+         c.is_nullable::text AS is_nullable \
          FROM information_schema.columns AS c \
-         LEFT JOIN (pg_catalog.pg_collation AS pgc \
-         JOIN pg_catalog.pg_namespace AS pgn ON pgn.oid = pgc.collnamespace) \
-         ON pgc.collname = c.collation_name::text \
-         AND pgn.nspname = c.collation_schema::text \
          WHERE c.table_schema = '{EXPOSED_NAMESPACE}' \
          ORDER BY c.table_name, c.ordinal_position"
     )
@@ -247,9 +200,8 @@ fn check_server_encoding(encoding: &str) -> Result<(), MetadataError> {
     }
     Err(MetadataError::UnsupportedSource(format!(
         "the PostgreSQL source database reports encoding {encoding}, but adbc-vs maps a \
-         PostgreSQL source only from a database whose encoding is {REQUIRED_ENCODING}; every \
-         character column is declared UTF8 and the ordering collation the dialect renders \
-         reproduces Exasol's order only over UTF-8 bytes"
+         PostgreSQL source only from a database whose encoding is {REQUIRED_ENCODING}, because \
+         every character column is declared UTF8"
     )))
 }
 
@@ -291,8 +243,6 @@ fn query_columns(connection: &mut ManagedConnection) -> Result<Vec<ColumnRow>, M
         let numeric_precision = batch_column(&batch, "numeric_precision", &sql)?;
         let numeric_scale = batch_column(&batch, "numeric_scale", &sql)?;
         let is_nullable = batch_column(&batch, "is_nullable", &sql)?;
-        let collation_name = batch_column(&batch, "collation_name", &sql)?;
-        let collation_is_deterministic = batch_column(&batch, "collation_is_deterministic", &sql)?;
 
         for row in 0..batch.num_rows() {
             rows.push(ColumnRow {
@@ -303,11 +253,6 @@ fn query_columns(connection: &mut ManagedConnection) -> Result<Vec<ColumnRow>, M
                 character_maximum_length: i64_cell(character_maximum_length, row)?,
                 numeric_precision: i64_cell(numeric_precision, row)?,
                 numeric_scale: i64_cell(numeric_scale, row)?,
-                collation_name: string_cell(collation_name, row)?,
-                collation_is_deterministic: determinism_flag(string_cell(
-                    collation_is_deterministic,
-                    row,
-                )?),
                 is_nullable: required_string_cell(is_nullable, row, "is_nullable")? == NULLABLE,
             });
         }

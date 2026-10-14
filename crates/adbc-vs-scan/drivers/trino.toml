@@ -49,8 +49,9 @@ segment_count = 2
 # error: the two are one decision, and the capability invariant test renders
 # every entry below to hold them together.
 #
-# The set is the 35 entries `postgresql.toml` states plus one Trino advertises
-# and no other dialect does: `AGGREGATE_GROUP_BY_TUPLE`. Trino executes a
+# The set is the 35 entries `postgresql.toml` states, minus `FN_PRED_LIKE_ESCAPE`,
+# plus one Trino advertises and no other dialect does:
+# `AGGREGATE_GROUP_BY_TUPLE`. That makes 35 entries. Trino executes a
 # multi-column `GROUP BY`, and the capability needs no rendering change in any
 # dialect — `vs-adapter/pushdown-dialect` already records that each dialect
 # renders every grouping column a request carries, so this widening costs no
@@ -59,9 +60,16 @@ segment_count = 2
 # stay withheld release-wide because neither is confirmed rendering-free the
 # way this one is.
 #
-# Nothing in this list is withheld because Trino's SQL cannot render it. Every
-# capability name this release's vocabulary holds and this list omits is
-# withheld by a framework or mission decision that binds every dialect
+# `FN_PRED_LIKE_ESCAPE` is the one entry withheld for a reason about Trino's SQL.
+# Trino defines no default escape character and rejects an escape character
+# followed by anything other than `%`, `_`, or itself, so neither Exasol's
+# default backslash rule nor a request's own escape character has a Trino form
+# that accepts every pattern Exasol accepts. A query that writes an explicit
+# `ESCAPE` clause is therefore evaluated by Exasol, and a backslash in a
+# delegated pattern is an ordinary character at Trino.
+#
+# Every other capability name this release's vocabulary holds and this list
+# omits is withheld by a framework or mission decision that binds every dialect
 # identically:
 #
 #   - `JOIN_CONDITION_ALL` — mission.md scopes pushdown to equi and outer
@@ -120,7 +128,6 @@ advertised = [
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
     "FN_PRED_LIKE",
-    "FN_PRED_LIKE_ESCAPE",
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
     "LITERAL_DOUBLE",

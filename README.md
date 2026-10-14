@@ -39,6 +39,24 @@ Exasol's existing Virtual Schema dialects run on the JVM and move data through J
 
 See [`specs/mission.md`](specs/mission.md) for the full problem statement, architecture, and constraints.
 
+## Limits
+
+MySQL support is tested against MySQL 8.4.
+
+**String comparison follows the source's collation.** A delegated character comparison, `LIKE`, `IN`, grouping key, `DISTINCT` operand, `MIN` or `MAX` operand, and join key runs under the collation the source applies to the column. The adapter renders no collation, and Exasol accepts no `COLLATE` in a query. `ORDER BY` stays in Exasol and orders by code point.
+
+A source collation that folds case or accents, such as MySQL's default `utf8mb4_0900_ai_ci`, can therefore give a different answer than Exasol. A folded group, or a `MIN` or `MAX` tie between values of equal collation weight, reports one of the folded spellings, and the source chooses which.
+
+Two remedies restore Exasol's code-point semantics:
+
+- **(a) Declare a binary collation at the source.** Use `utf8mb4_0900_bin` on MySQL or `"C"` on PostgreSQL, on the column or in a view the virtual schema exposes. The fragment stays delegated. `utf8mb4_0900_bin` needs MySQL 8.0.17 or newer, and MariaDB has no equivalent `NO PAD` binary collation.
+- **(b) Wrap the operand in an expression no dialect advertises**, such as `"name" || ''`. Exasol then keeps the predicate, grouping, or `MIN`/`MAX` and evaluates it itself. This is slower, because Exasol fetches the rows the source would otherwise have filtered. A later release that advertises scalar functions can change which wrappers work.
+
+Two engine details also apply:
+
+- On PostgreSQL before 18, a delegated `LIKE` over a column of a nondeterministic collation fails at the source.
+- On Trino, a backslash in a `LIKE` pattern is an ordinary character unless the query writes an explicit `ESCAPE` clause, which Exasol then evaluates.
+
 ## Roadmap
 
 ADBC-backed databases supported today, and the v1 driver set this project is working toward:

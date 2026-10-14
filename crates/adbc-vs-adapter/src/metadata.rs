@@ -146,13 +146,11 @@ pub trait MetadataSource {
     /// would generate a statement addressing another object.
     fn namespace(&self) -> SourceQualifier;
 
-    /// Refuses a source this release's rendering cannot be used against.
+    /// Refuses a source this release cannot discover from or render for.
     ///
-    /// The precondition is stated by the dialect that renders for the source
-    /// rather than by the source itself: MySQL's rendering needs two named
-    /// collations at the server, and another technology's rendering needs
-    /// something else entirely, so each implementation answers only for its
-    /// own.
+    /// Each implementation states and checks its own precondition and runs no
+    /// other source's. An implementation whose discovery and rendering depend
+    /// on nothing the server configures succeeds without a query.
     fn check_source(&mut self) -> Result<(), MetadataError>;
 
     /// Discovers the tables of [`Self::namespace`], every column already

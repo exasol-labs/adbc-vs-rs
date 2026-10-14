@@ -98,7 +98,7 @@ fn character_types_preserve_length() {
         mapped.exasol_type,
         MappedType::Varchar { size: 10 },
         "MySQL CHAR must map to Exasol VARCHAR, never Exasol CHAR, because Exasol blank-pads \
-         CHAR and MySQL does not pad a CHAR operand under the collations pushdown renders"
+         CHAR and MySQL returns a CHAR value with its trailing spaces stripped"
     );
 
     let mut zero_length_column = utf8mb4_column("VARCHAR");

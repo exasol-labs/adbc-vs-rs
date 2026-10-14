@@ -27,29 +27,20 @@
 //! temporal column, where `E'<body>'` yields an untyped literal PostgreSQL
 //! resolves from the other operand.
 //!
-//! One rule decides where a collation suffix goes, and it reads the operand's
-//! declared type rather than the shape of the request. PostgreSQL's built-in
-//! collations are all deterministic, so its equality is Exasol's equality
-//! already; what its default `en_US.utf8` locale answers differently is
-//! *order*. So a character operand whose order decides the answer — the two
-//! operands of `predicate_less` and `predicate_lessequal`, the compared
-//! operand of `predicate_between`, and the argument of `MIN` or `MAX` —
-//! carries `COLLATE "C"`, and every other operand carries nothing, a join key
-//! included. Measured on PostgreSQL 18.6 over `B`, `a`, `C`: the collated
-//! column reproduces Exasol's `MIN`, `MAX`, sort order, and `g < 'b'` row set,
-//! and the bare column reproduces none of them, while an uncollated
-//! `GROUP BY`, `COUNT(DISTINCT)`, `=`, and `LIKE` each already return Exasol's
-//! answer. Leaving those bare is not only correct but keeps the source's index
-//! usable, which every explicitly collated operand loses.
+//! No operand carries a collation suffix. A delegated character comparison,
+//! `LIKE`, `IN`, grouping key, `DISTINCT` operand, `MIN` or `MAX` operand, and
+//! join key is evaluated under the collation PostgreSQL applies to the column,
+//! which is the database default unless the column declares its own, and this
+//! dialect reads no collation to decide anything. Equality, `LIKE`, `IN`,
+//! `GROUP BY`, and `DISTINCT` therefore return Exasol's answer over a
+//! deterministic collation, and *order* follows the collation's sort order.
+//! A user who needs Exasol's code-point order declares `COLLATE "C"` at the
+//! source or wraps the operand in an expression no dialect advertises, as
+//! `vs-adapter/postgresql-collation` states.
 //!
-//! That single rule is also why this dialect needs no coordination between the
-//! `GROUP BY` clause and the select list. A grouping key renders bare, so the
-//! key and its bare select-list occurrence are literally the same expression
-//! and PostgreSQL's unconditional full-group-by rule is satisfied without a
-//! matched suffix. Measured: the rejection MySQL raises as error 1055 has an
-//! exact PostgreSQL analogue, and it fires only when the grouping key carries
-//! a collation — so a select-list predicate reading the query's own character
-//! grouping key, which the MySQL dialect must refuse, is rendered here.
+//! A grouping key and its select-list occurrence render as the same bare
+//! expression, so PostgreSQL's full-group-by rule is satisfied with no
+//! coordination between the `GROUP BY` clause and the select list.
 //!
 //! A join adds the one decision no column reference can answer alone: which
 //! table it belongs to. Every table of a join renders under an alias this
@@ -80,7 +71,6 @@
 
 use adbc_vs_scan::driver::Driver;
 
-use crate::exa_type::ExasolType;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
     InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
@@ -95,24 +85,6 @@ use crate::sql_dialect::{RenderError, SqlDialect};
 /// the count it was sent for.
 const ROW_MARKER_CONSTANT: &str = "1";
 
-/// The collation a character operand carries when the answer depends on how
-/// that operand *orders*. Measured on PostgreSQL 18.6 and Exasol 2025.2.1
-/// over the values `B`, `a`, `C`: `C` sorts by byte value, which for UTF-8 is
-/// code-point order, so it reproduces Exasol's `MIN` of `B`, its `MAX` of `a`,
-/// and the rows Exasol returns for `g < 'b'`, none of which the cluster's own
-/// `en_US.utf8` locale reproduces.
-///
-/// It is the only collation this dialect renders. `C` is byte equality as
-/// well as byte order, but equality needs no suffix here at all: every
-/// built-in PostgreSQL collation is deterministic, so equality already
-/// compares bytes, and `vs-adapter/postgresql-type-mapping` unmaps the
-/// nondeterministic case rather than collating around it.
-///
-/// `C` is present in every cluster rather than added by a release, so no
-/// source-server version floor follows from it. What does follow is a UTF-8
-/// database encoding, checked at creation by the source's own precondition.
-const ORDERING_COLLATION: &str = "\"C\"";
-
 /// The aggregate functions this dialect renders, spelled in PostgreSQL's
 /// canonical upper case, which is also how the query model carries a function
 /// name: it normalizes on parse, so a name that reaches here in any other case
@@ -126,14 +98,6 @@ const ORDERING_COLLATION: &str = "\"C\"";
 /// advertised once per session and admits every numeric operand, including
 /// `double precision`, whose sum is order-dependent under a parallel plan.
 const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX"];
-
-/// The aggregate functions that return one of their operand's own values
-/// rather than a number computed from them. Their result is chosen by how the
-/// operand orders, so a character operand of one carries
-/// [`ORDERING_COLLATION`], and their result carries the operand's own type,
-/// which is what [`is_character_typed`] reads for an aggregate. `COUNT` reads
-/// no order and returns a number whatever it is given.
-const ORDERING_FUNCTIONS: &[&str] = &["MIN", "MAX"];
 
 /// The one aggregate PostgreSQL writes over no argument, as `COUNT(*)`.
 const COUNT_FUNCTION: &str = "COUNT";
@@ -371,8 +335,8 @@ impl<'a> Statement<'a> {
     /// with `single_group`.
     ///
     /// Each key renders through the same column renderer its select-list
-    /// occurrence takes, so the two occurrences carry the same alias and, both
-    /// being bare, the same absent collation.
+    /// occurrence takes, so the two occurrences carry the same alias and are the
+    /// same bare expression.
     fn render_grouping(&self, aggregation: &Aggregation) -> Result<String, RenderError> {
         let Aggregation::GroupBy(columns) = aggregation else {
             return Ok(String::new());
@@ -399,10 +363,10 @@ impl<'a> Statement<'a> {
             Predicate::And(predicates) => self.render_junction(predicates, "AND"),
             Predicate::Or(predicates) => self.render_junction(predicates, "OR"),
             Predicate::Not(inner) => Ok(format!("(NOT {})", self.render_predicate(inner)?)),
-            Predicate::Equal(comparison) => self.render_equality(comparison, "="),
-            Predicate::NotEqual(comparison) => self.render_equality(comparison, "<>"),
-            Predicate::Less(comparison) => self.render_ordering(comparison, "<"),
-            Predicate::LessEqual(comparison) => self.render_ordering(comparison, "<="),
+            Predicate::Equal(comparison) => self.render_comparison(comparison, "="),
+            Predicate::NotEqual(comparison) => self.render_comparison(comparison, "<>"),
+            Predicate::Less(comparison) => self.render_comparison(comparison, "<"),
+            Predicate::LessEqual(comparison) => self.render_comparison(comparison, "<="),
             Predicate::IsNull(expression) => self.render_null_test(expression, "IS NULL"),
             Predicate::IsNotNull(expression) => self.render_null_test(expression, "IS NOT NULL"),
             Predicate::Like(like) => self.render_like(like),
@@ -432,15 +396,15 @@ impl<'a> Statement<'a> {
         Ok(format!("({})", operands.join(&format!(" {operator} "))))
     }
 
-    /// Renders a comparison whose answer depends on whether its operands are
-    /// equal, and which therefore carries no collation.
+    /// Renders a comparison, equality and ordering alike, with both operands
+    /// bare.
     ///
-    /// PostgreSQL's built-in collations are all deterministic, so two
-    /// character values compare equal exactly when their bytes match, which is
-    /// Exasol's answer. Measured over `widget`/`Widget` and `cafe`/`café`,
-    /// both sources report both pairs unequal. A suffix here would change no
-    /// answer and would cost the source every index on the column.
-    fn render_equality(
+    /// The source compares character operands under the collation it applies
+    /// to the column, so an ordering comparison follows that collation's sort
+    /// order rather than Exasol's code-point order. Exasol normalizes `>` and
+    /// `>=` into `predicate_less` and `predicate_lessequal` with the operands
+    /// swapped, so the operands render in the order the request gave them.
+    fn render_comparison(
         &self,
         comparison: &Comparison,
         operator: &str,
@@ -449,27 +413,6 @@ impl<'a> Statement<'a> {
             "({} {operator} {})",
             self.render_expression(&comparison.left)?,
             self.render_expression(&comparison.right)?
-        ))
-    }
-
-    /// Renders a comparison whose answer depends on how its operands *order*,
-    /// and which therefore collates each character-typed one.
-    ///
-    /// Both operands come through the collating renderer rather than one:
-    /// Exasol normalizes `>` and `>=` into `predicate_less` and
-    /// `predicate_lessequal` with the operands swapped, so neither position
-    /// reliably holds the column. Two operands carrying the same explicit
-    /// collation agree rather than conflict, and an explicit collation on
-    /// either settles the comparison.
-    fn render_ordering(
-        &self,
-        comparison: &Comparison,
-        operator: &str,
-    ) -> Result<String, RenderError> {
-        Ok(format!(
-            "({} {operator} {})",
-            self.render_ordered_operand(&comparison.left)?,
-            self.render_ordered_operand(&comparison.right)?
         ))
     }
 
@@ -487,12 +430,8 @@ impl<'a> Statement<'a> {
     /// Renders a `LIKE`, with an `ESCAPE` clause exactly when the request
     /// carries an `escapeChar`.
     ///
-    /// Every operand renders bare. PostgreSQL's `LIKE` compares character by
-    /// character rather than by collation weight, and gate 2.3(f) measured
-    /// four patterns over case-only and accent-only variants returning
-    /// identical row sets bare and collated, asserted as a set difference in
-    /// both directions. This is one of the three sites where the MySQL dialect
-    /// does render a suffix and this one must not.
+    /// Every operand renders bare, so the match runs under the collation the
+    /// source applies to the column.
     fn render_like(&self, like: &LikePredicate) -> Result<String, RenderError> {
         let escape = match &like.escape_char {
             Some(escape_char) => format!(" ESCAPE {}", self.render_expression(escape_char)?),
@@ -506,26 +445,18 @@ impl<'a> Statement<'a> {
         ))
     }
 
-    /// Renders a `BETWEEN`: the compared operand carries the ordering
-    /// collation, its bounds render bare.
-    ///
-    /// `x BETWEEN a AND b` is two ordering comparisons over one operand, and
-    /// an explicit collation on that operand settles both. Putting a suffix on
-    /// the bounds as well would add nothing, and putting it *only* there would
-    /// leave the comparison to the column's own locale collation.
+    /// Renders a `BETWEEN` with its compared operand and both bounds bare, so
+    /// the source's own collation decides the range.
     fn render_between(&self, between: &BetweenPredicate) -> Result<String, RenderError> {
         Ok(format!(
             "({} BETWEEN {} AND {})",
-            self.render_ordered_operand(&between.expression)?,
+            self.render_expression(&between.expression)?,
             self.render_expression(&between.left)?,
             self.render_expression(&between.right)?
         ))
     }
 
-    /// Renders an `IN` list. The compared operand renders bare, because `IN`
-    /// asks equality and PostgreSQL's equality is already Exasol's — the
-    /// second of the three sites where the MySQL dialect renders a suffix and
-    /// this one must not.
+    /// Renders an `IN` list with every operand bare.
     fn render_in_const_list(
         &self,
         in_const_list: &InConstListPredicate,
@@ -550,20 +481,6 @@ impl<'a> Statement<'a> {
         ))
     }
 
-    /// Renders the operand whose ordering decides an answer, adding
-    /// [`ORDERING_COLLATION`] when it is character-typed.
-    ///
-    /// The suffix reads off the operand's declared type, as every collation
-    /// decision here does, so a numeric or temporal operand carries none.
-    fn render_ordered_operand(&self, expression: &Expression) -> Result<String, RenderError> {
-        let operand = self.render_expression(expression)?;
-        if !is_character_typed(expression) {
-            return Ok(operand);
-        }
-
-        Ok(format!("{operand} COLLATE {ORDERING_COLLATION}"))
-    }
-
     /// Renders one aggregate over the current group.
     ///
     /// The function name is taken from [`AGGREGATE_FUNCTIONS`] rather than
@@ -571,14 +488,9 @@ impl<'a> Statement<'a> {
     /// spelling whatever case Exasol sent. The argument's absence, not a
     /// separate field, is what tells `COUNT(*)` apart from `COUNT(column)`.
     ///
-    /// Which collation the argument carries is the argument's own question,
-    /// asked once here rather than twice as the MySQL dialect must ask it.
-    /// [`ORDERING_FUNCTIONS`] return the value their operand's collation sorts
-    /// first or last, so a character argument of one carries
-    /// [`ORDERING_COLLATION`] whatever `DISTINCT` it also carries — reducing
-    /// the values by equality first cannot change which one comes back. Every
-    /// other argument renders bare, `DISTINCT` included: `DISTINCT` reduces by
-    /// equality, and PostgreSQL's equality is already Exasol's.
+    /// The argument renders bare whatever the function and whatever `DISTINCT`
+    /// it carries, so `MIN` and `MAX` over a character column return the value
+    /// the source's collation sorts first or last.
     fn render_aggregate(&self, call: &AggregateCall) -> Result<String, RenderError> {
         let function = renderable_function(&call.function)?;
         let Some(argument) = &call.argument else {
@@ -586,11 +498,7 @@ impl<'a> Statement<'a> {
         };
 
         let distinct = if call.distinct { "DISTINCT " } else { "" };
-        let operand = if ORDERING_FUNCTIONS.contains(&function) {
-            self.render_ordered_operand(argument)?
-        } else {
-            self.render_expression(argument)?
-        };
+        let operand = self.render_expression(argument)?;
 
         Ok(format!("{function}({distinct}{operand})"))
     }
@@ -754,41 +662,6 @@ fn render_star_aggregate(function: &str, call: &AggregateCall) -> Result<String,
     }
 
     Ok(format!("{COUNT_FUNCTION}(*)"))
-}
-
-fn is_character_column(column: &ColumnRef) -> bool {
-    matches!(
-        column.declared_type,
-        ExasolType::Varchar { .. } | ExasolType::Char { .. }
-    )
-}
-
-/// Whether an expression's value is character-typed, and so whether a
-/// collation decides how it orders.
-///
-/// Every answer reads a declared type rather than the shape of the request. An
-/// aggregate is the one expression with no declared type of its own to read —
-/// a select-list predicate over it is declared `BOOLEAN`, which says nothing
-/// about the operand — so the answer comes from what the function returns:
-/// [`ORDERING_FUNCTIONS`] return one of their argument's own values and carry
-/// its type, and every other function this dialect renders returns a number. A
-/// predicate's own value is `BOOLEAN`, which no collation orders.
-fn is_character_typed(expression: &Expression) -> bool {
-    match expression {
-        Expression::Column(column) => is_character_column(column),
-        Expression::Literal(Literal::String(_)) => true,
-        Expression::Literal(_) | Expression::RowMarker => false,
-        Expression::Aggregate(call) => is_character_aggregate(call),
-        Expression::Predicate(_) => false,
-    }
-}
-
-fn is_character_aggregate(call: &AggregateCall) -> bool {
-    ORDERING_FUNCTIONS.contains(&call.function.as_str())
-        && call
-            .argument
-            .as_ref()
-            .is_some_and(|argument| is_character_typed(argument))
 }
 
 fn render_literal(literal: &Literal) -> Result<String, RenderError> {

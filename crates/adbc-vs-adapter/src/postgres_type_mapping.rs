@@ -36,17 +36,6 @@ const INTEGER_PRECISION: u32 = 10;
 /// [`INTEGER_PRECISION`].
 const BIGINT_PRECISION: u32 = 19;
 
-/// The collation a PostgreSQL character column declares, and whether the
-/// server reports it as deterministic.
-///
-/// `is_deterministic` is optional because the flag itself is: a server
-/// predating it reports nothing, and such a server has no nondeterministic
-/// collation to distinguish, so an absent flag means deterministic.
-pub struct ColumnCollation {
-    pub name: String,
-    pub is_deterministic: Option<bool>,
-}
-
 /// A PostgreSQL column as `information_schema.columns` reports it: the fields
 /// the mapping reads and nothing else.
 ///
@@ -54,14 +43,12 @@ pub struct ColumnCollation {
 /// database rather than per column, and no unsigned flag, because PostgreSQL
 /// has no unsigned integer type. Both are MySQL catalog facts with no
 /// PostgreSQL counterpart, which is why no column struct is shared between the
-/// two sources. A per-column collation is the converse: a PostgreSQL fact
-/// MySQL's mapping has no field for.
+/// two sources.
 pub struct PostgresColumn {
     pub data_type: String,
     pub character_length: Option<u32>,
     pub numeric_precision: Option<u32>,
     pub numeric_scale: Option<u32>,
-    pub collation: Option<ColumnCollation>,
     pub is_nullable: bool,
 }
 
@@ -146,14 +133,8 @@ fn map_numeric(column: &PostgresColumn) -> Result<MappedType, String> {
 }
 
 /// Maps a `character varying(n)` to Exasol `VARCHAR(n)`, refusing the two
-/// lengths Exasol has no type for and the collation this release's rendering
-/// cannot be used over.
-///
-/// The collation is checked first because it decides whether the column can be
-/// compared correctly at all, which no length makes up for.
+/// lengths Exasol has no type for.
 fn map_character_varying(column: &PostgresColumn) -> Result<MappedType, String> {
-    require_deterministic_collation(column)?;
-
     let length = column
         .character_length
         .ok_or_else(|| unbounded_length_reason(&column.data_type))?;
@@ -166,35 +147,6 @@ fn map_character_varying(column: &PostgresColumn) -> Result<MappedType, String> 
         ));
     }
     Ok(MappedType::Varchar { size })
-}
-
-/// Refuses a character column whose declared collation the server reports as
-/// nondeterministic.
-///
-/// `vs-adapter/postgresql-collation` renders equality, `LIKE`, `GROUP BY`, and
-/// `DISTINCT` with no collation suffix, which reproduces Exasol's answer only
-/// while a deterministic collation equates two values just when their bytes
-/// are identical. Under a nondeterministic one PostgreSQL silently matches
-/// rows Exasol does not — including in the `LIKE` path, which PostgreSQL 18
-/// accepts rather than rejects — so the column is refused instead of exposed.
-///
-/// A column declaring no collation of its own takes the database default,
-/// which PostgreSQL requires to be deterministic; a collation the server
-/// reports no determinism flag for predates nondeterministic collations
-/// existing. Both are deterministic.
-fn require_deterministic_collation(column: &PostgresColumn) -> Result<(), String> {
-    let Some(collation) = &column.collation else {
-        return Ok(());
-    };
-    if collation.is_deterministic == Some(false) {
-        return Err(format!(
-            "PostgreSQL {} column has collation {}, which the server reports as nondeterministic; \
-             the delegated equality, LIKE, GROUP BY, and DISTINCT adbc-vs renders for PostgreSQL \
-             carry no collation suffix and would match rows Exasol does not",
-            column.data_type, collation.name
-        ));
-    }
-    Ok(())
 }
 
 fn blank_padded_reason(data_type: &str) -> String {

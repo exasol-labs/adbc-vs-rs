@@ -19,7 +19,7 @@ ADBC gives every backend a uniform C API and an Arrow-native result format. adbc
 
 1. **ADBC-backed Virtual Schema**: one adapter exposes the tables of a source database as Exasol virtual tables. Column types map to a closed set of Exasol types, and columns or tables without a mapping are omitted and recorded.
 2. **Self-installing drivers**: when a schema is created or refreshed, the adapter resolves the driver version from the `dbc` registry and installs the platform tarball into BucketFS. Without registry access, the operator supplies the driver.
-3. **SQL pushdown**: projection, filters, aggregation (single group and `GROUP BY`), and equi and outer joins, including nested joins, are rewritten into the source dialect and executed at the source. `ORDER BY` and `LIMIT`/`OFFSET` stay in Exasol. Each dialect also renders collation so that string comparison matches Exasol.
+3. **SQL pushdown**: projection, filters, aggregation (single group and `GROUP BY`), and equi and outer joins, including nested joins, are rewritten into the source dialect and executed at the source. `ORDER BY` and `LIMIT`/`OFFSET` stay in Exasol. No dialect renders a collation, so string comparison follows the source's collation.
 4. **Arrow-native scan path**: the scan UDF runs the pushed-down statement through the ADBC driver and returns the Arrow record batches to Exasol without row-by-row marshaling.
 5. **Supported sources**: MySQL, PostgreSQL, and Trino. Adding a source technology requires a dialect and a metadata source in the adapter code.
 
