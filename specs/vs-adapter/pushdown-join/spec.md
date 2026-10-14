@@ -4,7 +4,7 @@ Delegates an equi-join between two virtual tables of one virtual schema to the s
 
 ## Background
 
-- This feature owns what a join fragment is, for every dialect: the `join_type` discriminator, positional aliasing and column qualification, the unresolvable-column error, outer-join null semantics, and composition with a delegated filter and aggregation. Which join types a dialect advertises is that dialect's own fact and lives in its `<technology>-pushdown` feature. Whether a character join key carries a collation suffix is also per dialect and lives in its `<technology>-collation` feature.
+- This feature owns what a join fragment is, for every dialect: the `join_type` discriminator, positional aliasing and column qualification, the unresolvable-column error, outer-join null semantics, and composition with a delegated filter and aggregation. Which join types a dialect advertises is that dialect's own fact and lives in its `<technology>-pushdown` feature. No dialect renders a collation suffix on a character join key, so the source's collation decides which keys match, and each `<technology>-collation` feature states what its source's default collation does.
 - Exasol pushes a join down only when the adapter advertises `JOIN` together with at least one join type and one join condition capability. It then delegates the whole join and never re-joins the rows itself.
 - The join element spells its discriminator `join_type` in snake case, unlike every sibling protocol field, and its value is `inner`, `left_outer`, `right_outer`, or `full_outer`. Its `left` and `right` are each a table element or a nested join element, so a join tree nests to any depth.
 - Each of the four values renders one standard keyword — `INNER JOIN`, `LEFT OUTER JOIN`, `RIGHT OUTER JOIN`, `FULL OUTER JOIN` — and the rendering is the same in every target that implements the keyword. A dialect that never advertised a join type fails on a request carrying it rather than substituting another, which is `vs-adapter/pushdown-dialect`'s rule for an unrenderable fragment.
@@ -50,7 +50,7 @@ Delegates an equi-join between two virtual tables of one virtual schema to the s
 * *WHEN* the query runs through the virtual schema
 * *THEN* the unmatched row MUST come back with nulls for every right-table column
 * *AND* the scan MUST NOT fail on a null in a column the source declares `NOT NULL`
-* *AND* the returned rows MUST equal what Exasol returns for the same join executed locally over the same data
+* *AND* the returned rows MUST equal what Exasol returns for the same join executed locally over the same data, where every character operand the source evaluates either declares a code-point collation at the source or holds no values that the source's collation equates or orders differently from Exasol
 
 ### Scenario: Join composes with a delegated filter and aggregation
 
@@ -58,7 +58,7 @@ Delegates an equi-join between two virtual tables of one virtual schema to the s
 * *WHEN* the dialect renders the statement
 * *THEN* the generated statement MUST carry the join, the `WHERE` clause, and the `GROUP BY` clause together
 * *AND* the clauses MUST appear in the target's required order: `FROM`, `WHERE`, `GROUP BY`
-* *AND* the returned rows MUST equal what Exasol returns for the same query executed locally over the same data
+* *AND* the returned rows MUST equal what Exasol returns for the same query executed locally over the same data, where every character operand the source evaluates either declares a code-point collation at the source or holds no values that the source's collation equates or orders differently from Exasol
 
 ### Scenario: Each join type renders its counterpart
 
@@ -76,7 +76,7 @@ Delegates an equi-join between two virtual tables of one virtual schema to the s
 * *THEN* the generated statement MUST join both tables in a single `SELECT`, reading neither in a separate statement
 * *AND* both tables MUST be qualified by the source namespace `adapterNotes` records
 * *AND* the join condition MUST render as an equality between the two qualified columns
-* *AND* a character join key MUST carry whatever suffix its dialect renders for an equality operand
+* *AND* a character join key MUST carry no collation suffix
 
 ### Scenario: Nested join renders as a nested join
 

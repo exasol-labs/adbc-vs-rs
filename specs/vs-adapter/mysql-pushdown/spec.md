@@ -13,7 +13,7 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 - A string literal is rendered as `_utf8mb4 X'<hex>'`, the hex encoding of its UTF-8 bytes. Backslash-escaped quoting is not mode-independent: with `NO_BACKSLASH_ESCAPES` set on the source, `'a\\b'` is four characters rather than three, while `_utf8mb4 X'615C62'` is three characters in both modes. Hex rendering also removes the escaping decision entirely, so no literal can change the shape of the generated statement. A `LIKE` pattern is a string literal like any other and renders in the same form; no rendering position exempts one.
 - Date and timestamp literals are rendered as MySQL typed literals, `DATE '...'` and `TIMESTAMP '...'`, so MySQL does not coerce a string by its own rules.
 - `REGEXP_LIKE` is not delegated: Exasol's regular-expression dialect is PCRE and MySQL 8's is ICU, so an identical pattern can match different rows.
-- Where the MySQL dialect renders a collation suffix, and which of its two collations it renders at each site, is owned by `vs-adapter/mysql-collation`. Which MySQL column types reach a rendered fragment at all is owned by `vs-adapter/mysql-type-mapping`.
+- `vs-adapter/mysql-collation` states that the MySQL dialect renders no collation suffix and what MySQL's default collation does to a delegated comparison. Which MySQL column types reach a rendered fragment at all is owned by `vs-adapter/mysql-type-mapping`.
 
 ## Scenarios
 
@@ -99,5 +99,5 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 * *WHEN* Exasol runs a `SELECT` grouping by one column and counting another
 * *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement carrying the aggregate and the `GROUP BY` clause
 * *AND* the query MUST return one row per group with the correct count
-* *AND* the returned values MUST equal what Exasol returns for the same aggregation executed locally over the same data, unqualified: `COUNT`, `MIN`, and `MAX` are the aggregates this release delegates and each is exact over every operand type, `DOUBLE` included, because none of them sums. No aggregate whose value depends on summation order is delegated at all
+* *AND* the returned values MUST equal what Exasol returns for the same aggregation executed locally over the same data, when the grouping key and every aggregate operand is either a non-character column or a character column declaring `utf8mb4_0900_bin`: `COUNT`, `MIN`, and `MAX` are the aggregates this release delegates and each is exact over every non-character operand type, `DOUBLE` included, because none of them sums. No aggregate whose value depends on summation order is delegated at all
 * *AND* the same query grouping by two columns MUST produce a generated statement carrying no `GROUP BY` clause and MUST still return the correct rows, because Exasol withdraws that aggregation and groups it itself
