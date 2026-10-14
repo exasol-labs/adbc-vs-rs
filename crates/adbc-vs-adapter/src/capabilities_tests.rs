@@ -345,12 +345,14 @@ fn postgres_capability_set_is_exact() {
 /// deriving this one from PostgreSQL's would be the second capability list
 /// `vs-adapter/pushdown-dialect` forbids.
 ///
-/// `drivers/trino.toml` states the set as PostgreSQL's 35 entries plus
-/// `AGGREGATE_GROUP_BY_TUPLE`, and that is exactly what this list spells out:
-/// every entry [`POSTGRES_CAPABILITIES`] carries, plus the one entry gate
-/// 2.3(i) measured Trino alone able to advertise — a multi-column `GROUP BY`
-/// executes on Trino and needs no rendering change `render_grouping` does not
-/// already have.
+/// `drivers/trino.toml` states the set as PostgreSQL's 35 entries, minus
+/// `FN_PRED_LIKE_ESCAPE`, plus `AGGREGATE_GROUP_BY_TUPLE`, and that is exactly
+/// what this list spells out. `FN_PRED_LIKE_ESCAPE` is withheld because Trino
+/// defines no default escape character and rejects an escape character
+/// followed by anything other than `%`, `_`, or itself. `AGGREGATE_GROUP_BY_TUPLE`
+/// is the one entry gate 2.3(i) measured Trino alone able to advertise: a
+/// multi-column `GROUP BY` executes on Trino and needs no rendering change
+/// `render_grouping` does not already have.
 const TRINO_CAPABILITIES: &[&str] = &[
     "SELECTLIST_PROJECTION",
     "SELECTLIST_EXPRESSIONS",
@@ -373,7 +375,6 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "FN_PRED_IS_NULL",
     "FN_PRED_IS_NOT_NULL",
     "FN_PRED_LIKE",
-    "FN_PRED_LIKE_ESCAPE",
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
     "LITERAL_NULL",
@@ -395,6 +396,28 @@ const TRINO_CAPABILITIES: &[&str] = &[
 #[test]
 fn trino_capability_set_is_exact() {
     assert_set_is(Driver::Trino, TRINO_CAPABILITIES);
+}
+
+/// `vs-adapter/trino-pushdown`: the Trino and PostgreSQL sets differ by exactly
+/// two named entries, one in each direction. Each set is stated by its own
+/// declaration, so the 34 entries they share are an outcome of two decisions,
+/// and a change to either set fails here rather than being absorbed.
+#[test]
+fn trino_and_postgresql_sets_differ_by_two_named_entries() {
+    let trino = advertised_by(Driver::Trino);
+    let postgresql = advertised_by(Driver::Postgres);
+
+    let only_trino: Vec<&String> = trino
+        .iter()
+        .filter(|capability| !postgresql.contains(capability))
+        .collect();
+    let only_postgresql: Vec<&String> = postgresql
+        .iter()
+        .filter(|capability| !trino.contains(capability))
+        .collect();
+
+    assert_eq!(only_trino, ["AGGREGATE_GROUP_BY_TUPLE"]);
+    assert_eq!(only_postgresql, ["FN_PRED_LIKE_ESCAPE"]);
 }
 
 /// Asserts that `driver` advertises exactly `expected`, compared as sets.

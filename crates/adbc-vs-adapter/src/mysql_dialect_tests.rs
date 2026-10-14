@@ -51,38 +51,64 @@ fn filter_render_error(filter: Value) -> String {
     render_error(&filtered_request(orders_columns(), filter))
 }
 
+/// `vs-adapter/mysql-collation`: the dialect renders no collation, so MySQL
+/// evaluates every delegated character operand under the collation it applies
+/// to the column. Every position a suffix could reach is rendered here over
+/// the `VARCHAR` column `note`: each character predicate in `WHERE` and in
+/// select-list position, a `GROUP BY` key beside its select-list occurrence, a
+/// `DISTINCT` operand, `MIN` and `MAX`, and a character equi-join key.
+///
+/// Each statement is also required to carry `note`, so a position that
+/// stopped rendering its operand cannot pass for one that renders it bare.
 #[test]
-fn character_operands_carry_the_comparison_collation() {
-    let clause = where_clause(equal(column_operand("note"), string_literal("widget")));
-
-    assert_eq!(
-        clause,
-        "(`note` COLLATE utf8mb4_0900_as_cs = _utf8mb4 X'776964676574' COLLATE \
-         utf8mb4_0900_as_cs)"
+fn no_operand_carries_a_collation_suffix_in_any_position() {
+    let note = || column_operand("note");
+    let mut statements = Vec::new();
+    for predicate in character_predicates_over(note()) {
+        statements.push(render_statement(&filtered_request(
+            orders_columns(),
+            predicate.clone(),
+        )));
+        statements.push(render_statement(&typed_request(
+            json!([predicate]),
+            json!([boolean_type()]),
+        )));
+    }
+    statements.push(render_statement(&grouped_request(
+        json!([note(), aggregate("COUNT", None)]),
+        json!([note_type(), count_type()]),
+        json!([note()]),
+    )));
+    statements.push(render_statement(&typed_request(
+        json!([
+            distinct(aggregate("COUNT", Some(note()))),
+            aggregate("MIN", Some(note())),
+            aggregate("MAX", Some(note())),
+            distinct(aggregate("MIN", Some(note()))),
+        ]),
+        json!([count_type(), note_type(), note_type(), note_type()]),
+    )));
+    let mut on_character_keys = orders_to_customers("inner");
+    on_character_keys["condition"] = equal(
+        joined_column("note", "orders"),
+        joined_column("name", "customers"),
     );
-}
+    statements.push(render_statement(&join_request(
+        on_character_keys,
+        json!([joined_column("id", "orders")]),
+    )));
 
-/// Both operands of a comparison may be character-typed with no literal
-/// between them, and MySQL's default `utf8mb4_0900_ai_ci` reports the stored
-/// `Widget` as equal to the stored `widget` where Exasol reports them
-/// unequal. A rule keying on the literal rather than on the type would
-/// render this comparison bare and return rows Exasol never asked for.
-#[test]
-fn every_character_typed_operand_carries_the_collation() {
-    let columns = json!([
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-        {"name": "code", "dataType": {"type": "CHAR", "size": 5, "characterSet": "UTF8"}},
-    ]);
-
-    let clause = where_clause_over(
-        columns,
-        equal(column_operand("note"), column_operand("code")),
-    );
-
-    assert_eq!(
-        clause,
-        "(`note` COLLATE utf8mb4_0900_as_cs = `code` COLLATE utf8mb4_0900_as_cs)"
-    );
+    for sql in statements {
+        assert!(
+            sql.contains("`note`"),
+            "the character operand must reach the statement: {sql}"
+        );
+        assert!(
+            !sql.contains("COLLATE"),
+            "no operand may carry a collation suffix, so MySQL applies the column's own \
+             collation: {sql}"
+        );
+    }
 }
 
 /// Exasol normalizes `id > 5` into `predicate_less` with the operands
@@ -186,8 +212,9 @@ fn nested_predicates_are_parenthesized() {
     assert_eq!(clause, "(NOT ((`id` = 1) OR (`total` <= 2.5)))");
 }
 
-/// A request carrying no `escapeChar` must render no `ESCAPE` clause, which
-/// the exact match this test pins for `without_escape` already proves.
+/// The request's `escapeChar` renders verbatim as an `ESCAPE` clause, and a
+/// request carrying none renders no clause at all, which the exact match for
+/// `without_escape` proves. Neither carries a `COLLATE` on the operand.
 #[test]
 fn like_renders_pattern_and_escape() {
     let with_escape = where_clause(json!({
@@ -199,7 +226,7 @@ fn like_renders_pattern_and_escape() {
 
     assert_eq!(
         with_escape,
-        "(`note` COLLATE utf8mb4_0900_as_cs LIKE _utf8mb4 X'57696425' ESCAPE _utf8mb4 X'5C')"
+        "(`note` LIKE _utf8mb4 X'57696425' ESCAPE _utf8mb4 X'5C')"
     );
 
     let without_escape = where_clause(json!({
@@ -208,15 +235,11 @@ fn like_renders_pattern_and_escape() {
         "pattern": string_literal("Wid%"),
     }));
 
-    assert_eq!(
-        without_escape,
-        "(`note` COLLATE utf8mb4_0900_as_cs LIKE _utf8mb4 X'57696425')"
-    );
+    assert_eq!(without_escape, "(`note` LIKE _utf8mb4 X'57696425')");
 }
 
 /// A null test must not be rendered as a comparison against a null literal,
-/// which is never true, and it compares no character value, so it carries no
-/// collation either — both of which the exact match below already proves.
+/// which is never true — which the exact match below already proves.
 #[test]
 fn null_predicates_render_without_comparison() {
     for (predicate_type, expected) in [
@@ -232,9 +255,8 @@ fn null_predicates_render_without_comparison() {
     }
 }
 
-/// The collation belongs on the compared operand, not on the list: the exact
-/// match this test pins carries `COLLATE` exactly once, on `note` rather than
-/// inside the `IN` list.
+/// Both forms render their operands in the request's order, and a character
+/// operand renders bare: the exact matches carry no `COLLATE`.
 #[test]
 fn between_and_in_keep_operand_order() {
     let between = where_clause(json!({
@@ -254,7 +276,7 @@ fn between_and_in_keep_operand_order() {
 
     assert_eq!(
         in_list,
-        "(`note` COLLATE utf8mb4_0900_as_cs IN (_utf8mb4 X'63', _utf8mb4 X'61', _utf8mb4 X'62'))"
+        "(`note` IN (_utf8mb4 X'63', _utf8mb4 X'61', _utf8mb4 X'62'))"
     );
 }
 
@@ -433,13 +455,6 @@ fn count_type() -> Value {
     json!({"type": "DECIMAL", "precision": 18, "scale": 0})
 }
 
-/// The type Exasol supplies for `MIN` or `MAX` over `total`, a
-/// `DECIMAL(12,4)` — the operand's own type, exactly as `SUM` no longer
-/// reaches this dialect to declare a wider one for it.
-fn total_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 12, "scale": 4})
-}
-
 /// The type Exasol supplies for `MIN` or `MAX` over `note`, a
 /// `VARCHAR(100)` — the operand's own type, spelled without the
 /// `characterSet` field `involvedTables[].columns[].dataType` carries.
@@ -469,8 +484,8 @@ fn id_type() -> Value {
 }
 
 /// A `pushdown` request over `orders` whose `aggregationType` is `group_by`
-/// over `group_by`, the shape the one collation rule spanning the `GROUP BY`
-/// clause and the select list is read from.
+/// over `group_by`, the shape whose `GROUP BY` clause and select list MySQL's
+/// `ONLY_FULL_GROUP_BY` reads together.
 fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
     let mut request = typed_request(select_list, data_types);
     request["pushdownRequest"]["aggregationType"] = json!("group_by");
@@ -496,48 +511,7 @@ fn group_by_keeps_request_order() {
 
     assert_eq!(
         sql,
-        "SELECT `id`, `note` COLLATE utf8mb4_0900_as_cs, COUNT(`total`) FROM `shop`.`orders` \
-         GROUP BY `note` COLLATE utf8mb4_0900_as_cs, `id`"
-    );
-}
-
-/// The grouping collation is one rule over two clauses, not two rules.
-/// Measured on MySQL 8.4, `SELECT v, COUNT(*) FROM n GROUP BY v COLLATE
-/// utf8mb4_0900_as_cs` fails with error 1055 under `ONLY_FULL_GROUP_BY`,
-/// which `mysql:8.4` sets by default: MySQL does not see a bare `v` as
-/// functionally dependent on a collated grouping key. Collating both
-/// occurrences runs and returns the four groups Exasol returns over
-/// `Widget`, `widget`, `Gizmo`, `Gîzmo`, where the column's own
-/// `utf8mb4_0900_ai_ci` yields two.
-///
-/// A `MIN` over that same column keeps the ordering collation in the same
-/// statement — measured valid, because an aggregate is never subject to the
-/// mode and the value `MIN` returns is chosen by order rather than by
-/// equality.
-///
-/// The grouping key and its bare select-list occurrence must carry the same
-/// collation, or MySQL rejects the statement with error 1055 — which the
-/// exact match this test pins already proves, since it carries
-/// `` `note` COLLATE utf8mb4_0900_as_cs `` in both the select list and the
-/// `GROUP BY` clause.
-#[test]
-fn grouped_character_column_carries_the_comparison_collation_in_both_clauses() {
-    let request = grouped_request(
-        json!([
-            column_operand("note"),
-            column_operand("id"),
-            aggregate("MIN", Some(column_operand("note"))),
-        ]),
-        json!([note_type(), id_type(), note_type()]),
-        json!([column_operand("note"), column_operand("id")]),
-    );
-
-    let sql = render_statement(&request);
-
-    assert_eq!(
-        sql,
-        "SELECT `note` COLLATE utf8mb4_0900_as_cs, `id`, MIN(`note` COLLATE utf8mb4_0900_bin) \
-         FROM `shop`.`orders` GROUP BY `note` COLLATE utf8mb4_0900_as_cs, `id`"
+        "SELECT `id`, `note`, COUNT(`total`) FROM `shop`.`orders` GROUP BY `note`, `id`"
     );
 }
 
@@ -547,11 +521,8 @@ fn grouped_character_column_carries_the_comparison_collation_in_both_clauses() {
 /// column named two ways is still one column, and both occurrences must
 /// render identically: MySQL matches a select-list expression against a
 /// `GROUP BY` expression whole and rejects the statement with error 1055
-/// under `ONLY_FULL_GROUP_BY` when the two differ at all. Deciding it by
-/// whole-struct equality of the two references would answer that a
-/// differently qualified occurrence is a different column, render the
-/// projection bare beside a collated key, and produce exactly that
-/// rejection.
+/// under `ONLY_FULL_GROUP_BY` when the two differ at all. Neither occurrence
+/// carries a `COLLATE`, which the exact match proves.
 #[test]
 fn a_grouping_key_is_recognized_however_the_request_qualifies_its_occurrences() {
     let request = grouped_request(
@@ -567,15 +538,15 @@ fn a_grouping_key_is_recognized_however_the_request_qualifies_its_occurrences() 
 
     assert_eq!(
         sql,
-        "SELECT `note` COLLATE utf8mb4_0900_as_cs, COUNT(*) FROM `shop`.`orders` \
-         GROUP BY `note` COLLATE utf8mb4_0900_as_cs"
+        "SELECT `note`, COUNT(*) FROM `shop`.`orders` GROUP BY `note`"
     );
 }
 
 /// The same rule inside a join, where the reference also decides the alias
 /// each occurrence is qualified by. Both occurrences resolve to the one
 /// table `customers`, one through its `tableAlias` and one through its
-/// `tableName`, so both must carry the same alias and the same collation.
+/// `tableName`, so both must render as the same alias-qualified column, with
+/// no `COLLATE` on either.
 #[test]
 fn a_joined_grouping_key_is_recognized_however_the_request_qualifies_its_occurrences() {
     let mut request = join_request(
@@ -591,93 +562,41 @@ fn a_joined_grouping_key_is_recognized_however_the_request_qualifies_its_occurre
 
     let sql = render_statement(&request);
 
-    let occurrence = "`t2`.`name` COLLATE utf8mb4_0900_as_cs";
-    assert_eq!(
-        sql.matches(occurrence).count(),
-        2,
-        "both occurrences of the grouping key must carry the same alias and the same collation, \
-         whichever field the request qualified each one by: {sql}"
-    );
-}
-
-/// A numeric grouping key has no character values to compare, so it carries
-/// no collation in either clause — the rule reads off the operand's declared
-/// type, as every collation decision in this dialect does. The exact match
-/// this test pins already proves the absence: it carries no `COLLATE`.
-#[test]
-fn numeric_grouping_key_carries_no_collation() {
-    let sql = render_statement(&grouped_request(
-        json!([column_operand("id"), aggregate("COUNT", None)]),
-        json!([id_type(), count_type()]),
-        json!([column_operand("id")]),
-    ));
-
     assert_eq!(
         sql,
-        "SELECT `id`, COUNT(*) FROM `shop`.`orders` GROUP BY `id`"
+        "SELECT `t2`.`name`, COUNT(*) FROM (`shop`.`orders` AS `t1` INNER JOIN \
+         `shop`.`customers` AS `t2` ON (`t1`.`customer_id` = `t2`.`id`)) GROUP BY `t2`.`name`",
+        "both occurrences of the grouping key must carry the same alias and no collation, \
+         whichever field the request qualified each one by"
     );
 }
 
-/// The collation reads off both the operand's declared type and whether the
-/// query groups by that column, never off the type alone: a projection-only
-/// statement renders byte-identically to what this dialect rendered before
-/// the grouping rule existed.
-#[test]
-fn ungrouped_projection_carries_no_collation() {
-    let sql = render(orders_columns(), Some(json!([column_operand("note")])));
-
-    assert_eq!(sql, "SELECT `note` FROM `shop`.`orders`");
+/// An aggregate entry with `distinct` set, the shape Exasol sends for
+/// `COUNT(DISTINCT "c")` and `MIN(DISTINCT "c")`.
+fn distinct(mut entry: Value) -> Value {
+    entry["distinct"] = json!(true);
+    entry
 }
 
-/// A grouping key the select list does not project needs no second
-/// occurrence: `ONLY_FULL_GROUP_BY` constrains the select list, and there is
-/// nothing in it to constrain. Measured valid on MySQL 8.4.
+/// `DISTINCT` reaches the statement as a keyword before the operand, whatever
+/// the function and the operand's type. `COUNT` over the same column without
+/// `distinct` renders no keyword. The exact match carries no `COLLATE`.
 #[test]
-fn an_unprojected_grouping_key_carries_the_collation_alone() {
-    let sql = render_statement(&grouped_request(
-        json!([aggregate("COUNT", None)]),
-        json!([count_type()]),
-        json!([column_operand("note")]),
-    ));
-
-    assert_eq!(
-        sql,
-        "SELECT COUNT(*) FROM `shop`.`orders` GROUP BY `note` COLLATE utf8mb4_0900_as_cs"
-    );
-}
-
-/// `DISTINCT` reduces values by equality, so a character operand of one
-/// carries the collation equality is measured correct under: over `Widget`,
-/// `widget`, `Gizmo`, and `Gîzmo`, MySQL's default `utf8mb4_0900_ai_ci`
-/// returns a `COUNT(DISTINCT)` of 2 where Exasol returns 4.
-///
-/// `COUNT` over the same column without `distinct` reads neither equality
-/// nor order and carries nothing, and `MIN` keeps the ordering collation
-/// whatever `distinct` holds, because the value it returns is chosen by
-/// order.
-#[test]
-fn distinct_character_operand_carries_the_comparison_collation() {
-    let mut distinct_count = aggregate("COUNT", Some(column_operand("note")));
-    distinct_count["distinct"] = json!(true);
-    let mut distinct_numeric_count = aggregate("COUNT", Some(column_operand("id")));
-    distinct_numeric_count["distinct"] = json!(true);
-    let mut distinct_min = aggregate("MIN", Some(column_operand("note")));
-    distinct_min["distinct"] = json!(true);
-
+fn distinct_renders_its_keyword_before_the_operand() {
     let sql = render_statement(&typed_request(
         json!([
-            distinct_count,
-            distinct_numeric_count,
+            distinct(aggregate("COUNT", Some(column_operand("note")))),
+            distinct(aggregate("COUNT", Some(column_operand("id")))),
             aggregate("COUNT", Some(column_operand("note"))),
-            distinct_min,
+            distinct(aggregate("MIN", Some(column_operand("note")))),
         ]),
         json!([count_type(), count_type(), count_type(), note_type()]),
     ));
 
     assert_eq!(
         sql,
-        "SELECT COUNT(DISTINCT `note` COLLATE utf8mb4_0900_as_cs), COUNT(DISTINCT `id`), \
-         COUNT(`note`), MIN(DISTINCT `note` COLLATE utf8mb4_0900_bin) FROM `shop`.`orders`"
+        "SELECT COUNT(DISTINCT `note`), COUNT(DISTINCT `id`), COUNT(`note`), \
+         MIN(DISTINCT `note`) FROM `shop`.`orders`"
     );
 }
 
@@ -719,33 +638,7 @@ fn mixed_case_function_names_render_identically() {
     );
     assert_eq!(
         lower_case,
-        "SELECT COUNT(`total`), MIN(`note` COLLATE utf8mb4_0900_bin) FROM `shop`.`orders`"
-    );
-}
-
-/// Exasol orders character values by code point and pads no `VARCHAR`, so a
-/// character `MIN` or `MAX` carries the collation that reproduces both.
-/// `COUNT` reads no order, and a numeric operand has no collation to carry.
-///
-/// The comparison collation orders by collation weight and returns `a` where
-/// Exasol returns `B`, so ordering must not borrow it — which the exact
-/// match this test pins already proves: it carries no `utf8mb4_0900_as_cs`.
-#[test]
-fn only_min_and_max_over_a_character_operand_carry_the_ordering_collation() {
-    let sql = render_statement(&typed_request(
-        json!([
-            aggregate("MIN", Some(column_operand("note"))),
-            aggregate("MAX", Some(column_operand("note"))),
-            aggregate("COUNT", Some(column_operand("note"))),
-            aggregate("MIN", Some(column_operand("total"))),
-        ]),
-        json!([note_type(), note_type(), count_type(), total_type()]),
-    ));
-
-    assert_eq!(
-        sql,
-        "SELECT MIN(`note` COLLATE utf8mb4_0900_bin), MAX(`note` COLLATE utf8mb4_0900_bin), \
-         COUNT(`note`), MIN(`total`) FROM `shop`.`orders`"
+        "SELECT COUNT(`total`), MIN(`note`) FROM `shop`.`orders`"
     );
 }
 
@@ -827,18 +720,28 @@ fn boolean_type() -> Value {
     json!({"type": "BOOLEAN"})
 }
 
-/// The five predicate kinds measured arriving in select-list position over
-/// the query's own grouping column — `"g" > 'x'`, `"g" IS NULL`,
-/// `"g" LIKE 'a%'`, `"g" IN ('a','b')`, and `"g" BETWEEN 'a' AND 'z'` — each
-/// reading `operand` outside any aggregate.
-fn select_list_predicates_over(operand: Value) -> Vec<Value> {
+/// Every predicate kind this dialect renders over a character operand, each
+/// reading `operand` outside any aggregate. It includes the five kinds
+/// measured on Exasol 2025.2.1 arriving in select-list position over the
+/// query's own grouping column: `"g" > 'x'`, `"g" IS NULL`, `"g" LIKE 'a%'`,
+/// `"g" IN ('a','b')`, and `"g" BETWEEN 'a' AND 'z'`.
+fn character_predicates_over(operand: Value) -> Vec<Value> {
+    let comparison = |predicate_type: &str| {
+        let mut predicate = equal(operand.clone(), string_literal("x"));
+        predicate["type"] = json!(predicate_type);
+        predicate
+    };
     vec![
+        comparison("predicate_equal"),
+        comparison("predicate_notequal"),
         less(string_literal("x"), operand.clone()),
+        comparison("predicate_lessequal"),
         json!({"type": "predicate_is_null", "expression": operand.clone()}),
         json!({
             "type": "predicate_like",
             "expression": operand.clone(),
             "pattern": string_literal("a%"),
+            "escapeChar": string_literal("\\"),
         }),
         json!({
             "type": "predicate_in_constlist",
@@ -854,38 +757,36 @@ fn select_list_predicates_over(operand: Value) -> Vec<Value> {
     ]
 }
 
-/// Measured on Exasol 2025.2.1, five predicate kinds arrive in select-list
-/// position reading the query's own character `GROUP BY` column, and measured
-/// on MySQL 8.4 every rendering of that shape fails with error 1055 under
-/// `ONLY_FULL_GROUP_BY`, including the one leaving the operand uncollated:
-/// MySQL matches a select-list expression against a `GROUP BY` expression
-/// whole and credits no sub-expression of the collated grouping key. The
-/// adapter therefore fails first, naming the column, rather than forwarding a
-/// statement the source rejects against a query the operator never wrote.
+/// `vs-adapter/mysql-collation`: a select-list predicate reading the query's
+/// own character `GROUP BY` column renders like any other select-list
+/// predicate. The grouping key renders as the bare column, so the predicate's
+/// operand is that same column, the shape MySQL 8.4 executes under
+/// `ONLY_FULL_GROUP_BY` for a numeric grouping key. That the source accepts it
+/// is verified against a live MySQL by `e2e_mysql_test.rs`; what is asserted
+/// here is that the dialect renders a statement rather than an error.
+///
+/// Three shapes Exasol was measured to send are covered: the predicate beside
+/// the bare grouped column, the column nested inside an `AND` and a `NOT`,
+/// and the predicate with no bare grouped column projected at all.
 #[test]
-fn a_select_list_predicate_reading_the_grouped_character_column_names_it_in_the_error() {
-    for predicate in select_list_predicates_over(column_operand("note")) {
-        let error = render_error(&grouped_request(
+fn a_select_list_predicate_reading_the_grouped_character_column_renders() {
+    for predicate in character_predicates_over(column_operand("note")) {
+        let sql = render_statement(&grouped_request(
             json!([column_operand("note"), predicate.clone()]),
             json!([note_type(), boolean_type()]),
             json!([column_operand("note")]),
         ));
 
         assert!(
-            error.contains("note"),
-            "the error must name the grouped column the predicate reads: {error}, for {predicate}"
+            sql.starts_with("SELECT `note`, (")
+                && sql.ends_with(" FROM `shop`.`orders` GROUP BY `note`")
+                && !sql.contains("COLLATE"),
+            "the grouped column and the predicate reading it must render bare: {sql}, for \
+             {predicate}"
         );
     }
-}
 
-/// Measured on Exasol 2025.2.1, an `AND` of two comparisons reaches the
-/// select list as one entry, so the grouped column can sit anywhere in a
-/// nested operand tree rather than directly under the entry. MySQL rejects
-/// the statement for the same reason at any depth, so the search follows the
-/// tree rather than reading the entry's immediate operands.
-#[test]
-fn a_grouped_character_column_nested_inside_a_select_list_predicate_still_fails() {
-    let error = render_error(&grouped_request(
+    let nested = render_statement(&grouped_request(
         json!([
             column_operand("note"),
             json!({
@@ -902,64 +803,28 @@ fn a_grouped_character_column_nested_inside_a_select_list_predicate_still_fails(
         json!([note_type(), boolean_type()]),
         json!([column_operand("note")]),
     ));
-
-    assert!(
-        error.contains("note"),
-        "the search must follow the operand tree rather than the entry's immediate operands, \
-         because MySQL rejects the statement at any depth: {error}"
+    assert_eq!(
+        nested,
+        "SELECT `note`, ((0 < COUNT(*)) AND (NOT (_utf8mb4 X'78' < `note`))) \
+         FROM `shop`.`orders` GROUP BY `note`"
     );
-}
 
-/// The grouping key is a collated expression whether or not the select list
-/// projects it, so MySQL rejects the variant Exasol was measured to send
-/// carrying no bare grouped column at all, and the adapter fails on it too.
-#[test]
-fn an_unprojected_grouped_character_column_read_by_a_select_list_predicate_still_fails() {
-    let error = render_error(&grouped_request(
+    let unprojected = render_statement(&grouped_request(
         json!([less(string_literal("x"), column_operand("note"))]),
         json!([boolean_type()]),
         json!([column_operand("note")]),
     ));
-
-    assert!(
-        error.contains("note"),
-        "the grouping key is collated whether or not it is projected, so the error must still \
-         name it: {error}"
-    );
-}
-
-/// A numeric grouping key renders bare, so MySQL matches the predicate's
-/// operand against the whole `GROUP BY` expression and credits it as
-/// functionally dependent — measured on MySQL 8.4, four rows rather than
-/// error 1055. The rejection therefore reads off the same declared type the
-/// grouping collation reads, not off grouping alone. A numeric grouping key
-/// carries no collation in either occurrence, which the exact match this
-/// test pins already proves.
-#[test]
-fn a_select_list_predicate_over_a_numeric_grouping_key_renders() {
-    let sql = render_statement(&grouped_request(
-        json!([
-            column_operand("id"),
-            less(numeric_literal("1"), column_operand("id")),
-        ]),
-        json!([id_type(), boolean_type()]),
-        json!([column_operand("id")]),
-    ));
-
     assert_eq!(
-        sql,
-        "SELECT `id`, (1 < `id`) FROM `shop`.`orders` GROUP BY `id`"
+        unprojected,
+        "SELECT (_utf8mb4 X'78' < `note`) FROM `shop`.`orders` GROUP BY `note`"
     );
 }
 
 /// An aggregate reduces its group to one value, so MySQL matches it whole and
-/// never reads the grouped column inside it bare. Measured on MySQL 8.4, both
-/// predicates return the four rows Exasol returns beside a collated grouping
-/// key.
-///
-/// `MIN` returns one of its argument's own values, so it carries that
-/// argument's type: the comparison collation lands on the aggregate while the
-/// argument keeps the ordering collation the returned value is chosen by.
+/// never reads the grouped column inside it bare. A predicate over `COUNT(*)`
+/// and one over a character `MIN` both render as projected comparisons, and
+/// neither the aggregate nor its argument carries a `COLLATE`, which the exact
+/// match proves.
 #[test]
 fn a_select_list_predicate_over_an_aggregate_renders() {
     let sql = render_statement(&grouped_request(
@@ -977,16 +842,15 @@ fn a_select_list_predicate_over_an_aggregate_renders() {
 
     assert_eq!(
         sql,
-        "SELECT `note` COLLATE utf8mb4_0900_as_cs, (0 < COUNT(*)), (_utf8mb4 X'78' COLLATE \
-         utf8mb4_0900_as_cs < MIN(`note` COLLATE utf8mb4_0900_bin) COLLATE utf8mb4_0900_as_cs) \
-         FROM `shop`.`orders` GROUP BY `note` COLLATE utf8mb4_0900_as_cs"
+        "SELECT `note`, (0 < COUNT(*)), (_utf8mb4 X'78' < MIN(`note`)) FROM `shop`.`orders` \
+         GROUP BY `note`"
     );
 }
 
-/// A query grouping by nothing carries no grouping key for a select-list
-/// predicate to disagree with, so the character column renders as an ordinary
-/// comparison operand. `single_group` and no `aggregationType` at all are the
-/// two such shapes Exasol sends.
+/// A query grouping by nothing carries no grouping key, so the character
+/// column renders as an ordinary comparison operand, with no `COLLATE`.
+/// `single_group` and no `aggregationType` at all are the two such shapes
+/// Exasol sends.
 #[test]
 fn a_select_list_predicate_renders_where_the_query_groups_by_nothing() {
     let ungrouped = render_statement(&typed_request(
@@ -996,8 +860,7 @@ fn a_select_list_predicate_renders_where_the_query_groups_by_nothing() {
 
     assert_eq!(
         ungrouped,
-        "SELECT (_utf8mb4 X'78' COLLATE utf8mb4_0900_as_cs < `note` COLLATE utf8mb4_0900_as_cs) \
-         FROM `shop`.`orders`"
+        "SELECT (_utf8mb4 X'78' < `note`) FROM `shop`.`orders`"
     );
 
     let mut single_group = typed_request(
@@ -1458,14 +1321,13 @@ fn every_column_position_in_a_join_carries_its_tables_alias() {
     assert_eq!(
         sql,
         "SELECT `t2`.`name` FROM (`shop`.`orders` AS `t1` INNER JOIN `shop`.`customers` AS `t2` \
-         ON (`t1`.`customer_id` = `t2`.`id`)) WHERE (`t1`.`note` COLLATE utf8mb4_0900_as_cs = \
-         _utf8mb4 X'78' COLLATE utf8mb4_0900_as_cs)"
+         ON (`t1`.`customer_id` = `t2`.`id`)) WHERE (`t1`.`note` = _utf8mb4 X'78')"
     );
 }
 
-/// A numeric grouping key carries the alias and no collation, so aliasing
-/// does not turn the type-keyed collation rule into an unconditional suffix
-/// — which the exact match this test pins already proves.
+/// A grouping key inside a join carries the alias of the table it belongs to
+/// in both of its occurrences, and no collation in either — which the exact
+/// match this test pins already proves.
 #[test]
 fn a_grouped_numeric_column_carries_the_alias_and_no_collation() {
     let mut request = join_request(
@@ -1506,15 +1368,11 @@ fn join_composes_with_filter_and_group_by() {
 
     let sql = render_statement(&request);
 
-    let grouping_key = "`t2`.`name` COLLATE utf8mb4_0900_as_cs";
     assert_eq!(
         sql,
-        format!(
-            "SELECT {grouping_key}, COUNT(*) FROM (`shop`.`orders` AS `t1` INNER JOIN \
-             `shop`.`customers` AS `t2` ON (`t1`.`customer_id` = `t2`.`id`)) WHERE \
-             (`t1`.`note` COLLATE utf8mb4_0900_as_cs = _utf8mb4 X'78' COLLATE utf8mb4_0900_as_cs) \
-             GROUP BY {grouping_key}"
-        ),
+        "SELECT `t2`.`name`, COUNT(*) FROM (`shop`.`orders` AS `t1` INNER JOIN \
+         `shop`.`customers` AS `t2` ON (`t1`.`customer_id` = `t2`.`id`)) WHERE \
+         (`t1`.`note` = _utf8mb4 X'78') GROUP BY `t2`.`name`",
         "the FROM, WHERE, and GROUP BY clauses must all appear, in that order: {sql}"
     );
 }

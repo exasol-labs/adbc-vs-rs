@@ -12,8 +12,6 @@ fn column_row(column: &str, data_type: &str) -> ColumnRow {
         character_maximum_length: None,
         numeric_precision: None,
         numeric_scale: None,
-        collation_name: None,
-        collation_is_deterministic: None,
         is_nullable: true,
     }
 }
@@ -172,14 +170,8 @@ fn both_catalog_queries_filter_on_the_exposed_namespace() {
 }
 
 /// Every field `postgres_type_mapping` reads has to be selected, or a column
-/// that maps is silently omitted for want of a length, a precision, or a
-/// determinism flag the query never asked for.
-///
-/// `collisdeterministic` is not an `information_schema` column — the standard
-/// view reports a collation's name but not whether it is deterministic — so
-/// the query reaches into `pg_catalog` for it, matched on the collation's
-/// schema as well as its name because two schemas may hold collations that
-/// share one.
+/// that maps is silently omitted for want of a length, a precision, or a scale
+/// the query never asked for.
 #[test]
 fn the_columns_query_selects_every_field_the_mapping_reads() {
     let columns = columns_query();
@@ -189,18 +181,12 @@ fn the_columns_query_selects_every_field_the_mapping_reads() {
         "numeric_precision",
         "numeric_scale",
         "is_nullable",
-        "collation_name",
-        "collisdeterministic",
     ] {
         assert!(
             columns.contains(field),
             "the query must select `{field}`: {columns}"
         );
     }
-    assert!(
-        columns.contains("collation_schema"),
-        "the collation join must match on the schema as well as the name: {columns}"
-    );
 }
 
 /// `vs-adapter/postgresql-type-mapping`: the catalog's precision and scale
@@ -223,45 +209,25 @@ fn a_numeric_columns_precision_and_scale_reach_the_mapping() {
     );
 }
 
-/// The declared length reaches the mapping, and so does the collation the
-/// join resolves: a nondeterministic one omits the column, a deterministic one
-/// leaves it mapped at its declared length.
+/// The declared length reaches the mapping, so a `character varying(100)` is
+/// declared `VARCHAR(100)`.
 #[test]
-fn a_character_columns_length_and_collation_reach_the_mapping() {
-    let deterministic = assembled(vec![ColumnRow {
+fn a_character_columns_length_reaches_the_mapping() {
+    let table = assembled(vec![ColumnRow {
         character_maximum_length: Some(100),
-        collation_name: Some("C".to_string()),
-        collation_is_deterministic: Some(true),
         ..column_row("name", "character varying")
     }]);
 
     assert_eq!(
-        deterministic.columns[0].mapped.exasol_type,
+        table.columns[0].mapped.exasol_type,
         MappedType::Varchar { size: 100 }
-    );
-
-    let nondeterministic = assembled(vec![ColumnRow {
-        character_maximum_length: Some(100),
-        collation_name: Some("case_insensitive".to_string()),
-        collation_is_deterministic: Some(false),
-        ..column_row("name", "character varying")
-    }]);
-
-    assert!(nondeterministic.columns.is_empty());
-    assert!(
-        nondeterministic.omissions[0]
-            .reason
-            .contains("case_insensitive"),
-        "the omission must name the collation it refused: {:?}",
-        nondeterministic.omissions[0]
     );
 }
 
 /// `vs-adapter/postgresql-type-mapping`: the mapping declares every character
-/// column `UTF8` and the ordering collation the dialect renders reproduces
-/// Exasol's code-point order only over UTF-8 bytes, so a database of another
-/// encoding is refused rather than exposed. The error names both encodings,
-/// because an operator can act on neither alone.
+/// column `UTF8`, so a database of another encoding is refused rather than
+/// exposed. The error names both encodings, because an operator can act on
+/// neither alone.
 #[test]
 fn a_database_of_another_encoding_is_refused_naming_it_and_utf8() {
     let Err(error) = check_server_encoding("LATIN1") else {

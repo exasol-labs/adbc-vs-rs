@@ -23,11 +23,12 @@ const BIGINT_PRECISION: u32 = 19;
 
 /// The only MySQL character set this release maps a character column from.
 ///
-/// Filter, join, and aggregation pushdown render a character operand with an
-/// explicit `COLLATE utf8mb4_0900_as_cs` or `COLLATE utf8mb4_0900_bin`
-/// suffix, and MySQL rejects both collations for any other character set
-/// with error 1253. A column of another character set is unmapped rather
-/// than produced into a virtual table whose predicates cannot be delegated.
+/// The mapping declares every character column `UTF8`, and the MySQL dialect
+/// renders every string literal in this character set, so a column of
+/// another character set would be compared against a literal of a different
+/// one. How MySQL converts such a literal is not measured for this release,
+/// so a column of another character set is unmapped rather than declared
+/// `UTF8`.
 pub(crate) const SUPPORTED_CHARACTER_SET: &str = "utf8mb4";
 
 /// A MySQL column as reported by `information_schema`: the fields the
@@ -114,10 +115,10 @@ fn map_decimal(
 /// Maps a MySQL `VARCHAR` or `CHAR` column to Exasol `VARCHAR`.
 ///
 /// Both MySQL types map to the same Exasol type: Exasol blank-pads a `CHAR`
-/// value and MySQL does not pad a `CHAR` operand under the `NO PAD`
-/// collations pushdown renders, so a mapped Exasol `CHAR` would disagree
-/// with MySQL in both directions. Mapping to `VARCHAR` instead reproduces
-/// the value MySQL actually returns.
+/// value, and MySQL returns a `CHAR` value with its trailing spaces
+/// stripped, so a mapped Exasol `CHAR` would declare a blank-padded type for
+/// a value MySQL returns unpadded. Mapping to `VARCHAR` instead declares the
+/// value MySQL actually returns.
 fn map_character(column: &MySqlColumn, mysql_type: &str) -> Result<MappedType, String> {
     require_utf8mb4(column.character_set.as_deref(), mysql_type)?;
     Ok(MappedType::Varchar {

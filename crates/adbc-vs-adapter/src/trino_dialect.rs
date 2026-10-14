@@ -17,27 +17,25 @@
 //! nothing in the request or the rendered SQL depends on connection state
 //! `EXPLAIN VIRTUAL` does not show and this adapter does not control.
 //!
-//! This dialect renders no collation suffix in any position, and that is a
-//! stronger claim than `postgres_dialect`'s: PostgreSQL still writes
-//! `COLLATE "C"` for an operand whose order decides the answer, where this
-//! module writes nothing there ever. Two measured facts license it, not one.
-//! `COLLATE` was measured not to be a Trino keyword in any syntactic
-//! position at all — every one of the four suffix positions a collation could
-//! occupy (`ORDER BY`, a comparison operand, a `GROUP BY` key, and
-//! `COUNT(DISTINCT ...)`) rejects it as a parse error, and the parser
-//! accepted it as a plain column alias in the `GROUP BY` case before
-//! choking on what followed, which is direct evidence `COLLATE` is an
-//! ordinary unreserved identifier rather than a suffix grammar Trino has and
-//! this dialect declines to use. There is therefore no suffix position to
-//! render into even if a rule wanted one. The two engines were also measured
-//! agreeing without any suffix, live against Trino 483 and Exasol 2025.2.1: identical `ORDER BY` order over `a, B, Z, z, A, ä, Ä, é, e`,
-//! identical `MIN`/`MAX`, identical row sets for `<` and `<=`, identical
+//! This dialect renders no collation suffix in any position, as every dialect
+//! here renders none, and Trino differs from the others in one further way:
+//! it has no suffix position to render into at all. `COLLATE` was measured
+//! not to be a Trino keyword in any syntactic position at all — every one of
+//! the four suffix positions a collation could occupy (`ORDER BY`, a
+//! comparison operand, a `GROUP BY` key, and `COUNT(DISTINCT ...)`) rejects
+//! it as a parse error, and the parser accepted it as a plain column alias in
+//! the `GROUP BY` case before choking on what followed, which is direct
+//! evidence `COLLATE` is an ordinary unreserved identifier rather than a
+//! suffix grammar Trino has and this dialect declines to use. The two engines
+//! were also measured agreeing without any suffix, live against Trino 483 and
+//! Exasol 2025.2.1: identical `ORDER BY` order over `a, B, Z, z, A, ä, Ä, é,
+//! e`, identical `MIN`/`MAX`, identical row sets for `<` and `<=`, identical
 //! `GROUP BY` grouping, and identical `COUNT(DISTINCT)` over the same mixed-
 //! case and accented fixture PostgreSQL's own gate used. The reason the two
 //! agree is that Trino's `varchar` comparison is Unicode code-point order,
 //! and Exasol's is its own byte-order comparison, which for UTF-8 is the same
-//! order — confirmed by running both engines side by side rather than
-//! assumed from either engine's documentation.
+//! order — confirmed by running both engines side by side rather than assumed
+//! from either engine's documentation.
 //!
 //! A string literal renders as a plain quoted constant, `'<body>'`, with only
 //! the single quote doubled and nothing else escaped. Trino defines no
@@ -72,19 +70,15 @@
 //! value sits inside quotes and anything else in it could end the literal
 //! early.
 //!
-//! `LIKE` always renders an explicit `ESCAPE` clause, carrying the request's
-//! own escape character when it named one and a backslash when it did not.
-//! Trino was measured defining no default escape character at all, and — the
-//! stronger fact — Exasol's own default escape character IS the backslash, so every pattern rendered with no `ESCAPE` clause would
-//! already disagree between the two engines before either encounters a
-//! pattern that needs escaping. Trino's escape rule is also strict where
-//! Exasol's is permissive: the exact rejected set was measured as any
-//! character other than `%`, `_`, or the escape character itself, raised at
-//! execution rather than parse time as `Escape character must be followed by
-//! '%', '_' or the escape character itself`. Rendering a pattern whose escape
-//! character precedes such a character would send a statement the source
-//! itself refuses, so this dialect fails to render it instead, naming the
-//! offending sequence.
+//! `LIKE` renders as a plain `LIKE <pattern>` with no `ESCAPE` clause, and a
+//! request that carries an `escapeChar` fails instead of rendering. Trino
+//! defines no default escape character and rejects an escape character
+//! followed by anything other than `%`, `_`, or itself, so neither Exasol's
+//! default backslash rule nor a request's own escape character has a Trino
+//! form that accepts every pattern Exasol accepts. `FN_PRED_LIKE_ESCAPE` is
+//! therefore not advertised: a query that writes an explicit `ESCAPE` clause is
+//! evaluated by Exasol, and a backslash in a delegated pattern is an ordinary
+//! character at Trino.
 //!
 //! A join adds the one decision no column reference can answer alone: which
 //! table it belongs to. Every table of a join renders under an alias derived
@@ -114,13 +108,6 @@ use crate::sql_dialect::{RenderError, SqlDialect};
 /// statement projecting no column would both be invalid Trino SQL and lose
 /// the count it was sent for.
 const ROW_MARKER_CONSTANT: &str = "1";
-
-/// The escape character a `LIKE` renders when the request named none.
-///
-/// Exasol's own default escape character was measured to be the
-/// backslash, so rendering this one keeps a no-`escapeChar` request's meaning
-/// rather than substituting Trino's absent default.
-const DEFAULT_ESCAPE_CHARACTER: char = '\\';
 
 /// The aggregate functions this dialect renders, spelled in Trino's canonical
 /// upper case, which is also how the query model carries a function name: it
@@ -255,10 +242,9 @@ impl<'a> AliasedFrom<'a> {
 /// reaches the renderer as a projected column, a predicate operand, an
 /// aggregate argument, a join condition operand, and a grouping key alike.
 ///
-/// Unlike `postgres_dialect::Statement`, this is the *only* decision a
-/// statement settles here: nothing in this dialect collates, so no second
-/// decision about which operand carries a suffix exists to thread through
-/// rendering.
+/// This is the only decision a statement settles here: nothing in this dialect
+/// collates, so no decision about which operand carries a suffix exists to
+/// thread through rendering.
 enum Statement<'a> {
     /// One table, named by nothing: a single table's column reference cannot
     /// be ambiguous, so the statement carries no alias and no qualifier even
@@ -425,29 +411,25 @@ impl<'a> Statement<'a> {
         ))
     }
 
-    /// Renders a `LIKE` with an explicit `ESCAPE` clause for every pattern,
-    /// this module's own doc comment states why. When the pattern and the
-    /// escape character are both known literal text, the pattern is checked
-    /// against the measured rejection set before rendering, so a
-    /// pattern Trino would refuse at execution fails here instead, naming
-    /// the offending sequence.
+    /// Renders a `LIKE` with no `ESCAPE` clause. A request that carries an
+    /// `escapeChar` fails, because rendering it without the escape character
+    /// would change which rows match, and the capability that admits it is not
+    /// advertised.
     fn render_like(&self, like: &LikePredicate) -> Result<String, RenderError> {
-        let escape_expression = like
-            .escape_char
-            .clone()
-            .unwrap_or_else(default_escape_expression);
-
-        if let (Expression::Literal(Literal::String(pattern)), Some(escape_char)) =
-            (&like.pattern, literal_escape_char(&escape_expression))
-        {
-            validate_like_pattern(pattern, escape_char)?;
+        if let Some(escape_char) = &like.escape_char {
+            return Err(RenderError::new(format!(
+                "a `predicate_like` node carries the `escapeChar` {}, and this dialect does not \
+                 advertise `FN_PRED_LIKE_ESCAPE`: Trino defines no default escape character and \
+                 rejects an escape character followed by anything other than `%`, `_`, or \
+                 itself, so Exasol evaluates a `LIKE` with an `ESCAPE` clause itself",
+                self.render_expression(escape_char)?
+            )));
         }
 
         Ok(format!(
-            "({} LIKE {} ESCAPE {})",
+            "({} LIKE {})",
             self.render_expression(&like.expression)?,
-            self.render_expression(&like.pattern)?,
-            self.render_expression(&escape_expression)?
+            self.render_expression(&like.pattern)?
         ))
     }
 
@@ -661,62 +643,6 @@ fn render_star_aggregate(function: &str, call: &AggregateCall) -> Result<String,
     }
 
     Ok(format!("{COUNT_FUNCTION}(*)"))
-}
-
-/// The escape expression a `LIKE` carries when the request named no
-/// `escapeChar`: [`DEFAULT_ESCAPE_CHARACTER`], rendered the way any other
-/// string literal is.
-fn default_escape_expression() -> Expression {
-    Expression::Literal(Literal::String(DEFAULT_ESCAPE_CHARACTER.to_string()))
-}
-
-/// The single character `expression` names, when it is a one-character
-/// string literal. `None` for anything else — a column reference or a
-/// multi-character value — which is a shape the rejection set
-/// cannot be checked against at render time, so [`Statement::render_like`]
-/// renders it and lets Trino itself be the judge.
-fn literal_escape_char(expression: &Expression) -> Option<char> {
-    let Expression::Literal(Literal::String(value)) = expression else {
-        return None;
-    };
-    let mut characters = value.chars();
-    let first = characters.next()?;
-    match characters.next() {
-        None => Some(first),
-        Some(_) => None,
-    }
-}
-
-/// Checks `pattern` against `vs-adapter/trino-pushdown`'s measured rejection set: an
-/// occurrence of `escape_char` MUST be followed by `%`, `_`, or
-/// `escape_char` itself, or Trino refuses the statement at execution with
-/// `Escape character must be followed by '%', '_' or the escape character
-/// itself`.
-fn validate_like_pattern(pattern: &str, escape_char: char) -> Result<(), RenderError> {
-    let mut characters = pattern.chars();
-    while let Some(character) = characters.next() {
-        if character != escape_char {
-            continue;
-        }
-        match characters.next() {
-            Some(next) if next == '%' || next == '_' || next == escape_char => {}
-            Some(other) => {
-                return Err(RenderError::new(format!(
-                    "the LIKE pattern `{pattern}` escapes `{other}` with `{escape_char}`, and \
-                     Trino accepts an escaped `%`, `_`, or `{escape_char}` itself only — its own \
-                     diagnosis is \"Escape character must be followed by '%', '_' or the escape \
-                     character itself\""
-                )));
-            }
-            None => {
-                return Err(RenderError::new(format!(
-                    "the LIKE pattern `{pattern}` ends with the escape character `{escape_char}` \
-                     and names nothing for it to escape"
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn render_literal(literal: &Literal) -> Result<String, RenderError> {

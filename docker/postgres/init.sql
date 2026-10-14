@@ -83,6 +83,26 @@ INSERT INTO items (id, category, sort_key, tag, code, description, details, phot
     (5, 'cafe',   'a', 'ab',  'ITEM0005', 'A plain cafe, no accent.',            NULL,                 E'\\xBEEF',     '00000000-0000-0000-0000-000000000005', '2026-01-05 10:00:00+00'),
     (6, 'café',   'C', 'ab!', 'ITEM0006', 'The accented cafe.',                  '{"tier": "gold"}',   E'\\xAB',       '00000000-0000-0000-0000-000000000006', '2026-01-06 10:00:00+00');
 
+-- `items_c` holds `items`'s four mapped columns and rows with every character
+-- column declared `COLLATE "C"`, which sorts and compares by byte value. The
+-- adapter renders no collation, so a delegated character comparison, ordering,
+-- `GROUP BY`, `COUNT(DISTINCT)`, `MIN`, and `MAX` over this table follow the
+-- column's own collation and so return Exasol's code-point answers, which is
+-- what lets a differential test compare them with `PG_MIRROR."items"`. `items`
+-- keeps the database default `en_US.utf8`, whose order the same tests assert
+-- as PostgreSQL's own. The rows are copied from `items` inside PostgreSQL, so
+-- the two tables cannot drift apart.
+CREATE TABLE items_c (
+    id INTEGER NOT NULL,
+    category VARCHAR(20) COLLATE "C" NOT NULL,
+    sort_key VARCHAR(5) COLLATE "C" NOT NULL,
+    tag VARCHAR(10) COLLATE "C" NOT NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO items_c (id, category, sort_key, tag)
+    SELECT id, category, sort_key, tag FROM items;
+
 -- `item_notes` is `items`'s join partner: `items.id` 1 carries no matching
 -- row (unmatched on the `items` side), and `item_id` 99 matches no `items`
 -- row (unmatched on the `item_notes` side) — the pair task 8.2's `FULL OUTER

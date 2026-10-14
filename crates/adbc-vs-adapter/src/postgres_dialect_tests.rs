@@ -54,8 +54,8 @@ fn filter_render_error(filter: Value) -> String {
     render_error(&filtered_request(orders_columns(), filter))
 }
 
-/// The columns whose declared types the collation rule reads: one character,
-/// one numeric, one temporal.
+/// One character column, one numeric, one temporal: the declared types a
+/// collation suffix could be keyed on, so a test over them shows none is.
 fn typed_columns() -> Value {
     json!([
         {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
@@ -76,8 +76,7 @@ fn comparison_operands_keep_request_order() {
 
 /// `vs-adapter/pushdown-filter` and `vs-adapter/postgresql-pushdown`: every
 /// predicate this dialect renders, in the standard form PostgreSQL spells it,
-/// over a numeric column so no collation suffix stands between the operator
-/// and the assertion. `predicate_notequal` is `<>`, a null test is `IS NULL`
+/// over a numeric column. `predicate_notequal` is `<>`, a null test is `IS NULL`
 /// rather than a comparison against a null literal, and the `BETWEEN` bounds
 /// and `IN` entries keep the request's own order.
 #[test]
@@ -222,11 +221,8 @@ fn nested_predicates_are_parenthesized() {
 /// exactly when the request carries an `escapeChar`, and its pattern is an
 /// escape-string constant like every other string literal.
 ///
-/// `vs-adapter/postgresql-collation`, measured by gate 2.3(f): the operand
-/// carries **no** collation suffix, where MySQL's does. PostgreSQL's `LIKE`
-/// compares character by character rather than by collation weight, and four
-/// patterns measured bare and collated returned identical row sets in both
-/// directions.
+/// `vs-adapter/postgresql-collation`: the operand carries no collation
+/// suffix, so the `LIKE` runs under the column's own collation.
 #[test]
 fn like_renders_its_escape_clause() {
     let with_escape = where_clause(json!({
@@ -254,11 +250,8 @@ fn like_renders_its_escape_clause() {
 /// `vs-adapter/pushdown-filter`: the `BETWEEN` bounds and the `IN` entries
 /// keep the order the request gave them, never a sorted or normalized one.
 ///
-/// `vs-adapter/postgresql-collation`: the suffix belongs on the compared
-/// operand of an ordering predicate and nowhere else, so `BETWEEN` collates
-/// its character operand while its bounds render bare, and the `IN` compared
-/// operand renders bare because `IN` asks equality — the position where
-/// MySQL does render a suffix and this dialect must not.
+/// `vs-adapter/postgresql-collation`: the `BETWEEN` operand, its bounds, and
+/// the `IN` compared operand all render bare.
 #[test]
 fn between_and_in_keep_operand_order() {
     let between = where_clause(json!({
@@ -269,8 +262,8 @@ fn between_and_in_keep_operand_order() {
     }));
 
     assert_eq!(
-        between, r#"("note" COLLATE "C" BETWEEN E'z' AND E'a')"#,
-        "the bounds keep the request's order and carry no suffix of their own"
+        between, r#"("note" BETWEEN E'z' AND E'a')"#,
+        "the bounds keep the request's order and carry no suffix"
     );
 
     let in_list = where_clause(json!({
@@ -286,27 +279,19 @@ fn between_and_in_keep_operand_order() {
     );
 }
 
-/// `vs-adapter/postgresql-collation`: `COLLATE "C"` reaches a **character**
-/// operand of `predicate_less`, `predicate_lessequal`, and `predicate_between`
-/// and nothing else. Gate 2.3(d) measured that the suffix changes which rows
-/// an ordering comparison returns — `g < 'b'` returns `B,a,C` collated and
-/// `a` bare, where Exasol returns `B,a,C` — and gate 2.3(e) measured that
-/// equality already agrees, so a suffix on an equality operand would be
-/// decoration that costs the source its index.
+/// `vs-adapter/postgresql-collation`: no operand of any predicate, grouping
+/// key, `DISTINCT` operand, `MIN` or `MAX` operand, or join key carries a
+/// collation suffix, whatever its declared type. PostgreSQL evaluates each
+/// under the collation the source applies to the column, so a character
+/// operand and a numeric or temporal one render the same way: bare.
 #[test]
-fn collation_placement_matrix() {
-    let ordering_predicate = |operand: &str| json!({"type": "predicate_less", "left": column(operand), "right": column(operand)});
-
-    assert_eq!(
-        where_clause_over(typed_columns(), ordering_predicate("note")),
-        r#"("note" COLLATE "C" < "note" COLLATE "C")"#,
-        "both operands of an ordering comparison are read by position, and each character-typed \
-         one carries the suffix"
-    );
-
-    for bare in [
-        ordering_predicate("id"),
-        ordering_predicate("shipped"),
+fn no_operand_carries_a_collation_suffix_in_any_position() {
+    let ordering = |left: &str, right: &str| json!({"type": "predicate_less", "left": column(left), "right": column(right)});
+    let predicates = [
+        ordering("note", "note"),
+        ordering("id", "id"),
+        ordering("shipped", "shipped"),
+        json!({"type": "predicate_lessequal", "left": column("note"), "right": string_literal("B")}),
         equal(column("note"), column("note")),
         json!({"type": "predicate_notequal", "left": column("note"), "right": column("note")}),
         json!({"type": "predicate_is_null", "expression": column("note")}),
@@ -323,6 +308,12 @@ fn collation_placement_matrix() {
         }),
         json!({
             "type": "predicate_between",
+            "expression": column("note"),
+            "left": string_literal("a"),
+            "right": string_literal("z"),
+        }),
+        json!({
+            "type": "predicate_between",
             "expression": column("id"),
             "left": numeric_literal("1"),
             "right": numeric_literal("9"),
@@ -333,22 +324,83 @@ fn collation_placement_matrix() {
             "left": json!({"type": "literal_date", "value": "2015-01-01"}),
             "right": json!({"type": "literal_date", "value": "2015-12-31"}),
         }),
-    ] {
-        let clause = where_clause_over(typed_columns(), bare.clone());
+    ];
+    let mut statements = Vec::new();
 
+    for predicate in &predicates {
+        statements.push(where_clause_over(typed_columns(), predicate.clone()));
+
+        let mut select_list = request(typed_columns(), Some(json!([predicate.clone()])));
+        select_list["pushdownRequest"]["selectListDataTypes"] = json!([boolean_type()]);
+        statements.push(render_statement(&select_list));
+    }
+
+    let mut distinct_count = aggregate("COUNT", Some(column("note")));
+    distinct_count["distinct"] = json!(true);
+    let mut distinct_min = aggregate("MIN", Some(column("note")));
+    distinct_min["distinct"] = json!(true);
+    let mut grouped = grouped_request(
+        json!([
+            column("note"),
+            column("id"),
+            column("shipped"),
+            aggregate("MIN", Some(column("note"))),
+            aggregate("MAX", Some(column("note"))),
+            distinct_min,
+            distinct_count,
+            aggregate("MIN", Some(column("id"))),
+            aggregate("MAX", Some(column("shipped"))),
+            less(string_literal("x"), aggregate("MIN", Some(column("note")))),
+        ]),
+        json!([
+            note_type(),
+            id_type(),
+            {"type": "DATE"},
+            note_type(),
+            note_type(),
+            note_type(),
+            count_type(),
+            id_type(),
+            {"type": "DATE"},
+            boolean_type(),
+        ]),
+        json!([column("note"), column("id"), column("shipped")]),
+    );
+    grouped["involvedTables"][0]["columns"] = typed_columns();
+    statements.push(render_statement(&grouped));
+
+    let mut from = orders_to_customers("full_outer");
+    from["condition"] = json!({
+        "type": "predicate_equal",
+        "left": joined_column("note", "orders"),
+        "right": joined_column("name", "customers"),
+    });
+    let mut joined = join_request(from, json!([joined_column("name", "customers")]));
+    joined["pushdownRequest"]["filter"] =
+        less(string_literal("m"), joined_column("note", "orders"));
+    statements.push(render_statement(&joined));
+
+    for statement in &statements {
         assert!(
-            !clause.contains("COLLATE"),
-            "this position carries no collation on PostgreSQL: {clause}, for {bare}"
+            !statement.contains("COLLATE"),
+            "no position carries a collation suffix on PostgreSQL: {statement}"
         );
     }
+    assert_eq!(
+        where_clause_over(typed_columns(), ordering("note", "note")),
+        r#"("note" < "note")"#
+    );
+    assert_eq!(
+        render_statement(&grouped),
+        r#"SELECT "note", "id", "shipped", MIN("note"), MAX("note"), MIN(DISTINCT "note"), COUNT(DISTINCT "note"), MIN("id"), MAX("shipped"), (E'x' < MIN("note")) FROM "public"."orders" GROUP BY "note", "id", "shipped""#
+    );
 }
 
 /// `vs-adapter/pushdown-filter`: a predicate delegated into the select list
 /// renders as a projected boolean rather than reaching a second renderer.
 ///
 /// `vs-adapter/postgresql-collation`: its character operand carries no
-/// suffix — the third of the three sites where MySQL renders one and this
-/// dialect must not.
+/// suffix.
 #[test]
 fn select_list_predicate_renders_as_projected_boolean() {
     let mut request = request(
@@ -359,10 +411,7 @@ fn select_list_predicate_renders_as_projected_boolean() {
 
     let sql = render_statement(&request);
 
-    assert_eq!(
-        sql,
-        r#"SELECT (E'x' COLLATE "C" < "note" COLLATE "C") FROM "public"."orders""#
-    );
+    assert_eq!(sql, r#"SELECT (E'x' < "note") FROM "public"."orders""#);
 
     let mut equality = request.clone();
     equality["pushdownRequest"]["selectList"] = json!([equal(column("note"), string_literal("x"))]);
@@ -370,7 +419,7 @@ fn select_list_predicate_renders_as_projected_boolean() {
     assert_eq!(
         render_statement(&equality),
         r#"SELECT ("note" = E'x') FROM "public"."orders""#,
-        "a select-list predicate carries no collation on an equality operand"
+        "a select-list equality renders bare as well"
     );
 
     let mut single_group = request;
@@ -748,9 +797,8 @@ fn nested_join_renders_nested() {
 /// from carries the alias of the table it belongs to — the select list, the
 /// `WHERE` clause, and the join's own condition.
 ///
-/// `vs-adapter/postgresql-collation`: a character join key and a character
-/// equality operand each render bare, so aliasing does not turn the
-/// type-keyed collation rule into an unconditional suffix.
+/// `vs-adapter/postgresql-collation`: a character equality operand renders
+/// bare beside its alias qualification.
 #[test]
 fn joined_tables_are_aliased_and_qualified() {
     let mut request = join_request(
@@ -768,29 +816,6 @@ fn joined_tables_are_aliased_and_qualified() {
     assert_eq!(
         sql,
         r#"SELECT "t2"."name" FROM ("public"."orders" AS "t1" INNER JOIN "public"."customers" AS "t2" ON ("t1"."customer_id" = "t2"."id")) WHERE ("t1"."note" = E'x')"#
-    );
-}
-
-/// A character join key renders bare while an ordering comparison over the
-/// same column in the same statement renders collated, so the join condition
-/// takes the type-keyed rule rather than an exemption of its own.
-#[test]
-fn a_character_join_key_renders_bare_beside_a_collated_ordering_comparison() {
-    let mut from = orders_to_customers("full_outer");
-    from["condition"] = json!({
-        "type": "predicate_equal",
-        "left": joined_column("note", "orders"),
-        "right": joined_column("name", "customers"),
-    });
-    let mut request = join_request(from, json!([joined_column("name", "customers")]));
-    request["pushdownRequest"]["filter"] =
-        less(string_literal("m"), joined_column("note", "orders"));
-
-    let sql = render_statement(&request);
-
-    assert_eq!(
-        sql,
-        r#"SELECT "t2"."name" FROM ("public"."orders" AS "t1" FULL OUTER JOIN "public"."customers" AS "t2" ON ("t1"."note" = "t2"."name")) WHERE (E'm' COLLATE "C" < "t1"."note" COLLATE "C")"#
     );
 }
 
@@ -961,8 +986,7 @@ fn typed_request(select_list: Value, data_types: Value) -> Value {
 }
 
 /// A `pushdown` request whose `aggregationType` is `group_by` over
-/// `group_by` — the shape MySQL renders through one coordinated collation rule
-/// and this dialect renders through none.
+/// `group_by`.
 fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
     let mut request = typed_request(select_list, data_types);
     request["pushdownRequest"]["aggregationType"] = json!("group_by");
@@ -985,10 +1009,6 @@ fn note_type() -> Value {
 
 fn id_type() -> Value {
     json!({"type": "DECIMAL", "precision": 19, "scale": 0})
-}
-
-fn total_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 12, "scale": 4})
 }
 
 /// The type Exasol supplies for a select-list predicate: one `BOOLEAN` column.
@@ -1028,85 +1048,6 @@ fn group_by_keeps_request_order() {
     assert_eq!(
         sql,
         r#"SELECT "id", "note", COUNT("total") FROM "public"."orders" GROUP BY "note", "id""#
-    );
-}
-
-/// `vs-adapter/postgresql-collation`: a `GROUP BY` key, the bare select-list
-/// occurrence of that key, and a `DISTINCT` operand each render with no
-/// collation suffix, and `MIN` over the same character column renders with
-/// one.
-///
-/// The absence is what makes the shape legal rather than merely tidy. Gate
-/// 2.3(b) measured the PostgreSQL analogue of MySQL error 1055 firing only
-/// when the grouping key carries a collation, so a bare key is what leaves the
-/// key and its select-list occurrence the same expression. Gate 2.3(e)
-/// measured that an uncollated `GROUP BY` and `COUNT(DISTINCT)` over
-/// `widget`/`Widget` and `cafe`/`café` return Exasol's four groups and its
-/// distinct count of four, so the suffix would change no answer either.
-#[test]
-fn grouping_and_distinct_render_uncollated() {
-    let mut distinct_count = aggregate("COUNT", Some(column("note")));
-    distinct_count["distinct"] = json!(true);
-
-    let sql = render_statement(&grouped_request(
-        json!([
-            column("note"),
-            column("id"),
-            aggregate("MIN", Some(column("note"))),
-            distinct_count,
-        ]),
-        json!([note_type(), id_type(), note_type(), count_type()]),
-        json!([column("note"), column("id")]),
-    ));
-
-    assert_eq!(
-        sql,
-        r#"SELECT "note", "id", MIN("note" COLLATE "C"), COUNT(DISTINCT "note") FROM "public"."orders" GROUP BY "note", "id""#
-    );
-}
-
-/// `MIN` and `MAX` return the value their operand's collation sorts first or
-/// last, so reducing the values by equality first cannot change which one comes
-/// back: the ordering suffix stays whatever `distinct` the request carries.
-/// The rule that leaves a `DISTINCT` operand bare is about the reduction, and
-/// no reduction chooses this value.
-#[test]
-fn a_distinct_min_keeps_the_ordering_collation() {
-    let mut distinct_min = aggregate("MIN", Some(column("note")));
-    distinct_min["distinct"] = json!(true);
-    let mut distinct_count = aggregate("COUNT", Some(column("note")));
-    distinct_count["distinct"] = json!(true);
-
-    let sql = render_statement(&typed_request(
-        json!([distinct_min, distinct_count]),
-        json!([note_type(), count_type()]),
-    ));
-
-    assert_eq!(
-        sql,
-        r#"SELECT MIN(DISTINCT "note" COLLATE "C"), COUNT(DISTINCT "note") FROM "public"."orders""#
-    );
-}
-
-/// Exasol orders character values by code point and pads no `VARCHAR`, and the
-/// cluster's own `en_US.utf8` locale orders by collation weight, so a character
-/// `MIN` or `MAX` carries the collation that reproduces Exasol's answer.
-/// `COUNT` reads no order, and a numeric operand has no collation to carry.
-#[test]
-fn only_min_and_max_over_a_character_operand_carry_the_ordering_collation() {
-    let sql = render_statement(&typed_request(
-        json!([
-            aggregate("MIN", Some(column("note"))),
-            aggregate("MAX", Some(column("note"))),
-            aggregate("COUNT", Some(column("note"))),
-            aggregate("MIN", Some(column("total"))),
-        ]),
-        json!([note_type(), note_type(), count_type(), total_type()]),
-    ));
-
-    assert_eq!(
-        sql,
-        r#"SELECT MIN("note" COLLATE "C"), MAX("note" COLLATE "C"), COUNT("note"), MIN("total") FROM "public"."orders""#
     );
 }
 
@@ -1151,7 +1092,7 @@ fn mixed_case_function_names_render_identically() {
     );
     assert_eq!(
         lower_case,
-        r#"SELECT COUNT("total"), MIN("note" COLLATE "C") FROM "public"."orders""#
+        r#"SELECT COUNT("total"), MIN("note") FROM "public"."orders""#
     );
 }
 
@@ -1224,16 +1165,13 @@ fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_cla
     );
 }
 
-/// `vs-adapter/postgresql-collation`, gate 2.3(b): the composed shape MySQL
-/// must refuse — a select-list predicate reading the query's own character
-/// `GROUP BY` key outside any aggregate — is rendered here, because the key
-/// renders bare and PostgreSQL's full-group-by rule reads column references
-/// rather than matching whole expressions. Its negative control is the one
-/// that pins the reason: the same query with a *collated* grouping key was
-/// rejected with PostgreSQL's exact analogue of MySQL error 1055.
+/// `vs-adapter/postgresql-collation`: a select-list predicate reading the
+/// query's own character `GROUP BY` key outside any aggregate is rendered,
+/// because the key renders bare and PostgreSQL's full-group-by rule reads
+/// column references rather than matching whole expressions.
 ///
-/// Five predicate kinds were measured arriving in that position; each must
-/// render, with the grouping key bare in both clauses.
+/// Five predicate kinds arrive in that position; each must render, with the
+/// grouping key bare in both clauses.
 #[test]
 fn a_select_list_predicate_reading_the_grouped_character_column_renders() {
     let predicates = [
@@ -1276,16 +1214,14 @@ fn a_select_list_predicate_reading_the_grouped_character_column_renders() {
             json!([note_type(), boolean_type()]),
             json!([column("note")]),
         )),
-        r#"SELECT "note", (E'x' COLLATE "C" < "note" COLLATE "C") FROM "public"."orders" GROUP BY "note""#
+        r#"SELECT "note", (E'x' < "note") FROM "public"."orders" GROUP BY "note""#
     );
 }
 
 /// `vs-adapter/pushdown-aggregation`: an aggregate reaches the select list
 /// inside a predicate as `COUNT(*) > 0`, and the whole entry is delegated as
-/// one `BOOLEAN` column. `MIN` returns one of its argument's own values, so it
-/// carries that argument's type: the comparison against it is an ordering one,
-/// which collates both the aggregate and the literal it is compared against,
-/// while the argument keeps the suffix the returned value is chosen by.
+/// one `BOOLEAN` column, with no collation suffix on the aggregate, its
+/// argument, or the literal it is compared against.
 #[test]
 fn select_list_predicate_over_an_aggregate_renders() {
     let sql = render_statement(&grouped_request(
@@ -1300,7 +1236,7 @@ fn select_list_predicate_over_an_aggregate_renders() {
 
     assert_eq!(
         sql,
-        r#"SELECT "note", (0 < COUNT(*)), (E'x' COLLATE "C" < MIN("note" COLLATE "C") COLLATE "C") FROM "public"."orders" GROUP BY "note""#
+        r#"SELECT "note", (0 < COUNT(*)), (E'x' < MIN("note")) FROM "public"."orders" GROUP BY "note""#
     );
 }
 
@@ -1334,42 +1270,6 @@ fn order_by_and_limit_elements_fail_named() {
             "the error must name the element it refused: {error}"
         );
     }
-}
-
-/// The other half of the collation-placement matrix: a numeric or temporal
-/// operand carries no suffix in *any* position, not only in a comparison. The
-/// rule reads the operand's declared type, so grouping, `DISTINCT`, and
-/// `MIN`/`MAX` each answer from the same fact a predicate operand answers from,
-/// and aliasing or grouping cannot turn it into an unconditional suffix.
-#[test]
-fn numeric_and_temporal_operands_carry_no_collation_in_any_position() {
-    let mut distinct_id = aggregate("COUNT", Some(column("id")));
-    distinct_id["distinct"] = json!(true);
-    let mut request = grouped_request(
-        json!([
-            column("id"),
-            column("shipped"),
-            aggregate("MIN", Some(column("id"))),
-            aggregate("MAX", Some(column("shipped"))),
-            distinct_id,
-        ]),
-        json!([
-            id_type(),
-            {"type": "DATE"},
-            id_type(),
-            {"type": "DATE"},
-            count_type(),
-        ]),
-        json!([column("id"), column("shipped")]),
-    );
-    request["involvedTables"][0]["columns"] = typed_columns();
-
-    let sql = render_statement(&request);
-
-    assert_eq!(
-        sql,
-        r#"SELECT "id", "shipped", MIN("id"), MAX("shipped"), COUNT(DISTINCT "id") FROM "public"."orders" GROUP BY "id", "shipped""#
-    );
 }
 
 /// A query projecting no column is not valid PostgreSQL, and a renderer that

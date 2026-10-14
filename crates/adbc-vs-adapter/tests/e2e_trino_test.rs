@@ -170,12 +170,17 @@ fn filter_reaches_trino_and_matches_the_mirror() {
     };
 
     let statement = generated_statement(&query(VIRTUAL_SCHEMA));
-    for fragment in ["WHERE", " OR ", " AND ", "LIKE", "ESCAPE", "BETWEEN"] {
+    for fragment in ["WHERE", " OR ", " AND ", "LIKE", "BETWEEN"] {
         assert!(
             statement.contains(fragment),
             "the generated statement must carry {fragment}: {statement}"
         );
     }
+    assert!(
+        !statement.to_uppercase().contains("ESCAPE"),
+        "Trino defines no default escape character, so a LIKE with no ESCAPE clause must reach \
+         it as a plain LIKE: {statement}"
+    );
     assert!(
         !statement.to_uppercase().contains("COLLATE"),
         "Trino has no COLLATE keyword and would reject the statement rather than ignore it: \
@@ -206,6 +211,35 @@ fn filter_reaches_trino_and_matches_the_mirror() {
         column_values(&ordering_rows, "id"),
         vec!["1".to_string(), "4".to_string()],
         "only the two 'B' rows precede 'C' in code-point order: {ordering_rows:?}"
+    );
+}
+
+/// `FN_PRED_LIKE_ESCAPE` is withheld, so Exasol keeps a `LIKE` that writes an
+/// explicit `ESCAPE` clause and evaluates it itself. The pattern `ab!!`
+/// escapes the escape character, so it matches the literal tag `ab!` only;
+/// delegated as a plain `LIKE`, Trino would read it as the literal `ab!!` and
+/// return no row, which is what tells Exasol's evaluation from a delegation.
+#[test]
+fn like_with_an_explicit_escape_clause_is_evaluated_by_exasol() {
+    let query = |schema: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"items\" WHERE \"tag\" LIKE 'ab!!' ESCAPE '!' \
+             ORDER BY \"id\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+    assert!(
+        !statement.to_uppercase().contains("LIKE"),
+        "the generated statement must carry no LIKE, because Exasol keeps a predicate whose \
+         capability the dialect does not advertise: {statement}"
+    );
+
+    let rows = assert_matches_mirror(query);
+    assert_eq!(
+        column_values(&rows, "id"),
+        vec!["3".to_string(), "6".to_string()],
+        "only the two rows tagged 'ab!' match the escaped pattern: {rows:?}"
     );
 }
 
@@ -491,10 +525,9 @@ fn uncollated_grouping_and_distinct_return_the_mirrors_group_count() {
     );
 }
 
-/// The one shape MySQL's dialect must render a collation for and this
-/// dialect renders bare throughout, so a select-list predicate over the
-/// query's own bare grouping key is unremarkable here — but the shape must
-/// still reach Trino and match the mirror.
+/// A select-list predicate over the query's own grouping key, a shape no
+/// dialect renders a collation suffix for, must still reach Trino and match
+/// the mirror.
 #[test]
 fn select_list_predicate_over_the_grouped_character_column_delegates_and_matches_the_mirror() {
     let query = |schema: &str| {

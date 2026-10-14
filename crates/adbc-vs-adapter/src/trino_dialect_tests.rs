@@ -292,56 +292,25 @@ fn like(pattern: Value, escape_char: Option<Value>) -> Value {
     node
 }
 
+/// A backslash in a delegated pattern is an ordinary character at Trino, so
+/// the pattern has to reach the statement unchanged and with no `ESCAPE`
+/// clause beside it.
 #[test]
-fn like_with_no_escape_char_renders_a_default_backslash_escape() {
-    let clause = where_clause(like(string_literal("Wid%"), None));
-    assert_eq!(clause, r#"("note" LIKE 'Wid%' ESCAPE '\')"#);
-}
-
-#[test]
-fn like_with_a_requested_escape_char_renders_it() {
-    let clause = where_clause(like(string_literal("Wid!%get"), Some(string_literal("!"))));
-    assert_eq!(clause, r#"("note" LIKE 'Wid!%get' ESCAPE '!')"#);
-}
-
-/// A mis-rendered pattern returns different rows rather than an error, which
-/// is why the whole clause is pinned rather than the presence of the keyword:
-/// the pattern body, the escape character, and the operand all have to survive
-/// unchanged, and a substring check would pass while any of them was mangled.
-#[test]
-fn an_escape_character_followed_by_percent_underscore_or_itself_is_accepted() {
-    for pattern in ["a\\%b", "a\\_b", "a\\\\b"] {
+fn like_renders_its_pattern_with_no_escape_clause() {
+    for pattern in ["ab%", r"ab\%"] {
         let clause = where_clause(like(string_literal(pattern), None));
 
-        assert_eq!(
-            clause,
-            format!(r#"("note" LIKE '{pattern}' ESCAPE '\')"#),
-            "the accepted escape sequence must render the pattern verbatim"
-        );
+        assert_eq!(clause, format!(r#"("note" LIKE '{pattern}')"#));
     }
 }
 
 #[test]
-fn an_escape_character_followed_by_any_other_character_fails_to_render() {
-    let error = filter_render_error(like(string_literal("a\\Xb"), None));
-    assert!(error.contains('X'), "{error}");
-    assert!(error.contains('\\'), "{error}");
-}
+fn a_like_carrying_an_escape_char_fails_naming_the_capability() {
+    let error = filter_render_error(like(string_literal("Wid!%get"), Some(string_literal("!"))));
 
-#[test]
-fn an_escape_character_at_the_end_of_the_pattern_fails_to_render() {
-    let error = filter_render_error(like(string_literal("ab\\"), None));
-    assert!(error.contains("ab\\"), "{error}");
-}
-
-#[test]
-fn a_like_pattern_whose_escape_char_is_a_column_is_not_statically_validated() {
-    let columns = json!([
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-        {"name": "esc", "dataType": {"type": "VARCHAR", "size": 1, "characterSet": "UTF8"}},
-    ]);
-    let sql = where_clause_over(columns, like(string_literal("a\\Xb"), Some(column("esc"))));
-    assert_eq!(sql, r#"("note" LIKE 'a\Xb' ESCAPE "esc")"#);
+    assert!(error.contains("FN_PRED_LIKE_ESCAPE"), "{error}");
+    assert!(error.contains("'!'"), "{error}");
+    assert!(!error.contains("  "), "{error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -958,19 +927,11 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
             filtered(Predicate::IsNotNull(Expression::Column(decimal_column()))),
         ),
         "FN_PRED_LIKE" => (
-            r"LIKE 'Wid%' ESCAPE '\'",
+            "LIKE 'Wid%')",
             filtered(Predicate::Like(LikePredicate {
                 expression: Expression::Column(varchar_column()),
                 pattern: Expression::Literal(Literal::String("Wid%".to_string())),
                 escape_char: None,
-            })),
-        ),
-        "FN_PRED_LIKE_ESCAPE" => (
-            "ESCAPE '!'",
-            filtered(Predicate::Like(LikePredicate {
-                expression: Expression::Column(varchar_column()),
-                pattern: Expression::Literal(Literal::String("Wid!%get".to_string())),
-                escape_char: Some(Expression::Literal(Literal::String("!".to_string()))),
             })),
         ),
         "FN_PRED_BETWEEN" => (

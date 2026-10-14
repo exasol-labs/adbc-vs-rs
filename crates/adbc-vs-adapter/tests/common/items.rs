@@ -10,11 +10,11 @@
 //! a reader cannot see drifting:
 //!
 //! - `Gîzmo` carries a precomposed `î`. The same character has a second,
-//!   byte-different Unicode spelling as `i` plus a combining circumflex, and
-//!   decision-log `[19]` measured MySQL's `utf8mb4_0900_as_cs` reporting the
-//!   two spellings equal. A decomposed mirror value would therefore group
-//!   with the source's under the delegated collation and still return
-//!   different bytes to compare.
+//!   byte-different Unicode spelling as `i` plus a combining circumflex.
+//!   Exasol and the `utf8mb4_0900_bin` columns of `items_bin` both compare
+//!   by code point, so a mirror value spelled the other way would hold
+//!   different code points than the source's and fail every differential
+//!   comparison over it for a reason that is not a pushdown defect.
 //! - `'ab '` differs from `'ab'` by a trailing space, which decision-log
 //!   `[6]` measured as the case where a `PAD SPACE` collation makes MySQL's
 //!   `MIN` disagree with Exasol's.
@@ -355,9 +355,9 @@ mod tests {
                 category.chars().count(),
                 "Gizmo".chars().count(),
                 "{category:?} must spell its accent as one precomposed code point, not as a \
-                 base character plus a combining mark: MySQL's utf8mb4_0900_as_cs reports the \
-                 two spellings equal, so a decomposed value would group with the other \
-                 fixture's and still return different bytes"
+                 base character plus a combining mark: the two spellings hold different code \
+                 points, so a decomposed value in one fixture would differ from the other \
+                 fixture's under every code-point comparison"
             );
         }
     }
