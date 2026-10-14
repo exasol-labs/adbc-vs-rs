@@ -9,9 +9,9 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 - Seven PostgreSQL types are mapped: `integer` and `bigint` to `DECIMAL(10,0)` and `DECIMAL(19,0)`, `numeric(p,s)` to `DECIMAL(p,s)`, `character varying(n)` to `VARCHAR(n)` with character set `UTF8`, `date` to `DATE`, `timestamp without time zone` to `TIMESTAMP`, and `double precision` to `DOUBLE`. The set matches MySQL's scope rather than exhausting PostgreSQL's type system, and it produces no Exasol type MySQL's mapping does not already produce.
 - The omitted set is wider than MySQL's, and each member has its own reason. `boolean` is omitted because a mapped `BOOLEAN` column would widen the set of Exasol types a source column produces, bring a boolean operand into every predicate path, and need `LITERAL_BOOL`, which neither dialect advertises. `text` and an unconstrained `numeric` are omitted because `information_schema` reports the length or precision as null and Exasol needs an exact one for a type it compares for equality. `timestamptz` — `timestamp with time zone` — is omitted because it and Exasol `TIMESTAMP` carry different instants for one wall-clock value. `uuid`, `jsonb`, and `bytea` are omitted as non-core types outside this release's scope, as are `smallint`, `real`, `time without time zone`, `time with time zone`, `json`, `interval`, `money`, and `ARRAY`.
 - `character(n)` is omitted because PostgreSQL blank-pads it. PostgreSQL returns a `character(n)` value padded to n and compares two of them ignoring trailing spaces, so Exasol `VARCHAR` matches neither the value nor the comparison: a delegated predicate would treat `'ab'` and `'ab '` as equal where Exasol comparing two `VARCHAR` values does not. Exasol `CHAR` would match both — measured on Exasol 2025.2.1, a `CHAR(5)` holding `ab` compares equal to `'ab'`, `'ab '`, and `'ab   '` — but four features state the invariant that every delegated character operand is Exasol `VARCHAR`, so Exasol `CHAR` is out of scope here and the column is omitted rather than reopening that invariant. This is where the two mappings' scopes genuinely differ: MySQL `CHAR` maps to Exasol `VARCHAR` because MySQL returns the value with its trailing spaces stripped.
-- PostgreSQL declares a collation per column, and a nondeterministic one is unmappable. `vs-adapter/postgresql-collation` renders equality, `LIKE`, `GROUP BY`, and `DISTINCT` with no collation suffix, which is correct only while a deterministic collation equates two character values just when their bytes are identical. A nondeterministic collation equates values Exasol keeps apart — measured on 18.6, `LIKE 'W%'` over such a column is accepted rather than rejected and matches both `widget` and `Widget` — so every comparison path this release renders, `LIKE` included, would silently return rows Exasol's own case-sensitive semantics reject, and the column is refused rather than exposed. Every collation PostgreSQL ships is deterministic, so this reaches only a collation an operator created.
+- PostgreSQL declares a collation per column. A delegated comparison over a `character varying` column follows that collation, as `vs-adapter/postgresql-collation` states.
 - PostgreSQL has no unsigned integer type and no per-column character set, so MySQL's unsigned-modifier rejection and its per-column character-set rejection have no PostgreSQL counterpart. A database has one encoding, which is the granularity PostgreSQL offers and the granularity the precondition checks.
-- The UTF8 encoding precondition exists because the mapping produces Exasol `VARCHAR` with character set `UTF8`, and because the ordering collation `vs-adapter/postgresql-collation` renders reproduces Exasol's code-point order only while the server compares UTF-8 bytes. A database of another encoding is refused at creation, before any table is discovered, and on every request that resolves the source `CONNECTION`.
+- The UTF8 encoding precondition exists because the mapping produces Exasol `VARCHAR` with character set `UTF8`. A database of another encoding is refused at creation, before any table is discovered, and on every request that resolves the source `CONNECTION`.
 - The exposed source namespace is the `public` schema. The connection address's path component names a PostgreSQL database, which is not a SQL qualifier; `public` is both PostgreSQL's SQL qualifier and its `information_schema` filter value, and it is the one namespace string recorded in `adapterNotes`. Exposing `public` alone is this release's boundary — a virtual schema per source schema is the shape that needs no new property.
 - Exasol type bounds constrain the mapping: `DECIMAL` precision at most 36, `VARCHAR` size at most 2000000, and character-type size minimum 1.
 
@@ -50,15 +50,6 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 * *AND* a `character varying` column whose `character_maximum_length` is null MUST be unmapped, with the reason naming the absent length
 * *AND* the mapping MUST NOT read a character set from the column, because PostgreSQL declares an encoding per database rather than per column
 
-### Scenario: Character column of a nondeterministic collation is unmapped
-
-* *GIVEN* a PostgreSQL `character varying` column whose declared collation is nondeterministic
-* *WHEN* the column is mapped
-* *THEN* the result MUST be unmapped, with the stated reason naming the column's collation and identifying it as nondeterministic
-* *AND* the mapping MUST NOT map it to Exasol `VARCHAR`, because the delegated equality, `GROUP BY`, and `DISTINCT` this release renders for PostgreSQL carry no collation suffix and would equate values Exasol keeps apart
-* *AND* a column whose collation is deterministic, including one declaring no collation of its own, MUST be mapped
-* *AND* a collation for which the server reports no determinism flag MUST be treated as deterministic, because a version predating the flag has no nondeterministic collations to distinguish
-
 ### Scenario: character is unmapped because it is blank-padded
 
 * *GIVEN* a PostgreSQL column whose `data_type` is `character` with a declared length of 5
@@ -91,7 +82,7 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 * *WHEN* `CREATE VIRTUAL SCHEMA` runs against it with `DRIVER = 'postgresql'`
 * *THEN* the adapter MUST return an error
 * *AND* the error message MUST name the encoding the database reported and `UTF8` as the encoding this release requires
-* *AND* the adapter MUST NOT create the virtual schema, because the mapping declares every character column `UTF8` and the ordering collation the dialect renders reproduces Exasol's code-point order only over UTF-8 bytes
+* *AND* the adapter MUST NOT create the virtual schema, because the mapping declares every character column `UTF8`
 * *AND* the check MUST run before any table is discovered, and on every request that resolves the source `CONNECTION` — `refresh` and `setProperties` as well as `createVirtualSchema`
 
 ### Scenario: Virtual schema exposes the public schema only
