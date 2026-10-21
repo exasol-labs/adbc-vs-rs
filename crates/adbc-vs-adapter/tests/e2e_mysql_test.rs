@@ -13,6 +13,8 @@
 
 mod common;
 
+use std::collections::BTreeSet;
+
 use adbc_vs_adapter::exa_type::{self, ExasolType};
 use adbc_vs_scan::driver::Driver;
 use common::exasol::cell;
@@ -55,6 +57,12 @@ const MIN_PLAUSIBLE_DRIVER_BYTES: u64 = 1_000_000;
 /// second run already makes a coincidental match implausible, and this third
 /// repetition guards against that one coincidence.
 const STABILITY_RUN_COUNT: u32 = 3;
+
+/// The `items` fixture table. On the virtual schema its character columns
+/// keep MySQL's default `utf8mb4_0900_ai_ci`, and the local mirror holds the
+/// same rows under the same name. A differential test over a character column
+/// reads [`mysql::CODE_POINT_ITEMS`] on the virtual side instead.
+const ITEMS: &str = "items";
 
 /// This test deletes the driver every other test in this file reads, so it
 /// puts the stack back as it found it before it asserts anything: its own
@@ -998,10 +1006,11 @@ fn an_explicit_bucketfs_connection_that_does_not_resolve_fails_naming_it() {
 /// survived the seed into Exasol byte for byte, that the join partner's
 /// unmatched rows on both sides survived with it, that the mirror declares the
 /// same Exasol types under the same column names as the virtual table it
-/// mirrors, and that Exasol's own answers over the mirror are the ones the
-/// delegated path has to reproduce rather than MySQL's defaults. Without the
-/// last of those, a differential test comparing two engines that both fold
-/// `Widget` and `widget` together would agree and prove nothing.
+/// mirrors, and that Exasol's own answers over the mirror are the ones a
+/// delegated query over [`mysql::CODE_POINT_ITEMS`] has to reproduce rather
+/// than MySQL's defaults. Without the last of those, a differential test
+/// comparing two engines that both fold `Widget` and `widget` together would
+/// agree and prove nothing.
 #[test]
 fn mirror_holds_every_fixture_item_row_as_authored() {
     let stack = stack::shared();
@@ -1030,8 +1039,8 @@ fn mirror_holds_every_fixture_item_row_as_authored() {
             cell(row, "batch"),
             Some(expected.batch.to_string()),
             "row {id}'s batch must keep its trailing space, which decision [6] measured MIN \
-             diverging over; a trimmed value would make that test pass whatever collation is \
-             rendered"
+             diverging over; a trimmed value would make that test pass whatever collation the \
+             source applies"
         );
         assert_eq!(cell(row, "code"), Some(expected.code.to_string()));
         assert_eq!(
@@ -1087,22 +1096,29 @@ fn mirror_holds_every_join_partner_row_including_the_unmatched_ones() {
     );
 }
 
+/// [`mysql::CODE_POINT_ITEMS`] is compared against the mirror of `items`, so
+/// it has to declare what that mirror declares too, including leaving out the
+/// `latin1` `region` column.
 #[test]
 fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
-    for table in ["items", "item_notes"] {
-        let mirrored = declared_columns(mirror::SCHEMA, table);
+    for (table, mirrored_table) in [
+        (ITEMS, ITEMS),
+        ("item_notes", "item_notes"),
+        (mysql::CODE_POINT_ITEMS, ITEMS),
+    ] {
+        let mirrored = declared_columns(mirror::SCHEMA, mirrored_table);
         let virtual_table = declared_columns(VIRTUAL_SCHEMA, table);
 
         assert!(
             !mirrored.is_empty(),
-            "the mirror must declare table {table}"
+            "the mirror must declare table {mirrored_table}"
         );
         assert_eq!(
             mirrored, virtual_table,
-            "the mirror of {table} must declare the same column names in the same order with \
-             the same Exasol types as the virtual table, or a differential comparison compares \
-             two different things and an aggregate's declared type differs between the two \
-             sides for a reason that is not a pushdown defect"
+            "the mirror {mirrored_table} of {table} must declare the same column names in the \
+             same order with the same Exasol types as the virtual table, or a differential \
+             comparison compares two different things and an aggregate's declared type differs \
+             between the two sides for a reason that is not a pushdown defect"
         );
     }
 }
@@ -1124,8 +1140,8 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
         cell(answers, "CATEGORIES"),
         Some("4".to_string()),
         "Exasol compares character values by exact value, so Widget, widget, Gizmo, and Gîzmo \
-         are four distinct values. MySQL's own utf8mb4_0900_ai_ci returns 2, which is the \
-         wrong answer the rendered comparison collation exists to prevent"
+         are four distinct values. MySQL's default utf8mb4_0900_ai_ci returns 2 over items, \
+         which is why a differential test over a character column reads items_bin"
     );
     assert_eq!(
         cell(answers, "MIN_BATCH"),
@@ -1154,8 +1170,15 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
     );
 }
 
-/// Runs `query(schema)` against the virtual schema and against its local
-/// mirror and asserts the two answers are identical.
+/// Runs `query(schema, items)` against the virtual schema and against its
+/// local mirror and asserts the two answers are identical.
+///
+/// `items` is the table standing for the `items` rows on each side:
+/// `virtual_items` on the virtual schema, and [`ITEMS`] on the mirror, which
+/// holds those rows once. A query over a character column passes
+/// [`mysql::CODE_POINT_ITEMS`] as `virtual_items`, because only a column
+/// declaring `utf8mb4_0900_bin` compares the way Exasol does; any other query
+/// passes [`ITEMS`].
 ///
 /// A correctly delegated fragment returns exactly what Exasol's own
 /// evaluation over the mirror returns. The two sides are independent
@@ -1164,11 +1187,14 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
 /// relies on: a semantic gap between the two engines shows up as a
 /// difference rather than having to be predicted case by case.
 fn assert_matches_mirror(
-    query: impl Fn(&str) -> String,
+    virtual_items: &str,
+    query: impl Fn(&str, &str) -> String,
 ) -> Vec<serde_json::Map<String, serde_json::Value>> {
     let stack = stack::shared();
-    let virtual_rows = stack.exasol.query_rows(&query(VIRTUAL_SCHEMA));
-    let mirror_rows = stack.exasol.query_rows(&query(mirror::SCHEMA));
+    let virtual_rows = stack
+        .exasol
+        .query_rows(&query(VIRTUAL_SCHEMA, virtual_items));
+    let mirror_rows = stack.exasol.query_rows(&query(mirror::SCHEMA, ITEMS));
     assert_eq!(
         virtual_rows, mirror_rows,
         "the delegated query must return exactly the rows the local Exasol mirror returns: \
@@ -1177,33 +1203,28 @@ fn assert_matches_mirror(
     virtual_rows
 }
 
+/// Runs over [`mysql::CODE_POINT_ITEMS`], whose `utf8mb4_0900_bin` columns
+/// compare by code point as Exasol does, so a delegated filter returns
+/// exactly the mirror's rows.
 #[test]
 fn filter_matches_local_exasol_result() {
-    let query = |schema: &str| {
+    let query = |schema: &str, items: &str| {
         format!(
-            "SELECT \"id\" FROM {schema}.\"items\" WHERE (\"category\" = 'Widget' OR \
+            "SELECT \"id\" FROM {schema}.\"{items}\" WHERE (\"category\" = 'Widget' OR \
              \"quantity\" IS NULL) AND \"batch\" LIKE 'ab%' AND \"rank_key\" BETWEEN 1 AND 4 \
              AND \"tie_break\" > 0 ORDER BY \"id\""
         )
     };
 
-    let statement = pushdown_statement(&query(VIRTUAL_SCHEMA));
-    for fragment in [
-        "WHERE",
-        "LIKE",
-        "BETWEEN",
-        "IS NULL",
-        "AND",
-        "OR",
-        "COLLATE utf8mb4_0900_as_cs",
-    ] {
+    let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
+    for fragment in ["WHERE", "LIKE", "BETWEEN", "IS NULL", "AND", "OR"] {
         assert!(
             statement.contains(fragment),
             "the generated statement must carry {fragment}: {statement}"
         );
     }
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, query);
     assert_eq!(
         rows.iter()
             .filter_map(|row| cell(row, "id"))
@@ -1219,10 +1240,10 @@ fn filter_matches_local_exasol_result() {
     );
 
     for (label, value) in [("case", "GIZMO"), ("accent", "Gïzmo")] {
-        let variant_query = |schema: &str| {
-            format!("SELECT \"id\" FROM {schema}.\"items\" WHERE \"category\" = '{value}'")
+        let variant_query = |schema: &str, items: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{items}\" WHERE \"category\" = '{value}'")
         };
-        let variant_rows = assert_matches_mirror(variant_query);
+        let variant_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, variant_query);
         assert!(
             variant_rows.is_empty(),
             "a value differing from a stored category only by {label} must match no row in \
@@ -1230,9 +1251,10 @@ fn filter_matches_local_exasol_result() {
         );
     }
 
-    let char_query =
-        |schema: &str| format!("SELECT \"id\" FROM {schema}.\"items\" WHERE \"code\" = 'ITEM0002'");
-    let char_rows = assert_matches_mirror(char_query);
+    let char_query = |schema: &str, items: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{items}\" WHERE \"code\" = 'ITEM0002'")
+    };
+    let char_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, char_query);
     assert_eq!(
         char_rows
             .iter()
@@ -1242,22 +1264,26 @@ fn filter_matches_local_exasol_result() {
         "the CHAR-mapped-to-VARCHAR column must compare identically on both sides: {char_rows:?}"
     );
     assert_eq!(
-        column_types("items")["code"],
+        column_types(mysql::CODE_POINT_ITEMS)["code"],
         "VARCHAR(8) UTF8",
         "MySQL CHAR must surface as Exasol VARCHAR rather than the blank-padded CHAR"
     );
 }
 
+/// Runs over [`mysql::CODE_POINT_ITEMS`], whose `utf8mb4_0900_bin` columns
+/// order and group by code point as Exasol does, so a delegated `MIN`,
+/// `MAX`, and `GROUP BY` return exactly the mirror's answers.
 #[test]
 fn aggregation_matches_local_exasol_result() {
-    let single_group_query = |schema: &str| {
+    let single_group_query = |schema: &str, items: &str| {
         format!(
             "SELECT COUNT(*) AS N, COUNT(\"quantity\") AS QN, MIN(\"category\") AS MINCAT, \
-             MAX(\"category\") AS MAXCAT FROM {schema}.\"items\""
+             MAX(\"category\") AS MAXCAT FROM {schema}.\"{items}\""
         )
     };
 
-    let statement = pushdown_statement(&single_group_query(VIRTUAL_SCHEMA));
+    let statement =
+        pushdown_statement(&single_group_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
     for fragment in ["COUNT", "MIN(", "MAX("] {
         assert!(
             statement.contains(fragment),
@@ -1272,13 +1298,13 @@ fn aggregation_matches_local_exasol_result() {
     let stack = stack::shared();
     let virtual_row = stack
         .exasol
-        .query_rows(&single_group_query(VIRTUAL_SCHEMA))
+        .query_rows(&single_group_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS))
         .into_iter()
         .next()
         .expect("single-group aggregation returns exactly one row");
     let mirror_row = stack
         .exasol
-        .query_rows(&single_group_query(mirror::SCHEMA))
+        .query_rows(&single_group_query(mirror::SCHEMA, ITEMS))
         .into_iter()
         .next()
         .expect("single-group aggregation returns exactly one row");
@@ -1303,20 +1329,21 @@ fn aggregation_matches_local_exasol_result() {
         "{virtual_row:?}"
     );
 
-    let grouped_query = |schema: &str| {
+    let grouped_query = |schema: &str, items: &str| {
         format!(
-            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"items\" GROUP BY \
+            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"{items}\" GROUP BY \
              \"category\" ORDER BY \"category\""
         )
     };
 
-    let grouped_statement = pushdown_statement(&grouped_query(VIRTUAL_SCHEMA));
+    let grouped_statement =
+        pushdown_statement(&grouped_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
     assert!(
         grouped_statement.contains("GROUP BY") && grouped_statement.contains("COUNT("),
         "a grouped aggregation must render both COUNT and GROUP BY: {grouped_statement}"
     );
 
-    let grouped_rows = assert_matches_mirror(grouped_query);
+    let grouped_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, grouped_query);
     assert_eq!(
         grouped_rows.len(),
         4,
@@ -1337,11 +1364,11 @@ fn aggregation_matches_local_exasol_result() {
 #[test]
 fn avg_and_sum_are_withdrawn_and_match_local_exasol_result() {
     for function in ["AVG", "SUM"] {
-        let query = |schema: &str| {
-            format!("SELECT {function}(\"quantity\") AS VAL FROM {schema}.\"items\"")
+        let query = |schema: &str, items: &str| {
+            format!("SELECT {function}(\"quantity\") AS VAL FROM {schema}.\"{items}\"")
         };
 
-        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA));
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
         assert!(
             !statement.contains(function),
             "a query {} \"quantity\" must render no delegated {function}, since this release \
@@ -1353,7 +1380,7 @@ fn avg_and_sum_are_withdrawn_and_match_local_exasol_result() {
             }
         );
 
-        let rows = assert_matches_mirror(query);
+        let rows = assert_matches_mirror(ITEMS, query);
         assert_eq!(
             rows.len(),
             1,
@@ -1401,40 +1428,40 @@ fn assert_sum_over_a_double_column_answers() {
 
 #[test]
 fn join_matches_local_exasol_result() {
-    let inner_query = |schema: &str| {
+    let inner_query = |schema: &str, items: &str| {
         format!(
-            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"items\" i INNER JOIN \
+            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"{items}\" i INNER JOIN \
              {schema}.\"item_notes\" n ON i.\"id\" = n.\"item_id\" ORDER BY i.\"id\""
         )
     };
-    let left_query = |schema: &str| {
+    let left_query = |schema: &str, items: &str| {
         format!(
-            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"items\" i LEFT JOIN \
+            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"{items}\" i LEFT JOIN \
              {schema}.\"item_notes\" n ON i.\"id\" = n.\"item_id\" ORDER BY i.\"id\""
         )
     };
-    let right_query = |schema: &str| {
+    let right_query = |schema: &str, items: &str| {
         format!(
-            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"items\" i RIGHT JOIN \
+            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"{items}\" i RIGHT JOIN \
              {schema}.\"item_notes\" n ON i.\"id\" = n.\"item_id\" ORDER BY n.\"item_id\""
         )
     };
 
-    let inner_statement = pushdown_statement(&inner_query(VIRTUAL_SCHEMA));
+    let inner_statement = pushdown_statement(&inner_query(VIRTUAL_SCHEMA, ITEMS));
     assert!(inner_statement.contains("INNER JOIN"), "{inner_statement}");
-    let inner_rows = assert_matches_mirror(inner_query);
+    let inner_rows = assert_matches_mirror(ITEMS, inner_query);
     assert_eq!(
         inner_rows.len(),
         7,
         "the one items row with no matching note must be excluded: {inner_rows:?}"
     );
 
-    let left_statement = pushdown_statement(&left_query(VIRTUAL_SCHEMA));
+    let left_statement = pushdown_statement(&left_query(VIRTUAL_SCHEMA, ITEMS));
     assert!(
         left_statement.contains("LEFT OUTER JOIN"),
         "{left_statement}"
     );
-    let left_rows = assert_matches_mirror(left_query);
+    let left_rows = assert_matches_mirror(ITEMS, left_query);
     assert_eq!(left_rows.len(), 8);
     let unmatched_left = left_rows
         .iter()
@@ -1447,12 +1474,12 @@ fn join_matches_local_exasol_result() {
          column NOT NULL: {unmatched_left:?}"
     );
 
-    let right_statement = pushdown_statement(&right_query(VIRTUAL_SCHEMA));
+    let right_statement = pushdown_statement(&right_query(VIRTUAL_SCHEMA, ITEMS));
     assert!(
         right_statement.contains("RIGHT OUTER JOIN"),
         "{right_statement}"
     );
-    let right_rows = assert_matches_mirror(right_query);
+    let right_rows = assert_matches_mirror(ITEMS, right_query);
     assert_eq!(right_rows.len(), 8);
     let unmatched_right = right_rows
         .iter()
@@ -1467,14 +1494,14 @@ fn join_matches_local_exasol_result() {
 
 #[test]
 fn projected_predicate_matches_local_exasol_result() {
-    let nullable_query = |schema: &str| {
+    let nullable_query = |schema: &str, items: &str| {
         format!(
-            "SELECT \"id\" AS ID, \"quantity\" > 5 AS OVER5 FROM {schema}.\"items\" ORDER BY \
+            "SELECT \"id\" AS ID, \"quantity\" > 5 AS OVER5 FROM {schema}.\"{items}\" ORDER BY \
              \"id\""
         )
     };
 
-    let statement = pushdown_statement(&nullable_query(VIRTUAL_SCHEMA));
+    let statement = pushdown_statement(&nullable_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
     assert!(
         statement.contains("(5 < `quantity`)"),
         "the generated statement must project the comparison, with Exasol's normalized operand \
@@ -1485,7 +1512,7 @@ fn projected_predicate_matches_local_exasol_result() {
         "the EMITS clause must declare the projected predicate's column BOOLEAN: {statement}"
     );
 
-    let rows = assert_matches_mirror(nullable_query);
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, nullable_query);
     let over5 = |id: &str| {
         rows.iter()
             .find(|row| cell(row, "ID") == Some(id.to_string()))
@@ -1507,78 +1534,73 @@ fn projected_predicate_matches_local_exasol_result() {
         "a null quantity must project a null rather than a false: {rows:?}"
     );
 
-    let aggregate_query =
-        |schema: &str| format!("SELECT COUNT(*) > 0 AS HASROWS FROM {schema}.\"items\"");
-    let aggregate_rows = assert_matches_mirror(aggregate_query);
+    let aggregate_query = |schema: &str, items: &str| {
+        format!("SELECT COUNT(*) > 0 AS HASROWS FROM {schema}.\"{items}\"")
+    };
+    let aggregate_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, aggregate_query);
     assert_eq!(
         cell(&aggregate_rows[0], "HASROWS"),
         Some("true".to_string())
     );
 }
 
+/// Runs over [`mysql::CODE_POINT_ITEMS`]: `utf8mb4_0900_bin` keeps the case
+/// and accent variants apart, so the delegated grouping and distinct count
+/// return Exasol's four values. `items` returns two for both, which
+/// `comparison_and_grouping_follow_the_columns_own_collation` asserts.
 #[test]
 fn grouping_over_character_variants_matches_local_exasol_result() {
-    let group_by_query = |schema: &str| {
+    let group_by_query = |schema: &str, items: &str| {
         format!(
-            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"items\" GROUP BY \
+            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"{items}\" GROUP BY \
              \"category\" ORDER BY \"category\""
         )
     };
 
-    let statement = pushdown_statement(&group_by_query(VIRTUAL_SCHEMA));
-    let select_list = statement
-        .split_once("SELECT")
-        .and_then(|(_, rest)| rest.split_once("FROM"))
-        .map(|(select_list, _)| select_list)
-        .unwrap_or_else(|| panic!("the generated statement must carry a SELECT list: {statement}"));
-    let group_by_clause = statement
-        .split_once("GROUP BY")
-        .map(|(_, clause)| clause)
-        .unwrap_or_else(|| {
-            panic!("the generated statement must carry a GROUP BY clause: {statement}")
-        });
+    let statement = pushdown_statement(&group_by_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
     assert!(
-        select_list.contains("COLLATE utf8mb4_0900_as_cs"),
-        "the bare select-list occurrence of the grouped column must carry the comparison \
-         collation, or MySQL would reject the statement with error 1055: {statement}"
-    );
-    assert!(
-        group_by_clause.contains("COLLATE utf8mb4_0900_as_cs"),
-        "the grouping key itself must carry the comparison collation, or MySQL would reject the \
-         statement with error 1055: {statement}"
+        statement.contains("GROUP BY `category`"),
+        "the grouping must reach MySQL rather than be computed by Exasol: {statement}"
     );
 
-    let rows = assert_matches_mirror(group_by_query);
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, group_by_query);
     assert_eq!(
         rows.len(),
         4,
-        "MySQL's default collation folds Widget/widget and Gizmo/Gîzmo into 2 groups; the \
-         rendered collation must keep all 4 apart, matching Exasol: {rows:?}"
+        "utf8mb4_0900_bin keeps Widget/widget and Gizmo/Gîzmo apart, matching Exasol: {rows:?}"
     );
 
-    let distinct_query =
-        |schema: &str| format!("SELECT COUNT(DISTINCT \"category\") AS N FROM {schema}.\"items\"");
-    let distinct_rows = assert_matches_mirror(distinct_query);
+    let distinct_query = |schema: &str, items: &str| {
+        format!("SELECT COUNT(DISTINCT \"category\") AS N FROM {schema}.\"{items}\"")
+    };
+    let distinct_statement =
+        pushdown_statement(&distinct_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
+    assert!(
+        distinct_statement.contains("COUNT(DISTINCT `category`)"),
+        "the distinct count must reach MySQL rather than be computed by Exasol: \
+         {distinct_statement}"
+    );
+    let distinct_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, distinct_query);
     assert_eq!(cell(&distinct_rows[0], "N"), Some("4".to_string()));
 }
 
 #[test]
 fn two_column_group_by_is_not_delegated() {
-    let query = |schema: &str| {
+    let query = |schema: &str, items: &str| {
         format!(
             "SELECT \"category\" AS CATEGORY, \"code\" AS CODE, COUNT(*) AS N FROM \
-             {schema}.\"items\" GROUP BY \"category\", \"code\" ORDER BY \"category\", \"code\""
+             {schema}.\"{items}\" GROUP BY \"category\", \"code\" ORDER BY \"category\", \"code\""
         )
     };
 
-    let statement = pushdown_statement(&query(VIRTUAL_SCHEMA));
+    let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
     assert!(
         !statement.contains("GROUP BY") && !statement.contains("COUNT"),
         "a two-column GROUP BY must be withdrawn whole, because this release advertises no \
          AGGREGATE_GROUP_BY_TUPLE: {statement}"
     );
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, query);
     assert_eq!(
         rows.len(),
         8,
@@ -1586,44 +1608,222 @@ fn two_column_group_by_is_not_delegated() {
     );
 }
 
+/// `vs-adapter/mysql-collation`: the grouping key renders as the bare column,
+/// so a select-list predicate reading it is an expression over that same
+/// column, which MySQL executes under `ONLY_FULL_GROUP_BY` rather than
+/// rejecting with error 1055. Only a live source can show that, so the
+/// statement runs here, over [`mysql::CODE_POINT_ITEMS`] so the rows compare
+/// with the mirror's.
 #[test]
-fn select_list_predicate_over_grouped_character_column_fails() {
-    let stack = stack::shared();
-    let failing_query = format!(
-        "SELECT \"category\", \"category\" > 'M' FROM {VIRTUAL_SCHEMA}.\"items\" GROUP BY \
-         \"category\""
-    );
-
-    let error = stack.exasol.execute_expecting_failure(&failing_query);
-
-    assert!(
-        error.contains("category"),
-        "the adapter error must name the grouped column the select-list predicate reads: {error}"
-    );
-    assert!(
-        error.contains("the select list carries a predicate reading"),
-        "the failure must be the adapter's own diagnosis, which is the whole point of failing \
-         before a statement is generated: MySQL's error 1055 names the column too, so naming it \
-         is not on its own evidence that `reject_collated_grouping_key` ran: {error}"
-    );
-    assert!(
-        !error.contains("nonaggregated column"),
-        "no statement may reach MySQL for this shape; that phrase is MySQL's own error 1055, so \
-         reading it here means the adapter rendered the statement and MySQL rejected it: {error}"
-    );
-
-    let succeeding_query = |schema: &str| {
+fn select_list_predicate_over_grouped_character_column_delegates_and_matches_the_mirror() {
+    let query = |schema: &str, items: &str| {
         format!(
-            "SELECT \"category\" AS CATEGORY, COUNT(*) > 0 AS HASROWS FROM {schema}.\"items\" \
-             GROUP BY \"category\" ORDER BY \"category\""
+            "SELECT \"category\" AS CATEGORY, \"category\" > 'M' AS LATE FROM \
+             {schema}.\"{items}\" GROUP BY \"category\" ORDER BY \"category\""
         )
     };
-    let rows = assert_matches_mirror(succeeding_query);
+
+    let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
     assert!(
+        statement.contains("GROUP BY `category`") && statement.contains("< `category`)"),
+        "the grouping and the predicate reading the grouped column, with Exasol's normalized \
+         operand order, must both reach MySQL: {statement}"
+    );
+
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, query);
+    let late = |category: &str| {
         rows.iter()
-            .all(|row| cell(row, "HASROWS") == Some("true".to_string())),
-        "a predicate over COUNT(*) instead of the grouped column must delegate and succeed \
-         rather than fail the way the bare-column predicate does: {rows:?}"
+            .find(|row| cell(row, "CATEGORY") == Some(category.to_string()))
+            .and_then(|row| cell(row, "LATE"))
+    };
+    assert_eq!(rows.len(), 4, "one row per code-point group: {rows:?}");
+    assert_eq!(late("Gizmo"), Some("false".to_string()), "{rows:?}");
+    assert_eq!(late("Gîzmo"), Some("false".to_string()), "{rows:?}");
+    assert_eq!(late("Widget"), Some("true".to_string()), "{rows:?}");
+    assert_eq!(late("widget"), Some("true".to_string()), "{rows:?}");
+}
+
+/// The case pair and the accent pair the `category` column holds, each with
+/// the value an equality comparison probes it with.
+const FOLDED_PAIRS: [(&str, [&str; 2]); 2] = [
+    ("widget", ["Widget", "widget"]),
+    ("Gizmo", ["Gizmo", "Gîzmo"]),
+];
+
+/// The hex digits the MySQL dialect renders `value` as, which reach the
+/// generated statement whatever quoting `EXPLAIN VIRTUAL` reports it under.
+fn hex_digits(value: &str) -> String {
+    value.bytes().map(|byte| format!("{byte:02X}")).collect()
+}
+
+/// `vs-adapter/mysql-collation`: over `items`, whose character columns keep
+/// MySQL 8.4's default `utf8mb4_0900_ai_ci`, a delegated comparison, grouping,
+/// and distinct count return MySQL's answers rather than the ones Exasol
+/// computes over the mirror. The equality matches both values of each pair,
+/// and the grouping and the distinct count fold each pair into one.
+///
+/// Which member of a folded group MySQL reports is unspecified, so each
+/// group's label is checked only for membership in its pair.
+#[test]
+fn comparison_and_grouping_follow_the_columns_own_collation() {
+    let stack = stack::shared();
+
+    for (probe, pair) in FOLDED_PAIRS {
+        let query = format!(
+            "SELECT \"category\" AS CATEGORY FROM {VIRTUAL_SCHEMA}.\"{ITEMS}\" \
+             WHERE \"category\" = '{probe}'"
+        );
+
+        let statement = pushdown_statement(&query);
+        assert!(
+            statement.contains("WHERE")
+                && statement.contains(&hex_digits(probe))
+                && !statement.contains("COLLATE"),
+            "the comparison against `{probe}` must reach MySQL with no collation suffix: \
+             {statement}"
+        );
+        let matched: BTreeSet<String> = stack
+            .exasol
+            .query_rows(&query)
+            .iter()
+            .filter_map(|row| cell(row, "CATEGORY"))
+            .collect();
+        assert_eq!(
+            matched,
+            pair.iter().map(|value| value.to_string()).collect(),
+            "MySQL's default collation matches `{probe}` against both values of its pair"
+        );
+    }
+
+    let grouped = format!(
+        "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {VIRTUAL_SCHEMA}.\"{ITEMS}\" \
+         GROUP BY \"category\""
+    );
+    let statement = pushdown_statement(&grouped);
+    assert!(
+        statement.contains("GROUP BY `category`") && !statement.contains("COLLATE"),
+        "the grouping key must reach MySQL with no collation suffix: {statement}"
+    );
+    let groups = stack.exasol.query_rows(&grouped);
+    assert_eq!(
+        groups.len(),
+        FOLDED_PAIRS.len(),
+        "MySQL's default collation folds each pair into one group: {groups:?}"
+    );
+    for (_, pair) in FOLDED_PAIRS {
+        let in_pair = |label: String| pair.contains(&label.as_str());
+        let folded: Vec<_> = groups
+            .iter()
+            .filter(|row| cell(row, "CATEGORY").is_some_and(in_pair))
+            .collect();
+        assert_eq!(
+            folded.len(),
+            1,
+            "exactly one group must report a member of {pair:?}: {groups:?}"
+        );
+        assert_eq!(
+            cell(folded[0], "N"),
+            Some("4".to_string()),
+            "the group folding {pair:?} counts the two rows of each member: {groups:?}"
+        );
+    }
+
+    let distinct =
+        format!("SELECT COUNT(DISTINCT \"category\") AS N FROM {VIRTUAL_SCHEMA}.\"{ITEMS}\"");
+    let statement = pushdown_statement(&distinct);
+    assert!(
+        statement.contains("COUNT(DISTINCT `category`)") && !statement.contains("COLLATE"),
+        "the distinct count must reach MySQL with no collation suffix: {statement}"
+    );
+    assert_eq!(
+        cell(&stack.exasol.query_rows(&distinct)[0], "N"),
+        Some(FOLDED_PAIRS.len().to_string()),
+        "MySQL's default collation counts each pair once"
+    );
+}
+
+/// `vs-adapter/mysql-collation`: the wrapper `"category" || ''` is an
+/// expression no MySQL capability advertises, so Exasol keeps the comparison
+/// and evaluates it itself over the rows MySQL returns. The answer is
+/// therefore Exasol's code-point one, even over `items`, whose column MySQL
+/// compares case-insensitively.
+#[test]
+fn a_comparison_over_a_wrapped_operand_is_evaluated_by_exasol() {
+    let query = |schema: &str, items: &str| {
+        format!(
+            "SELECT \"id\" AS ID, \"category\" AS CATEGORY FROM {schema}.\"{items}\" \
+             WHERE \"category\" || '' = 'widget' ORDER BY \"id\""
+        )
+    };
+
+    let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
+    assert!(
+        !statement.contains("WHERE"),
+        "the wrapped comparison is the query's only predicate, and Exasol must keep it rather \
+         than delegate any comparison over category: {statement}"
+    );
+
+    let rows = assert_matches_mirror(ITEMS, query);
+    assert_eq!(
+        rows.iter()
+            .filter_map(|row| cell(row, "CATEGORY"))
+            .collect::<Vec<_>>(),
+        vec!["widget".to_string(), "widget".to_string()],
+        "Exasol compares by code point, so only the two `widget` rows match, not `Widget`: \
+         {rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-collation`: `utf8mb4_0900_bin` is `NO PAD`, so over
+/// [`mysql::CODE_POINT_ITEMS`] a trailing space is significant, as it is in
+/// Exasol: `MIN` over `'ab '`, `'ab'`, `'ab!'` is `'ab'`, and `= 'ab'` matches
+/// no `'ab '` row. Each fragment must reach MySQL, so the agreement with the
+/// mirror is MySQL's answer rather than Exasol's.
+#[test]
+fn trailing_space_values_compare_and_order_as_in_exasol() {
+    let extremes = |schema: &str, items: &str| {
+        format!(
+            "SELECT MIN(\"batch\") AS MIN_BATCH, MAX(\"batch\") AS MAX_BATCH \
+             FROM {schema}.\"{items}\""
+        )
+    };
+
+    let statement = pushdown_statement(&extremes(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
+    assert!(
+        statement.contains("MIN(`batch`)") && statement.contains("MAX(`batch`)"),
+        "MIN and MAX must reach MySQL rather than be computed by Exasol: {statement}"
+    );
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, extremes);
+    assert_eq!(
+        cell(&rows[0], "MIN_BATCH"),
+        Some("ab".to_string()),
+        "{rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[0], "MAX_BATCH"),
+        Some("ab!".to_string()),
+        "{rows:?}"
+    );
+
+    let equality = |schema: &str, items: &str| {
+        format!(
+            "SELECT \"id\" AS ID FROM {schema}.\"{items}\" WHERE \"batch\" = 'ab' ORDER BY \"id\""
+        )
+    };
+
+    let statement = pushdown_statement(&equality(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
+    assert!(
+        statement.contains("WHERE")
+            && (statement.contains("(`batch` = ") || statement.contains(" = `batch`)")),
+        "the equality must reach MySQL rather than be computed by Exasol: {statement}"
+    );
+    let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, equality);
+    assert_eq!(
+        rows.iter()
+            .filter_map(|row| cell(row, "ID"))
+            .collect::<Vec<_>>(),
+        vec!["2".to_string(), "5".to_string(), "8".to_string()],
+        "only the rows holding 'ab' match; the 'ab ' rows differ by a trailing space: {rows:?}"
     );
 }
 
@@ -1723,9 +1923,11 @@ fn ordering_survives_a_local_join() {
 #[test]
 fn generated_statement_carries_no_order_or_limit() {
     for suffix in ["ORDER BY \"id\"", "LIMIT 2", "ORDER BY \"id\" LIMIT 2"] {
-        let query = move |schema: &str| format!("SELECT \"id\" FROM {schema}.\"items\" {suffix}");
+        let query = move |schema: &str, items: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{items}\" {suffix}")
+        };
 
-        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA));
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
         let upper = statement.to_uppercase();
         assert!(
             !upper.contains("ORDER BY"),
@@ -1744,7 +1946,7 @@ fn generated_statement_carries_no_order_or_limit() {
              `{suffix}`: {statement}"
         );
 
-        assert_matches_mirror(query);
+        assert_matches_mirror(ITEMS, query);
     }
 }
 

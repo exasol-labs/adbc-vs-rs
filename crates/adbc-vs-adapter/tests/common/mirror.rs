@@ -12,13 +12,14 @@
 //! point. It offers no configurable collation: it compares character values by
 //! exact value, so `Widget`, `widget`, `Gizmo`, and `Gîzmo` are four distinct
 //! values, and it orders them by code point and pads nothing, so `MIN` over
-//! `'ab '`, `'ab'`, `'ab!'` is `'ab'`. Those answers are the ground truth the
-//! delegated path has to reproduce — MySQL's own defaults return two groups
-//! and a different `MIN`, which is the silent wrong-value failure the rendered
-//! collations exist to prevent. The mirror is therefore seeded from the
-//! fixture's own values rather than from what MySQL returns for them: a mirror
-//! filled from the source's answers would agree with the source by
-//! construction and prove nothing.
+//! `'ab '`, `'ab'`, `'ab!'` is `'ab'`. The delegated path renders no
+//! collation, so it reproduces those answers only over a source column that
+//! itself declares a binary collation, which is why a mirror comparison over a
+//! character column runs against `items_bin`. A test over MySQL's default
+//! collation asserts the source's own answer instead. The mirror is seeded
+//! from the fixture's own values rather than from what MySQL returns for
+//! them: a mirror filled from the source's answers would agree with the source
+//! by construction and prove nothing.
 //!
 //! For the same reason the column types below are stated here rather than
 //! computed through `adbc_vs_adapter::type_mapping`. A mirror deriving its

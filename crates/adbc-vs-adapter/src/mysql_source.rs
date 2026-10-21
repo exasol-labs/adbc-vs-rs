@@ -19,38 +19,7 @@ use crate::metadata::{
     assemble_tables, batch_column, i64_cell, required_i64_cell, required_string_cell, run_query,
     string_cell, CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
 };
-use crate::mysql_dialect;
 use crate::mysql_type_mapping::{self, MySqlColumn};
-
-/// The collations MySQL's pushdown rendering requires at the source: an
-/// explicit comparison collation for every character predicate, and a `NO PAD`
-/// collation for a character operand of `MIN` or `MAX`.
-///
-/// Both names come from the dialect that emits them rather than being spelled
-/// again here. The check and the renderer MUST agree: validating a source
-/// against a collation the renderer no longer emits would pass a server that
-/// then fails every delegated character predicate with MySQL error 1273 at
-/// query time — the outcome this check exists to replace with a rejection an
-/// operator can act on.
-const REQUIRED_COLLATIONS: [&str; 2] = [
-    mysql_dialect::COMPARISON_COLLATION,
-    mysql_dialect::ORDERING_COLLATION,
-];
-
-/// The oldest MySQL version that reports both [`REQUIRED_COLLATIONS`], named
-/// in the rejection error rather than compared against: a fork could report
-/// an unrelated version string while still supplying the collations.
-const MINIMUM_MYSQL_VERSION: &str = "8.0.17";
-
-/// The two statements MySQL's source precondition runs.
-///
-/// Named rather than inlined so the rule that each source checks its own
-/// precondition and no other can be asserted over what each one actually
-/// reads: PostgreSQL's counterpart is `postgres_source::server_encoding_query`,
-/// and neither catalog appears in the other's statements.
-pub(crate) const COLLATION_NAMES_QUERY: &str =
-    "SELECT COLLATION_NAME FROM information_schema.COLLATIONS";
-pub(crate) const SERVER_VERSION_QUERY: &str = "SELECT VERSION() AS SERVER_VERSION";
 
 /// Discovers MySQL metadata over an open ADBC connection.
 pub struct MySqlSource {
@@ -77,23 +46,18 @@ impl MetadataSource for MySqlSource {
         SourceQualifier::single(&self.database)
     }
 
-    /// Refuses a database name this source cannot build a catalog query for,
-    /// then a server missing a collation MySQL's rendering emits.
+    /// Refuses a database name this source cannot build a catalog query for.
     ///
-    /// The name check runs first and reaches nothing outside the process, so
-    /// an address an operator can fix is answered without a round trip. It is
+    /// The check reaches nothing outside the process, so an address an
+    /// operator can fix is answered without a round trip. It queries no
+    /// server collation and no server version: the MySQL dialect renders no
+    /// collation, so no server is refused for its collation or version. The check is
     /// MySQL's own and lives nowhere else, and
     /// `create_schema::discover_supported_source` — which checks before it
     /// discovers, on every path — is what leaves no route to
     /// [`quote_string_literal`] that skipped it.
     fn check_source(&mut self) -> Result<(), MetadataError> {
-        reject_unsafe_database_name(&self.database)?;
-
-        let collations = SourceCollations {
-            names: query_collation_names(&mut self.connection)?,
-            server_version: query_server_version(&mut self.connection)?,
-        };
-        check_required_collations(&collations)
+        reject_unsafe_database_name(&self.database)
     }
 
     fn discover_tables(&mut self) -> Result<Vec<DiscoveredTable>, MetadataError> {
@@ -103,34 +67,6 @@ impl MetadataSource for MySqlSource {
             mysql_type_mapping::map_column(&mysql_column(row))
         }))
     }
-}
-
-/// The collations a MySQL source server reports, and the version string it
-/// reports alongside them.
-///
-/// The two collations pushdown rendering requires arrived at different points
-/// in MySQL's own release history, so the check reads the collation listing
-/// itself rather than trusting a parsed version number.
-struct SourceCollations {
-    names: Vec<String>,
-    server_version: String,
-}
-
-/// Fails naming the first of the collations MySQL's pushdown rendering
-/// requires that `collations` did not report, and the server version
-/// `collations` reported alongside them.
-fn check_required_collations(collations: &SourceCollations) -> Result<(), MetadataError> {
-    for required in REQUIRED_COLLATIONS {
-        if !collations.names.iter().any(|name| name == required) {
-            return Err(MetadataError::UnsupportedSource(format!(
-                "the MySQL source server (reported version {}) is missing collation \
-                 `{required}`, which adbc-vs's pushdown rendering requires; the minimum \
-                 supported MySQL version is {MINIMUM_MYSQL_VERSION}",
-                collations.server_version
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// One row of the `information_schema.columns` query, before it is grouped
@@ -278,31 +214,6 @@ fn query_columns(
         }
     }
     Ok(rows)
-}
-
-fn query_collation_names(connection: &mut ManagedConnection) -> Result<Vec<String>, MetadataError> {
-    let sql = COLLATION_NAMES_QUERY;
-
-    let mut names = Vec::new();
-    for batch in run_query(connection, sql)? {
-        let column = batch_column(&batch, "COLLATION_NAME", sql)?;
-        for row in 0..batch.num_rows() {
-            names.push(required_string_cell(column, row, "COLLATION_NAME")?);
-        }
-    }
-    Ok(names)
-}
-
-fn query_server_version(connection: &mut ManagedConnection) -> Result<String, MetadataError> {
-    let sql = SERVER_VERSION_QUERY;
-
-    for batch in run_query(connection, sql)? {
-        let column = batch_column(&batch, "SERVER_VERSION", sql)?;
-        if batch.num_rows() > 0 {
-            return required_string_cell(column, 0, "SERVER_VERSION");
-        }
-    }
-    Err(MetadataError::catalog(format!("`{sql}` returned no row")))
 }
 
 /// Visible to the crate's own tests: `metadata_source_tests` drives the rules

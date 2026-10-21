@@ -11,14 +11,17 @@
 //!
 //! Exasol evaluates these tables under its own rules, which is the whole
 //! point: it offers no configurable collation, comparing character values by
-//! exact value and ordering them by code point. Those answers are the ground
-//! truth the delegated `postgresql` path has to reproduce over
-//! `COLLATE "C"`, which decision-log gate 2.3(d) and (e) measured PostgreSQL's
-//! own default `en_US.utf8` ordering and grouping disagreeing with. The
-//! mirror is seeded from `docker/postgres/init.sql`'s own literal values
-//! rather than from what PostgreSQL returns for them, for the same reason
-//! `super::mirror` states: a mirror filled from the source's answers would
-//! agree with the source by construction and prove nothing.
+//! exact value and ordering them by code point. The delegated `postgresql`
+//! path renders no collation, so it reproduces those answers only over a
+//! source column that itself declares `COLLATE "C"`, which is why
+//! `docker/postgres/init.sql` seeds `items_c` beside `items`: a query over
+//! `items_c` compares with this module's `items`, and a query over `items`,
+//! whose database default `en_US.utf8` orders differently, asserts
+//! PostgreSQL's own answer instead. The mirror is seeded from
+//! `docker/postgres/init.sql`'s own literal values rather than from what
+//! PostgreSQL returns for them, for the same reason `super::mirror` states: a
+//! mirror filled from the source's answers would agree with the source by
+//! construction and prove nothing.
 //!
 //! Only `items`'s and `item_notes`'s mapped columns are mirrored here.
 //! `items` also carries `code`, `description`, `details`, `photo`, `uid`, and

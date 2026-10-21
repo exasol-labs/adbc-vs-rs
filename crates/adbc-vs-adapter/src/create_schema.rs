@@ -280,9 +280,9 @@ pub fn set_properties(ctx: &mut dyn UdfContext, request: &Value) -> Result<Value
 /// The connection, driver, and in-progress notes every handler needs before
 /// it can discover anything from the source.
 ///
-/// [`discover`] is its only caller, which is what keeps the source-collation
-/// check on every path that resolves a `CONNECTION`: opening the source and
-/// discovering from it are one step to every handler.
+/// [`discover`] is its only caller, which is what keeps the source
+/// precondition check on every path that resolves a `CONNECTION`: opening the
+/// source and discovering from it are one step to every handler.
 ///
 /// The notes returned record no omission — nothing has mapped a column yet.
 fn open(

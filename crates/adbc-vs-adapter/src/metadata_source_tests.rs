@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::exa_type::{self, ExasolType};
-use crate::mysql_source::{self, COLLATION_NAMES_QUERY, SERVER_VERSION_QUERY};
+use crate::mysql_source;
 use crate::postgres_source;
 use crate::trino_source;
 use crate::type_mapping::MappedType;
@@ -35,8 +35,8 @@ fn discovered(driver: Driver) -> DiscoveredTable {
 ///
 /// This is what keeps a shared source-column struct out of the interface: no
 /// caller ever sees a column in the source's own vocabulary, so nothing
-/// outside the source needs a field for `COLUMN_TYPE`, for a collation name,
-/// or for whatever the next technology's catalog reports instead.
+/// outside the source needs a field for `COLUMN_TYPE`, for a character set
+/// name, or for whatever the next technology's catalog reports instead.
 #[test]
 fn each_source_maps_its_own_catalog_row() {
     for driver in Driver::ALL {
@@ -81,22 +81,26 @@ fn each_source_maps_its_own_catalog_row() {
 /// What one source's precondition check reads: the statements it runs, and the
 /// catalog subject naming those statements' whole business.
 ///
-/// A subject is the load-bearing half. It is what makes "MySQL's check does
-/// not run for a PostgreSQL source" assertable at this tier: no source can be
-/// constructed without a live ADBC connection, so what the two checks read is
-/// the strongest available evidence that neither runs the other's.
+/// A subject is the load-bearing half. It is what makes "PostgreSQL's
+/// encoding check does not run for another source" assertable at this tier:
+/// no source can be constructed without a live ADBC connection, so what each
+/// check reads is the strongest available evidence that none runs another's.
 struct Precondition {
     queries: Vec<&'static str>,
     subjects: Vec<&'static str>,
 }
 
-/// Matched exhaustively, so a technology added to [`Driver`] has to state the
-/// precondition its own dialect needs rather than inherit one.
+/// Matched exhaustively, so a technology added to [`Driver`] has to state its
+/// own precondition rather than inherit one.
+///
+/// MySQL's arm is empty: its check refuses an unsafe database name without a
+/// round trip and queries neither a server collation nor a server version,
+/// because the MySQL dialect renders no collation.
 fn precondition(driver: Driver) -> Precondition {
     match driver {
         Driver::MySql => Precondition {
-            queries: vec![COLLATION_NAMES_QUERY, SERVER_VERSION_QUERY],
-            subjects: vec!["information_schema.COLLATIONS", "VERSION()"],
+            queries: vec![],
+            subjects: vec![],
         },
         Driver::Postgres => Precondition {
             queries: vec![postgres_source::server_encoding_query()],
@@ -109,15 +113,13 @@ fn precondition(driver: Driver) -> Precondition {
     }
 }
 
-/// Each source checks the precondition its own dialect states, and reads no
-/// other source's catalog to do it.
+/// Each source checks its own precondition, and reads no other source's
+/// catalog to do it.
 ///
-/// The preconditions genuinely differ — MySQL's rendering needs two named
-/// collations at the server, PostgreSQL's needs a UTF-8 database encoding —
-/// and each is stated by the dialect that renders for that source. A source
-/// that ran another's check would refuse a server for a reason its own
-/// rendering does not have, or accept one its rendering cannot be used
-/// against.
+/// The preconditions genuinely differ — PostgreSQL's needs a UTF-8 database
+/// encoding, while MySQL's and Trino's query nothing at the server — and each
+/// is stated for the source it guards. A source that ran another's check
+/// would refuse a server for a reason its own rendering does not have.
 #[test]
 fn each_sources_precondition_reads_only_its_own_catalog() {
     for driver in Driver::ALL {
@@ -126,9 +128,9 @@ fn each_sources_precondition_reads_only_its_own_catalog() {
         assert_eq!(
             own.subjects.is_empty(),
             own.queries.is_empty(),
-            "`{}` must either name the subjects it reads or run no query at all; Trino \
-             deliberately runs no precondition query, and a source that gained a query without \
-             naming its subject would otherwise pass both loops below vacuously: {:?}",
+            "`{}` must either name the subjects it reads or run no query at all; MySQL and \
+             Trino deliberately run no precondition query, and a source that gained a query \
+             without naming its subject would otherwise pass both loops below vacuously: {:?}",
             driver.as_str(),
             own.queries
         );

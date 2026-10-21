@@ -111,15 +111,13 @@ pub enum Expression {
 /// A reference to a column of a table in the `from` tree, carrying the
 /// Exasol type that table declares for it.
 ///
-/// The type travels with the reference because a dialect's rendering of a
-/// column depends on it: Exasol compares character values case-sensitively,
-/// accent-sensitively, and without padding, and reproducing that at the
-/// source takes an explicit collation a numeric or temporal column must not
-/// carry. Resolving the type again by name at render time would put the
-/// involved table's column list on both sides of the dialect boundary, and a
-/// renderer that guessed instead — reading a character comparison off the
-/// presence of a string literal — would render `note = code` bare and return
-/// rows Exasol never asked for.
+/// The type travels with the reference because a `column` select-list entry
+/// takes it as the `EMITS` type when `selectListDataTypes` is absent, and
+/// because Exasol's type-equality check reads it. It never decides how a
+/// dialect renders the column: a dialect renders no collation, so a character
+/// column and a numeric column render the same way. Resolving the type again
+/// by name at render time would put the involved table's column list on both
+/// sides of the dialect boundary.
 ///
 /// How the reference names its table travels unresolved, in both spellings
 /// the protocol uses. Measured on Exasol 2025.2.1, a join whose query aliased

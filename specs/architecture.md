@@ -36,7 +36,7 @@ Scan UDF (scan_entry + adbc-vs-scan)
 - type_mapping (crates/adbc-vs-adapter/src/type_mapping.rs, mysql_type_mapping.rs, postgres_type_mapping.rs, trino_type_mapping.rs): maps each source column type to an Exasol type or an omission | owns: the Exasol type bounds every mapping uses | depends on: exa_type
 - exa_type (crates/adbc-vs-adapter/src/exa_type.rs, emit_type.rs): defines the declarable Exasol types, their DDL and JSON encodings, and the `EMITS` type of each select-list entry | owns: none | depends on: none
 - pushdown_query (crates/adbc-vs-adapter/src/pushdown_query.rs): parses a `pushdown` request into a dialect-neutral query model | owns: none | depends on: exa_type, adapter_notes
-- sql_dialect (crates/adbc-vs-adapter/src/sql_dialect.rs, mysql_dialect.rs, postgres_dialect.rs, trino_dialect.rs): renders the query model into one technology's SQL and states that technology's source precondition | owns: none | depends on: pushdown_query, exa_type, driver identity
+- sql_dialect (crates/adbc-vs-adapter/src/sql_dialect.rs, mysql_dialect.rs, postgres_dialect.rs, trino_dialect.rs): renders the query model into one technology's SQL, with no collation on any operand | owns: none | depends on: pushdown_query, exa_type, driver identity
 - capabilities (crates/adbc-vs-adapter/src/capabilities.rs): shapes the dialect's advertised capability set into the `getCapabilities` response | owns: none | depends on: sql_dialect
 - pushdown (crates/adbc-vs-adapter/src/pushdown.rs): builds the `pushdown` response that calls the scan UDF with a dynamic `EMITS` clause over the rendered statement | owns: the scan script name `ADBC_VS.ADBC_SCAN` | depends on: pushdown_query, sql_dialect, scan_spec, adapter_notes, exa_type
 - scan_spec (crates/adbc-vs-adapter/src/scan_spec.rs): defines the JSON contract between the pushdown response and the scan UDF | owns: the scan specification shape, which carries no credential | depends on: exa_type, driver identity
@@ -89,7 +89,8 @@ Scan UDF (scan_entry + adbc-vs-scan)
 - Registry and BucketFS requests use a 15 s connect timeout and a 600 s transfer timeout, and a written driver must become readable on the mount within 120 s
 - No dialect advertises `ORDER BY`, `LIMIT`, or `LIMIT ... OFFSET`, because the emitting UDF carries no ordering guarantee, so Exasol applies them over the emitted rows
 - Each advertised capability must be renderable by its dialect, because Exasol does not re-apply a delegated fragment
-- Each dialect's source precondition is checked on every request that resolves the source CONNECTION, before any table is discovered
+- No dialect renders a collation, so a delegated character comparison, grouping key, `DISTINCT` operand, and `MIN` or `MAX` operand follow the collation the source applies to the column, and a user who needs Exasol's code-point comparison either declares that collation at the source or wraps the operand in an expression no dialect advertises, so that Exasol evaluates it
+- Each driver's source precondition is checked on every request that resolves the source CONNECTION, before any table is discovered
 - Data moves as Arrow record batches from the driver to Exasol, and the scan holds one batch at a time
 - Adding a technology is a reviewed code change: a TOML declaration and dialect code compiled into a release, never a file loaded at run time
 - The release artifact bundles no ADBC driver binary

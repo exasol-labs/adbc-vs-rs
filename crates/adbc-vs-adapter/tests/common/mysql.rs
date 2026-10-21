@@ -33,6 +33,20 @@ pub const EMPTY_DATABASE: &str = "adbc_vs_empty";
 /// The Compose service whose container hosts MySQL.
 const SERVICE: &str = "mysql";
 
+/// The table holding the `items` rows with every `utf8mb4` character column
+/// declared [`CODE_POINT_COLLATION`].
+///
+/// A delegated character comparison, grouping, `MIN`, or `MAX` over it
+/// returns what Exasol returns over the local mirror of `items`, so every
+/// differential test over a character column reads it rather than `items`.
+pub const CODE_POINT_ITEMS: &str = "items_bin";
+
+/// The MySQL collation `vs-adapter/mysql-collation` names as the source-side
+/// remedy for Exasol's code-point comparison. It weighs the `utf8mb4`
+/// encoding bytes, so it orders by code point, and it is `NO PAD`, so a
+/// trailing space is significant, as it is in Exasol.
+const CODE_POINT_COLLATION: &str = "utf8mb4_0900_bin";
+
 /// The fixture tables the end-to-end tests read, beyond the `orders` table the
 /// Compose seed creates.
 ///
@@ -51,21 +65,28 @@ const SERVICE: &str = "mysql";
 /// - `category`: the aggregation `GROUP BY`/`DISTINCT` column. It holds the
 ///   measured `Widget`/`widget`/`Gizmo`/`Gîzmo` set (decision-log `[17]`,
 ///   `[19]`), each value seeded onto two rows so every group is multi-row.
-///   MySQL's default `utf8mb4_0900_ai_ci` collation folds the set to 2
-///   groups; Exasol's `utf8mb4_0900_as_cs` comparison collation keeps 4.
+///   Under MySQL's default `utf8mb4_0900_ai_ci`, which `items` keeps, a
+///   delegated `GROUP BY` folds the set to 2 groups; under
+///   [`CODE_POINT_COLLATION`] in [`CODE_POINT_ITEMS`] it keeps the 4 Exasol
+///   keeps over the mirror.
 /// - `code`: a `CHAR(8)` column, so the CHAR-to-VARCHAR mapping (decision
 ///   `[15]`) is exercised end to end.
 /// - `batch`: a `VARCHAR`, not `CHAR`, column carrying the `'ab'`/`'ab '`/
-///   `'ab!'` set decision-log `[6]`'s review round measured `MIN` diverging
-///   over under `utf8mb4_bin` — a `CHAR` column would strip the trailing
-///   space on retrieval and never reproduce the hazard.
+///   `'ab!'` set. Measured on MySQL 8.4, `MIN` over it returns `'ab '` under
+///   the `PAD SPACE` `utf8mb4_bin`, where Exasol and the `NO PAD`
+///   [`CODE_POINT_COLLATION`] return `'ab'` — a `CHAR` column would strip the
+///   trailing space on retrieval and never show the difference.
 /// - `quantity`: nullable, with a NULL, a value above, and a value below the
 ///   threshold a select-list predicate compares against.
 /// - `rank_key`/`tie_break`: a sort key that repeats (`rank_key`) with a
 ///   second key (`tie_break`) that disambiguates it; seeded out of the order
 ///   `ORDER BY rank_key, tie_break` would return.
 /// - `region`: `latin1`, beside the table's other `utf8mb4` columns, for the
-///   non-utf8mb4-unmapping omission test.
+///   non-utf8mb4-unmapping omission test. It carries no collation clause in
+///   either table, because MySQL rejects [`CODE_POINT_COLLATION`] for
+///   `latin1`, so it stays unmapped in [`CODE_POINT_ITEMS`] too.
+/// - [`CODE_POINT_ITEMS`]: the same rows as `items`, created in the same
+///   script, so it exists before the shared setup creates the virtual schema.
 /// - `item_notes`: the join partner, keyed by `item_id`. `items.id` 1 carries
 ///   no matching row (unmatched on the `items` side), and `item_id` 99
 ///   matches no `items` row (unmatched on the `item_notes` side).
@@ -87,18 +108,33 @@ fn fixture_script() -> String {
     CREATE TABLE refresh_target (id INT NOT NULL, name VARCHAR(30) NOT NULL); \
     INSERT INTO refresh_target VALUES (1, 'before'); \
     DROP TABLE IF EXISTS item_notes; \
-    DROP TABLE IF EXISTS items; \
-    CREATE TABLE items (id INT NOT NULL, category VARCHAR(50) NOT NULL, \
-        code CHAR(8) NOT NULL, batch VARCHAR(20) NOT NULL, quantity DECIMAL(9,0) NULL, \
-        rank_key INT NOT NULL, tie_break INT NOT NULL, \
-        region VARCHAR(30) CHARACTER SET latin1 NOT NULL, PRIMARY KEY (id)); \
-    INSERT INTO items (id, category, code, batch, quantity, rank_key, tie_break, region) \
-        VALUES {}; \
+    {} \
+    {} \
     CREATE TABLE item_notes (item_id INT NOT NULL, note VARCHAR(50) NOT NULL, \
         PRIMARY KEY (item_id)); \
     INSERT INTO item_notes (item_id, note) VALUES {};",
-        items::source_values(),
+        items_table("items", None),
+        items_table(CODE_POINT_ITEMS, Some(CODE_POINT_COLLATION)),
         items::note_values()
+    )
+}
+
+/// The statements that recreate `table` holding every `items` row, each
+/// `utf8mb4` character column declaring `collation`, or the server default
+/// when it is `None`.
+fn items_table(table: &str, collation: Option<&str>) -> String {
+    let collate = collation
+        .map(|collation| format!(" COLLATE {collation}"))
+        .unwrap_or_default();
+    format!(
+        "DROP TABLE IF EXISTS {table}; \
+         CREATE TABLE {table} (id INT NOT NULL, category VARCHAR(50){collate} NOT NULL, \
+         code CHAR(8){collate} NOT NULL, batch VARCHAR(20){collate} NOT NULL, \
+         quantity DECIMAL(9,0) NULL, rank_key INT NOT NULL, tie_break INT NOT NULL, \
+         region VARCHAR(30) CHARACTER SET latin1 NOT NULL, PRIMARY KEY (id)); \
+         INSERT INTO {table} (id, category, code, batch, quantity, rank_key, tie_break, region) \
+         VALUES {};",
+        items::source_values()
     )
 }
 
@@ -303,7 +339,7 @@ mod tests {
             assert!(
                 script.contains(value),
                 "items.category must hold {value} so grouping under MySQL's default collation \
-                 yields fewer groups than Exasol's comparison collation: {script}"
+                 yields fewer groups than Exasol's code-point comparison: {script}"
             );
         }
     }
@@ -326,8 +362,8 @@ mod tests {
         let script = fixture_script();
         assert!(
             script.contains("'ab '") && script.contains("'ab'") && script.contains("'ab!'"),
-            "items.batch must hold a value differing from another only by a trailing space, \
-             to expose the PAD SPACE hazard fixed in decision [6]: {script}"
+            "items.batch must hold a value differing from another only by a trailing space, so \
+             MIN and an equality over it show whether the source collation pads: {script}"
         );
     }
 
@@ -386,6 +422,50 @@ mod tests {
                 "rank_key {value} must appear seeded: {script}"
             );
         }
+    }
+
+    /// The `CREATE TABLE` statement the fixture script issues for `table`.
+    fn create_statement_of(table: &str) -> String {
+        let script = fixture_script();
+        let statement = script
+            .split(&format!("CREATE TABLE {table} ("))
+            .nth(1)
+            .unwrap_or_else(|| panic!("the fixture must create {table}: {script}"));
+        statement
+            .split_once(';')
+            .map(|(declaration, _)| declaration.to_owned())
+            .unwrap_or_else(|| panic!("the CREATE TABLE {table} statement must end: {script}"))
+    }
+
+    #[test]
+    fn fixtures_declare_every_utf8mb4_column_of_the_code_point_items_utf8mb4_0900_bin() {
+        let statement = create_statement_of(CODE_POINT_ITEMS);
+        for column in [
+            "category VARCHAR(50) COLLATE utf8mb4_0900_bin NOT NULL",
+            "code CHAR(8) COLLATE utf8mb4_0900_bin NOT NULL",
+            "batch VARCHAR(20) COLLATE utf8mb4_0900_bin NOT NULL",
+        ] {
+            assert!(
+                statement.contains(column),
+                "{CODE_POINT_ITEMS} must declare `{column}`, the collation that reproduces \
+                 Exasol's code-point comparison: {statement}"
+            );
+        }
+        assert!(
+            statement.contains("region VARCHAR(30) CHARACTER SET latin1 NOT NULL"),
+            "region must stay latin1 with no collation clause, because MySQL rejects \
+             utf8mb4_0900_bin for latin1: {statement}"
+        );
+    }
+
+    #[test]
+    fn fixtures_leave_the_items_columns_under_the_server_default_collation() {
+        let statement = create_statement_of("items");
+        assert!(
+            !statement.contains("COLLATE"),
+            "items must declare no collation, so its character columns take MySQL's default \
+             utf8mb4_0900_ai_ci: {statement}"
+        );
     }
 
     #[test]

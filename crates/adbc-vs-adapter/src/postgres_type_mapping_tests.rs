@@ -2,14 +2,13 @@ use super::*;
 
 /// A column of `data_type` carrying none of the catalog's optional fields:
 /// what `information_schema` reports for a type that declares no length, no
-/// precision, and no collation of its own.
+/// precision.
 fn column(data_type: &str) -> PostgresColumn {
     PostgresColumn {
         data_type: data_type.to_string(),
         character_length: None,
         numeric_precision: None,
         numeric_scale: None,
-        collation: None,
         is_nullable: true,
     }
 }
@@ -26,16 +25,6 @@ fn character_varying_column(length: Option<u32>) -> PostgresColumn {
     PostgresColumn {
         character_length: length,
         ..column("character varying")
-    }
-}
-
-fn collated(length: u32, name: &str, is_deterministic: Option<bool>) -> PostgresColumn {
-    PostgresColumn {
-        collation: Some(ColumnCollation {
-            name: name.to_string(),
-            is_deterministic,
-        }),
-        ..character_varying_column(Some(length))
     }
 }
 
@@ -306,41 +295,6 @@ fn a_time_zone_aware_timestamp_is_unmapped_rather_than_mapped_to_timestamp() {
             reason.contains("instant"),
             "the reason must name the differing instants as the cause: {reason}"
         );
-    }
-}
-
-/// `vs-adapter/postgresql-type-mapping`: the delegated equality, `LIKE`,
-/// `GROUP BY`, and `DISTINCT` this release renders for PostgreSQL carry no
-/// collation suffix, which is correct only over a deterministic collation. A
-/// nondeterministic one silently matches rows Exasol does not, so the column
-/// is omitted rather than exposed.
-#[test]
-fn a_character_column_of_a_nondeterministic_collation_is_unmapped() {
-    let reason = unmapped(&collated(50, "case_insensitive", Some(false)));
-
-    assert!(
-        reason.contains("case_insensitive"),
-        "the reason must name the column's collation: {reason}"
-    );
-    assert!(
-        reason.contains("nondeterministic"),
-        "the reason must identify the collation as nondeterministic: {reason}"
-    );
-}
-
-/// A deterministic collation maps, and so does a column declaring none of its
-/// own — the database default, which PostgreSQL requires to be deterministic.
-/// A collation for which the server reports no determinism flag is treated as
-/// deterministic, because a version predating the flag has no nondeterministic
-/// collations to distinguish.
-#[test]
-fn a_deterministic_or_unreported_collation_maps() {
-    for collation in [
-        collated(50, "C", Some(true)),
-        collated(50, "en_US.utf8", None),
-        character_varying_column(Some(50)),
-    ] {
-        assert_eq!(mapped(&collation), MappedType::Varchar { size: 50 });
     }
 }
 

@@ -33,13 +33,6 @@ fn mysql_tables(table_names: Vec<String>, rows: Vec<ColumnRow>) -> Vec<Discovere
     })
 }
 
-fn collations(names: &[&str], server_version: &str) -> SourceCollations {
-    SourceCollations {
-        names: names.iter().map(|name| (*name).to_string()).collect(),
-        server_version: server_version.to_string(),
-    }
-}
-
 /// The MySQL catalog fixture the rules binding every source are driven
 /// through: one `orders` table holding a column that maps and a column of
 /// MySQL's own that does not.
@@ -126,50 +119,6 @@ fn a_character_column_of_another_character_set_is_omitted_naming_its_type() {
         "the recorded reason must name what disqualified the column: {}",
         table.omissions[0].reason
     );
-}
-
-/// `vs-adapter/mysql-collation`, decision `[13]`: a source missing a collation
-/// the renderer emits fails every delegated character predicate with MySQL
-/// error 1273 at query time, so it is refused at creation instead.
-#[test]
-fn a_source_missing_a_required_collation_is_refused_naming_it_and_the_version() {
-    for missing in REQUIRED_COLLATIONS {
-        let present: Vec<&str> = REQUIRED_COLLATIONS
-            .into_iter()
-            .filter(|&collation| collation != missing)
-            .collect();
-
-        let error = check_required_collations(&collations(&present, "8.0.16-log"))
-            .expect_err(&format!("a server missing {missing} must be rejected"));
-
-        let message = error.to_string();
-        assert!(
-            matches!(error, MetadataError::UnsupportedSource(_)),
-            "the source answered; it is the answer that disqualifies it: {message}"
-        );
-        assert!(
-            message.contains(missing)
-                && message.contains("8.0.16-log")
-                && message.contains(MINIMUM_MYSQL_VERSION),
-            "the error must name the missing collation, the version the source reported, and \
-             the minimum supported MySQL version: {message}"
-        );
-    }
-}
-
-#[test]
-fn a_server_carrying_both_required_collations_is_accepted() {
-    check_required_collations(&collations(&REQUIRED_COLLATIONS, "8.4.0"))
-        .expect("a server listing both required collations must not be rejected");
-}
-
-#[test]
-fn a_server_is_not_rejected_on_its_version_string_alone() {
-    check_required_collations(&collations(
-        &REQUIRED_COLLATIONS,
-        "not-a-real-version-string",
-    ))
-    .expect("a fork reporting an unexpected version but supplying both collations must still work");
 }
 
 /// The guard belongs to MySQL rather than to the schema that resolved the

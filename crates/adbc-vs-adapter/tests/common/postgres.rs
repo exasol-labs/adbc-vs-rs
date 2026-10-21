@@ -48,6 +48,7 @@ const SERVICE: &str = "postgres";
 const SEEDED_OBJECTS: &[&str] = &[
     "orders",
     "items",
+    "items_c",
     "item_notes",
     "numeric_specials",
     "all_unmapped",

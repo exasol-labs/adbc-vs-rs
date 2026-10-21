@@ -93,12 +93,8 @@ impl MetadataSource for TrinoSource {
 
     /// Succeeds without querying the server.
     ///
-    /// Every other source's check exists because its dialect's rendering
-    /// depends on something the server configures — MySQL needs a named
-    /// collation, PostgreSQL needs a UTF-8 encoding — and each reads that
-    /// fact off its own catalog before trusting it. Nothing Trino's rendering
-    /// depends on is configurable: code-point comparison, the absence of
-    /// collation, the double-quote identifier form, and the typed-literal
+    /// Nothing Trino's rendering depends on is configurable: code-point
+    /// comparison, the double-quote identifier form, and the typed-literal
     /// requirement are all fixed in Trino's SQL engine on every server this
     /// release supports, so there is nothing here for a query to read. The
     /// check still runs, at the same point every other driver's does, so

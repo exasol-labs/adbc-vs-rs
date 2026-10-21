@@ -15,11 +15,13 @@
 //! silently dropped fragment still returns rows, and a right answer says
 //! nothing about where it was computed.
 //!
-//! The differential half matters more here than it does for MySQL. PostgreSQL's
-//! default `en_US.utf8` locale orders `B`, `a`, `C` differently from Exasol's
-//! code-point order, so a `COLLATE "C"` the dialect failed to render surfaces
-//! as a wrong row rather than as an error — and only a comparison against
-//! Exasol's own answer catches it.
+//! The dialect renders no collation, so a delegated character comparison runs
+//! under the collation PostgreSQL applies to the column. PostgreSQL's default
+//! `en_US.utf8` locale orders `B`, `a`, `C` differently from Exasol's
+//! code-point order, which is why two tables carry the same rows: `items`
+//! keeps the default and its tests assert PostgreSQL's own answer, while
+//! `items_c` declares `COLLATE "C"` on every character column and its tests
+//! compare with the mirror, which holds Exasol's answer.
 //!
 //! Every test shares one stack, two virtual schemas, and the drivers installed
 //! into one BucketFS, which is why this binary runs with `--test-threads=1`.
@@ -49,9 +51,12 @@ const CATEGORY_GROUPS: usize = 4;
 /// database the connection address names.
 const QUALIFIED_ITEMS: &str = "\"public\".\"items\"";
 
-/// The collation suffix the dialect renders on an operand whose *order*
-/// decides an answer, and on no other operand.
-const ORDERING_COLLATION: &str = "COLLATE \"C\"";
+/// The table holding the rows under the database default collation, and the
+/// table holding the same rows with every character column declared
+/// `COLLATE "C"`. The mirror's `items` is the answer both are compared with
+/// where the collation agrees with Exasol's.
+const ITEMS: &str = "items";
+const ITEMS_C: &str = "items_c";
 
 /// The sum and the mean of the seeded `id` values, 1 through [`ITEM_ROWS`],
 /// worked out by hand: what Exasol has to answer for the two aggregates this
@@ -93,7 +98,7 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
         cell(answers, "MINKEY"),
         Some("B".to_string()),
         "Exasol orders by code point, so 'B' precedes 'C' precedes 'a'. PostgreSQL's own \
-         en_US.utf8 locale answers 'a' here — the divergence COLLATE \"C\" exists to close"
+         en_US.utf8 locale answers 'a' here, the divergence `items_c` closes at the source"
     );
     assert_eq!(
         cell(answers, "MAXKEY"),
@@ -129,53 +134,66 @@ fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
              different things"
         );
     }
+
+    assert_eq!(
+        declared_columns(postgres_mirror::SCHEMA, ITEMS),
+        declared_columns(VIRTUAL_SCHEMA, ITEMS_C),
+        "`items_c` is compared with the mirror's `items`, so the two must declare the same column \
+         names in the same order with the same Exasol types"
+    );
 }
 
 // --- projection, filter, aggregation, join ----------------------------------
 
 #[test]
 fn projection_reaches_postgresql_and_matches_the_mirror() {
-    let query = |schema: &str| {
-        format!("SELECT \"id\", \"category\" FROM {schema}.\"items\" ORDER BY \"id\"")
+    let query = |schema: &str, table: &str| {
+        format!("SELECT \"id\", \"category\" FROM {schema}.\"{table}\" ORDER BY \"id\"")
     };
 
     assert_eq!(
-        generated_statement(&query(VIRTUAL_SCHEMA)),
+        generated_statement(&query(VIRTUAL_SCHEMA, ITEMS)),
         format!("SELECT \"id\", \"category\" FROM {QUALIFIED_ITEMS}"),
         "the statement sent to PostgreSQL must project the two named columns and no other, from \
          the `public`-qualified table"
     );
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(ITEMS, query);
     assert_eq!(rows.len(), ITEM_ROWS);
     assert_eq!(rows[0].len(), 2, "only the two named columns come back");
     assert_eq!(cell(&rows[0], "category"), Some("widget".to_string()));
 }
 
 /// Two filters, because the two answer different questions. The first proves
-/// that equality, `LIKE`, and `BETWEEN` reach PostgreSQL and select the rows
-/// Exasol selects; the second proves the same for an ordering comparison, whose
-/// answer the source and Exasol genuinely disagree about until the collation is
-/// rendered — `sort_key < 'C'` returns four rows under the source's own locale
-/// and two under Exasol's code-point order.
+/// that equality, `LIKE`, and `BETWEEN` over numbers reach PostgreSQL and select
+/// the rows Exasol selects. The second runs over `items_c`, whose character
+/// columns declare `COLLATE "C"`, and proves that an ordering comparison and a
+/// character `BETWEEN` reach PostgreSQL bare and still select the rows Exasol
+/// selects: `sort_key < 'C'` returns two rows under code-point order, and
+/// `sort_key BETWEEN 'C' AND 'a'` returns four where the `en_US.utf8` locale
+/// would return none.
 #[test]
 fn filter_reaches_postgresql_and_matches_the_mirror() {
-    let query = |schema: &str| {
+    let query = |schema: &str, table: &str| {
         format!(
-            "SELECT \"id\" FROM {schema}.\"items\" WHERE (\"category\" = 'Widget' OR \
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE (\"category\" = 'Widget' OR \
              \"tag\" LIKE 'ab!%') AND \"id\" BETWEEN 1 AND 4 ORDER BY \"id\""
         )
     };
 
-    let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, ITEMS_C));
     for fragment in ["WHERE", " OR ", " AND ", "LIKE", "BETWEEN"] {
         assert!(
             statement.contains(fragment),
             "the generated statement must carry {fragment}: {statement}"
         );
     }
+    assert!(
+        !statement.contains("COLLATE"),
+        "the dialect renders no collation: {statement}"
+    );
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(ITEMS_C, query);
     assert_eq!(
         column_values(&rows, "id"),
         vec!["2".to_string(), "3".to_string(), "4".to_string()],
@@ -183,39 +201,68 @@ fn filter_reaches_postgresql_and_matches_the_mirror() {
          neither branch: {rows:?}"
     );
 
-    let ordering_query = |schema: &str| {
-        format!("SELECT \"id\" FROM {schema}.\"items\" WHERE \"sort_key\" < 'C' ORDER BY \"id\"")
+    let ordering_query = |schema: &str, table: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"sort_key\" < 'C' ORDER BY \"id\"")
     };
 
-    let ordering_statement = generated_statement(&ordering_query(VIRTUAL_SCHEMA));
+    let ordering_statement = generated_statement(&ordering_query(VIRTUAL_SCHEMA, ITEMS_C));
     assert!(
-        ordering_statement.contains("\"sort_key\"")
-            && ordering_statement.contains(ORDERING_COLLATION),
-        "the row comparison below only tells a rendered collation from a dropped one while the \
+        ordering_statement.contains("(\"sort_key\" < E'C')")
+            && !ordering_statement.contains("COLLATE"),
+        "the row comparison below only tells a bare comparison from a dropped one while the \
          predicate actually reached PostgreSQL: a filter Exasol computed itself would return the \
          same rows: {ordering_statement}"
     );
 
-    let ordering_rows = assert_matches_mirror(ordering_query);
+    let ordering_rows = assert_matches_mirror(ITEMS_C, ordering_query);
     assert_eq!(
         column_values(&ordering_rows, "id"),
         vec!["1".to_string(), "4".to_string()],
-        "only the two 'B' rows precede 'C' in code-point order; PostgreSQL's own en_US.utf8 \
-         locale also returns the two 'a' rows, so this is the assertion a missing COLLATE \"C\" \
-         fails: {ordering_rows:?}"
+        "only the two 'B' rows precede 'C' in code-point order, which `items_c`'s own collation \
+         supplies: {ordering_rows:?}"
     );
-}
 
-#[test]
-fn aggregation_reaches_postgresql_and_matches_the_mirror() {
-    let single_group_query = |schema: &str| {
+    let between_query = |schema: &str, table: &str| {
         format!(
-            "SELECT COUNT(*) AS N, MIN(\"sort_key\") AS MINKEY, MAX(\"sort_key\") AS MAXKEY, \
-             MIN(\"tag\") AS MINTAG, MAX(\"tag\") AS MAXTAG FROM {schema}.\"items\""
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"sort_key\" BETWEEN 'C' AND 'a' \
+             ORDER BY \"id\""
         )
     };
 
-    let statement = generated_statement(&single_group_query(VIRTUAL_SCHEMA));
+    let between_statement = generated_statement(&between_query(VIRTUAL_SCHEMA, ITEMS_C));
+    assert!(
+        between_statement.contains("BETWEEN E'C' AND E'a'")
+            && !between_statement.contains("COLLATE"),
+        "the character BETWEEN must reach PostgreSQL bare: {between_statement}"
+    );
+
+    let between_rows = assert_matches_mirror(ITEMS_C, between_query);
+    assert_eq!(
+        column_values(&between_rows, "id"),
+        vec![
+            "2".to_string(),
+            "3".to_string(),
+            "5".to_string(),
+            "6".to_string()
+        ],
+        "'C' and 'a' bound the range in code-point order: {between_rows:?}"
+    );
+}
+
+/// Runs over `items_c`, whose character columns declare `COLLATE "C"`: the
+/// delegated `MIN`, `MAX`, `GROUP BY`, and `COUNT(DISTINCT)` reach PostgreSQL
+/// bare and return Exasol's code-point answers because the column's own
+/// collation supplies them.
+#[test]
+fn aggregation_reaches_postgresql_and_matches_the_mirror() {
+    let single_group_query = |schema: &str, table: &str| {
+        format!(
+            "SELECT COUNT(*) AS N, MIN(\"sort_key\") AS MINKEY, MAX(\"sort_key\") AS MAXKEY, \
+             MIN(\"tag\") AS MINTAG, MAX(\"tag\") AS MAXTAG FROM {schema}.\"{table}\""
+        )
+    };
+
+    let statement = generated_statement(&single_group_query(VIRTUAL_SCHEMA, ITEMS_C));
     for fragment in ["COUNT(*)", "MIN(", "MAX("] {
         assert!(
             statement.contains(fragment),
@@ -223,17 +270,18 @@ fn aggregation_reaches_postgresql_and_matches_the_mirror() {
         );
     }
     assert!(
-        !statement.contains("GROUP BY"),
-        "a single-group aggregation must render no GROUP BY clause: {statement}"
+        !statement.contains("GROUP BY") && !statement.contains("COLLATE"),
+        "a single-group aggregation must render no GROUP BY clause and no collation: {statement}"
     );
 
-    let rows = assert_matches_mirror(single_group_query);
+    let rows = assert_matches_mirror(ITEMS_C, single_group_query);
     let answers = &rows[0];
     assert_eq!(cell(answers, "N"), Some(ITEM_ROWS.to_string()));
     assert_eq!(
         cell(answers, "MINKEY"),
         Some("B".to_string()),
-        "the delegated MIN must reproduce Exasol's code-point order: {answers:?}"
+        "the delegated MIN over a `COLLATE \"C\"` column must return Exasol's code-point \
+         minimum: {answers:?}"
     );
     assert_eq!(cell(answers, "MAXKEY"), Some("a".to_string()));
     assert_eq!(
@@ -243,40 +291,58 @@ fn aggregation_reaches_postgresql_and_matches_the_mirror() {
     );
     assert_eq!(cell(answers, "MAXTAG"), Some("ab!".to_string()));
 
-    let grouped_query = |schema: &str| {
+    let grouped_query = |schema: &str, table: &str| {
         format!(
-            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"items\" \
+            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"{table}\" \
              GROUP BY \"category\" ORDER BY \"category\""
         )
     };
 
-    let grouped_statement = generated_statement(&grouped_query(VIRTUAL_SCHEMA));
+    let grouped_statement = generated_statement(&grouped_query(VIRTUAL_SCHEMA, ITEMS_C));
     assert!(
         grouped_statement.contains("GROUP BY") && grouped_statement.contains("COUNT(*)"),
         "a grouped aggregation must render both COUNT and GROUP BY: {grouped_statement}"
     );
 
-    let grouped_rows = assert_matches_mirror(grouped_query);
+    let grouped_rows = assert_matches_mirror(ITEMS_C, grouped_query);
     assert_eq!(grouped_rows.len(), CATEGORY_GROUPS);
+
+    let distinct_query = |schema: &str, table: &str| {
+        format!("SELECT COUNT(DISTINCT \"sort_key\") AS N FROM {schema}.\"{table}\"")
+    };
+
+    let distinct_statement = generated_statement(&distinct_query(VIRTUAL_SCHEMA, ITEMS_C));
+    assert!(
+        distinct_statement.contains("COUNT(DISTINCT \"sort_key\")")
+            && !distinct_statement.contains("COLLATE"),
+        "the distinct count must reach PostgreSQL bare: {distinct_statement}"
+    );
+
+    let distinct_rows = assert_matches_mirror(ITEMS_C, distinct_query);
+    assert_eq!(
+        cell(&distinct_rows[0], "N"),
+        Some("3".to_string()),
+        "'B', 'a', and 'C' are three distinct values: {distinct_rows:?}"
+    );
 }
 
 #[test]
 fn join_reaches_postgresql_and_matches_the_mirror() {
-    let query = |schema: &str| {
+    let query = |schema: &str, table: &str| {
         format!(
-            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"items\" i INNER JOIN \
+            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"{table}\" i INNER JOIN \
              {schema}.\"item_notes\" n ON i.\"id\" = n.\"item_id\" ORDER BY i.\"id\""
         )
     };
 
-    let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, ITEMS));
     assert!(
         statement.contains("INNER JOIN"),
         "the join must reach PostgreSQL as one statement rather than being withdrawn into two \
          scans: {statement}"
     );
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(ITEMS, query);
     assert_eq!(
         rows.len(),
         5,
@@ -292,25 +358,24 @@ fn join_reaches_postgresql_and_matches_the_mirror() {
 /// returns the five matched rows and looks correct until they are counted.
 #[test]
 fn full_outer_join_is_delegated_and_returns_both_unmatched_rows() {
-    let query = |schema: &str| {
+    let query = |schema: &str, table: &str| {
         format!(
-            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"items\" i FULL OUTER JOIN \
+            "SELECT i.\"id\" AS ID, n.\"note\" AS NOTE FROM {schema}.\"{table}\" i FULL OUTER JOIN \
              {schema}.\"item_notes\" n ON i.\"id\" = n.\"item_id\" ORDER BY i.\"id\", n.\"note\""
         )
     };
 
-    let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, ITEMS));
     assert!(
         statement.contains("FULL OUTER JOIN"),
         "the full outer join must be delegated whole: {statement}"
     );
     assert!(
-        !statement.contains(ORDERING_COLLATION),
-        "a join condition is an equality, which needs no collation and would cost the source \
-         every index on the key: {statement}"
+        !statement.contains("COLLATE"),
+        "the dialect renders no collation on a join condition: {statement}"
     );
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(ITEMS, query);
     assert_eq!(
         rows.len(),
         7,
@@ -337,99 +402,136 @@ fn full_outer_join_is_delegated_and_returns_both_unmatched_rows() {
     );
 }
 
-// --- collation placement ----------------------------------------------------
+// --- collation passthrough --------------------------------------------------
 
-/// The whole collation rule, read off the statements the deployed adapter
-/// actually generated: `COLLATE "C"` on the operands whose *order* decides an
-/// answer, and on nothing else.
+/// Over `items`, whose character columns take the database default
+/// `en_US.utf8`, a delegated ordering comparison, `MIN`, and `MAX` return
+/// PostgreSQL's own answer, because the dialect renders no collation and the
+/// column's collation decides. The values are `B`, `a`, `C` in the `sort_key`
+/// column: the locale orders them `a`, `B`, `C`, where Exasol's code-point
+/// order puts `B` first and `a` last.
 ///
-/// Absence is asserted as the absence of the word anywhere in the statement,
-/// not as the absence of one spelling. A suffix rendered on an equality or a
-/// grouping key costs the source every index on the column, and on a grouping
-/// key it makes PostgreSQL reject the statement outright once the select list
-/// also reads that column bare.
+/// `EXPLAIN VIRTUAL` proves the fragments reached PostgreSQL bare, and the
+/// rows prove the answer is the source's. The answer is asserted directly,
+/// not compared with the mirror, because the mirror holds Exasol's answer and
+/// the two are expected to differ.
 #[test]
-fn collation_is_rendered_only_where_ordering_decides_the_answer() {
-    let ordering = generated_statement(&format!(
-        "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"items\" WHERE \"sort_key\" < 'C'"
-    ));
-    assert!(
-        ordering.contains(&format!("\"sort_key\" {ORDERING_COLLATION}")),
-        "the compared column of an ordering comparison must carry the ordering collation: \
-         {ordering}"
+fn ordering_and_min_max_follow_the_columns_own_collation() {
+    let comparison = format!(
+        "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{ITEMS}\" WHERE \"sort_key\" < 'B' ORDER BY \"id\""
     );
+    let comparison_statement = generated_statement(&comparison);
     assert!(
-        ordering.contains(&format!("E'C' {ORDERING_COLLATION}")),
-        "both operands of an ordering comparison carry it, because Exasol normalizes `>` into \
-         `<` with the operands swapped and neither position reliably holds the column: {ordering}"
+        comparison_statement.contains("(\"sort_key\" < E'B')")
+            && !comparison_statement.contains("COLLATE"),
+        "the ordering comparison must reach PostgreSQL bare: {comparison_statement}"
+    );
+    let rows = stack::shared().exasol.query_rows(&comparison);
+    assert_eq!(
+        column_values(&rows, "id"),
+        vec!["2".to_string(), "5".to_string()],
+        "the en_US.utf8 locale orders 'a' before 'B', so the two rows holding 'a' come back, \
+         where Exasol's code-point order returns none: {rows:?}"
     );
 
+    let aggregates = format!(
+        "SELECT MIN(\"sort_key\") AS LO, MAX(\"sort_key\") AS HI FROM {VIRTUAL_SCHEMA}.\"{ITEMS}\""
+    );
     assert_eq!(
-        generated_statement(&format!(
-            "SELECT MIN(\"sort_key\"), MAX(\"tag\") FROM {VIRTUAL_SCHEMA}.\"items\""
-        )),
+        generated_statement(&aggregates),
+        format!("SELECT MIN(\"sort_key\"), MAX(\"sort_key\") FROM {QUALIFIED_ITEMS}"),
+        "MIN and MAX must reach PostgreSQL bare"
+    );
+    let rows = stack::shared().exasol.query_rows(&aggregates);
+    assert_eq!(cell(&rows[0], "LO"), Some("a".to_string()), "{rows:?}");
+    assert_eq!(cell(&rows[0], "HI"), Some("C".to_string()), "{rows:?}");
+}
+
+/// The whole rule, read off the statements the deployed adapter actually
+/// generated: no operand in any position carries a collation. Absence is
+/// asserted as the absence of the word anywhere in the statement, not of one
+/// spelling, over `items` and over `items_c` alike, since the declared
+/// collation of a column must not change what the dialect renders.
+#[test]
+fn no_generated_statement_carries_a_collation_keyword() {
+    for table in [ITEMS, ITEMS_C] {
+        for query in [
+            format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE \"sort_key\" < 'C'"),
+            format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE 'C' < \"sort_key\""),
+            format!(
+                "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE \"sort_key\" BETWEEN 'B' AND 'C'"
+            ),
+            format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE \"category\" = 'Widget'"),
+            format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE \"tag\" LIKE 'ab%'"),
+            format!(
+                "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE \"category\" IN ('cafe', 'Widget')"
+            ),
+            format!(
+                "SELECT \"category\", COUNT(*) FROM {VIRTUAL_SCHEMA}.\"{table}\" GROUP BY \"category\""
+            ),
+            format!("SELECT COUNT(DISTINCT \"category\") FROM {VIRTUAL_SCHEMA}.\"{table}\""),
+            format!(
+                "SELECT MIN(\"sort_key\"), MAX(\"tag\") FROM {VIRTUAL_SCHEMA}.\"{table}\""
+            ),
+            format!(
+                "SELECT i.\"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" i INNER JOIN \
+                 {VIRTUAL_SCHEMA}.\"item_notes\" n ON i.\"id\" = n.\"item_id\" \
+                 WHERE i.\"sort_key\" < 'C'"
+            ),
+        ] {
+            for statement in generated_statements(&query) {
+                assert!(
+                    !statement.contains("COLLATE"),
+                    "no statement may carry a collation keyword, whatever the column declares; \
+                     `{query}` generated: {statement}"
+                );
+            }
+        }
+    }
+}
+
+/// `"sort_key" || ''` is an expression the dialect advertises no capability
+/// for, so Exasol keeps the comparison and the `MIN` and evaluates them
+/// itself over the rows PostgreSQL returns, under its own code-point order.
+/// That is the remedy for a column whose source collation is not what the
+/// user wants, and it needs no change at the source.
+///
+/// `EXPLAIN VIRTUAL` proves the fragments stayed in Exasol, and the rows
+/// prove the answer is Exasol's: no row holds `a` for the comparison, and
+/// `MIN` is `B`, where the same queries over the bare column return PostgreSQL's
+/// locale answer.
+#[test]
+fn an_ordering_comparison_over_a_wrapped_operand_is_evaluated_by_exasol() {
+    let comparison = |schema: &str, table: &str| {
         format!(
-            "SELECT MIN(\"sort_key\" {ORDERING_COLLATION}), MAX(\"tag\" {ORDERING_COLLATION}) \
-             FROM {QUALIFIED_ITEMS}"
-        ),
-        "MIN and MAX return the value their operand's collation sorts first or last, so a \
-         character argument of either carries the ordering collation"
-    );
-
-    let equality = generated_statement(&format!(
-        "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"items\" WHERE \"category\" = 'Widget'"
-    ));
+            "SELECT \"id\", \"sort_key\" FROM {schema}.\"{table}\" \
+             WHERE \"sort_key\" || '' < 'B' ORDER BY \"id\""
+        )
+    };
+    let comparison_statement = generated_statement(&comparison(VIRTUAL_SCHEMA, ITEMS));
     assert!(
-        equality.contains("\"category\"") && equality.contains("E'Widget'"),
-        "the equality must reach PostgreSQL over the column and the literal: {equality}"
+        !comparison_statement.contains('<') && !comparison_statement.contains("WHERE"),
+        "the comparison over the wrapped operand must not reach PostgreSQL: \
+         {comparison_statement}"
     );
+    let rows = assert_matches_mirror(ITEMS, comparison);
     assert!(
-        !equality.contains("COLLATE"),
-        "every built-in PostgreSQL collation is deterministic, so equality already compares \
-         bytes and a suffix would change no answer: {equality}"
+        column_values(&rows, "sort_key")
+            .iter()
+            .all(|value| value != "a"),
+        "Exasol's code-point order puts no 'a' before 'B': {rows:?}"
     );
 
-    let like = generated_statement(&format!(
-        "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"items\" WHERE \"tag\" LIKE 'ab%'"
-    ));
+    let minimum = |schema: &str, table: &str| {
+        format!("SELECT MIN(\"sort_key\" || '') AS LO FROM {schema}.\"{table}\"")
+    };
+    let minimum_statement = generated_statement(&minimum(VIRTUAL_SCHEMA, ITEMS));
     assert!(
-        like.contains("LIKE") && like.contains("E'ab%'"),
-        "the LIKE must reach PostgreSQL: {like}"
+        !minimum_statement.contains("MIN("),
+        "the MIN over the wrapped operand must not reach PostgreSQL: {minimum_statement}"
     );
-    assert!(
-        !like.contains("COLLATE"),
-        "PostgreSQL's LIKE compares character by character rather than by collation weight: \
-         {like}"
-    );
-
-    assert_eq!(
-        generated_statement(&format!(
-            "SELECT \"category\", COUNT(*) FROM {VIRTUAL_SCHEMA}.\"items\" GROUP BY \"category\""
-        )),
-        format!("SELECT \"category\", COUNT(*) FROM {QUALIFIED_ITEMS} GROUP BY \"category\""),
-        "the grouping key and its select-list occurrence must both render bare, and identically: \
-         a collation on the key alone is what makes PostgreSQL reject the statement for a \
-         nonaggregated column"
-    );
-
-    assert_eq!(
-        generated_statement(&format!(
-            "SELECT COUNT(DISTINCT \"category\") FROM {VIRTUAL_SCHEMA}.\"items\""
-        )),
-        format!("SELECT COUNT(DISTINCT \"category\") FROM {QUALIFIED_ITEMS}"),
-        "DISTINCT reduces by equality, which is already Exasol's, so its operand renders bare"
-    );
-
-    // The two shapes this test asserts render *without* a collation are the
-    // two whose answer a missing one would not obviously change, so each also
-    // has to produce Exasol's own rows: a bare LIKE and a collated MIN/MAX are
-    // only correct while PostgreSQL answers them the way Exasol does.
-    assert_matches_mirror(|schema| {
-        format!("SELECT \"id\" FROM {schema}.\"items\" WHERE \"tag\" LIKE 'ab%' ORDER BY \"id\"")
-    });
-    assert_matches_mirror(|schema| {
-        format!("SELECT MIN(\"sort_key\") AS LO, MAX(\"sort_key\") AS HI FROM {schema}.\"items\"")
-    });
+    let rows = assert_matches_mirror(ITEMS, minimum);
+    assert_eq!(cell(&rows[0], "LO"), Some("B".to_string()), "{rows:?}");
 }
 
 /// The answer the bare grouping key and the bare `DISTINCT` operand have to
@@ -439,14 +541,14 @@ fn collation_is_rendered_only_where_ordering_decides_the_answer() {
 /// it.
 #[test]
 fn uncollated_grouping_and_distinct_return_the_mirrors_group_count() {
-    let grouped_query = |schema: &str| {
+    let grouped_query = |schema: &str, table: &str| {
         format!(
-            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"items\" \
+            "SELECT \"category\" AS CATEGORY, COUNT(*) AS N FROM {schema}.\"{table}\" \
              GROUP BY \"category\" ORDER BY \"category\""
         )
     };
 
-    let grouped_statement = generated_statement(&grouped_query(VIRTUAL_SCHEMA));
+    let grouped_statement = generated_statement(&grouped_query(VIRTUAL_SCHEMA, ITEMS));
     assert!(
         grouped_statement.contains("GROUP BY \"category\"")
             && !grouped_statement.contains("COLLATE"),
@@ -455,7 +557,7 @@ fn uncollated_grouping_and_distinct_return_the_mirrors_group_count() {
          mirror whatever the dialect rendered: {grouped_statement}"
     );
 
-    let rows = assert_matches_mirror(grouped_query);
+    let rows = assert_matches_mirror(ITEMS, grouped_query);
     assert_eq!(
         rows.len(),
         CATEGORY_GROUPS,
@@ -480,10 +582,11 @@ fn uncollated_grouping_and_distinct_return_the_mirrors_group_count() {
         );
     }
 
-    let distinct_query =
-        |schema: &str| format!("SELECT COUNT(DISTINCT \"category\") AS N FROM {schema}.\"items\"");
+    let distinct_query = |schema: &str, table: &str| {
+        format!("SELECT COUNT(DISTINCT \"category\") AS N FROM {schema}.\"{table}\"")
+    };
 
-    let distinct_statement = generated_statement(&distinct_query(VIRTUAL_SCHEMA));
+    let distinct_statement = generated_statement(&distinct_query(VIRTUAL_SCHEMA, ITEMS));
     assert!(
         distinct_statement.contains("COUNT(DISTINCT \"category\")")
             && !distinct_statement.contains("COLLATE"),
@@ -491,44 +594,39 @@ fn uncollated_grouping_and_distinct_return_the_mirrors_group_count() {
          reached it, and its operand must render bare: {distinct_statement}"
     );
 
-    let distinct_rows = assert_matches_mirror(distinct_query);
+    let distinct_rows = assert_matches_mirror(ITEMS, distinct_query);
     assert_eq!(
         cell(&distinct_rows[0], "N"),
         Some(CATEGORY_GROUPS.to_string())
     );
 }
 
-/// The one shape the MySQL dialect must refuse and this one renders. MySQL
-/// rejects it as error 1055, because its grouping key carries a collation the
-/// select-list occurrence does not; PostgreSQL's analogue fires only when the
-/// grouping key itself is collated, and this dialect leaves it bare.
+/// A select-list predicate reading the grouped character column is delegated
+/// whole. The grouping key and the predicate's operand render as the same bare
+/// column, which is what satisfies PostgreSQL's full-group-by rule; over
+/// `items_c` the predicate's answer is Exasol's.
 ///
 /// A failure here reporting PostgreSQL's own "must appear in the GROUP BY
-/// clause" is not a fixture problem: it means the dialect put a collation
-/// somewhere that made the grouping key and its select-list occurrence stop
-/// being the same expression.
+/// clause" is not a fixture problem: it means the dialect rendered the grouping
+/// key and its select-list occurrence as two different expressions.
 #[test]
 fn select_list_predicate_over_the_grouped_character_column_delegates_and_matches_the_mirror() {
-    let query = |schema: &str| {
+    let query = |schema: &str, table: &str| {
         format!(
             "SELECT \"category\" AS CATEGORY, \"category\" < 'm' AS UNDER_M FROM \
-             {schema}.\"items\" GROUP BY \"category\" ORDER BY \"category\""
+             {schema}.\"{table}\" GROUP BY \"category\" ORDER BY \"category\""
         )
     };
 
-    let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, ITEMS_C));
     assert!(
-        statement.contains("GROUP BY \"category\""),
-        "the grouping key must render bare, which is what leaves it the same expression as its \
-         select-list occurrence: {statement}"
-    );
-    assert!(
-        statement.contains(&format!("\"category\" {ORDERING_COLLATION}")),
-        "the select-list predicate is an ordering comparison, so its operand carries the \
-         ordering collation even though the key it reads does not: {statement}"
+        statement.contains("GROUP BY \"category\"")
+            && statement.contains("(\"category\" < E'm')")
+            && !statement.contains("COLLATE"),
+        "the grouping key and the select-list predicate must render bare: {statement}"
     );
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(ITEMS_C, query);
     assert_eq!(rows.len(), CATEGORY_GROUPS);
     let under_m = |category: &str| {
         rows.iter()
@@ -560,10 +658,11 @@ fn select_list_predicate_over_the_grouped_character_column_delegates_and_matches
 #[test]
 fn avg_and_sum_are_withdrawn_and_match_the_mirror() {
     for function in ["AVG", "SUM"] {
-        let query =
-            |schema: &str| format!("SELECT {function}(\"id\") AS VAL FROM {schema}.\"items\"");
+        let query = |schema: &str, table: &str| {
+            format!("SELECT {function}(\"id\") AS VAL FROM {schema}.\"{table}\"")
+        };
 
-        for statement in generated_statements(&query(VIRTUAL_SCHEMA)) {
+        for statement in generated_statements(&query(VIRTUAL_SCHEMA, ITEMS)) {
             assert!(
                 !statement.to_uppercase().contains(function),
                 "no generated statement may carry a delegated {function}, since this release \
@@ -571,7 +670,7 @@ fn avg_and_sum_are_withdrawn_and_match_the_mirror() {
             );
         }
 
-        let rows = assert_matches_mirror(query);
+        let rows = assert_matches_mirror(ITEMS, query);
         assert_eq!(
             rows.len(),
             1,
@@ -601,15 +700,15 @@ fn avg_and_sum_are_withdrawn_and_match_the_mirror() {
 
 #[test]
 fn two_column_group_by_is_not_delegated() {
-    let query = |schema: &str| {
+    let query = |schema: &str, table: &str| {
         format!(
             "SELECT \"category\" AS CATEGORY, \"sort_key\" AS SORTKEY, COUNT(*) AS N FROM \
-             {schema}.\"items\" GROUP BY \"category\", \"sort_key\" \
+             {schema}.\"{table}\" GROUP BY \"category\", \"sort_key\" \
              ORDER BY \"category\", \"sort_key\""
         )
     };
 
-    for statement in generated_statements(&query(VIRTUAL_SCHEMA)) {
+    for statement in generated_statements(&query(VIRTUAL_SCHEMA, ITEMS)) {
         assert!(
             !statement.contains("GROUP BY") && !statement.to_uppercase().contains("COUNT"),
             "a two-column GROUP BY must be withdrawn whole, because this release advertises no \
@@ -617,7 +716,7 @@ fn two_column_group_by_is_not_delegated() {
         );
     }
 
-    let rows = assert_matches_mirror(query);
+    let rows = assert_matches_mirror(ITEMS, query);
     assert_eq!(
         rows.len(),
         ITEM_ROWS,
@@ -629,9 +728,11 @@ fn two_column_group_by_is_not_delegated() {
 #[test]
 fn no_generated_statement_carries_order_limit_or_offset() {
     for suffix in ["ORDER BY \"id\"", "LIMIT 2", "ORDER BY \"id\" LIMIT 2"] {
-        let query = move |schema: &str| format!("SELECT \"id\" FROM {schema}.\"items\" {suffix}");
+        let query = move |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" {suffix}")
+        };
 
-        for statement in generated_statements(&query(VIRTUAL_SCHEMA)) {
+        for statement in generated_statements(&query(VIRTUAL_SCHEMA, ITEMS)) {
             let upper = statement.to_uppercase();
             assert!(
                 !upper.contains("ORDER BY"),
@@ -652,9 +753,10 @@ fn no_generated_statement_carries_order_limit_or_offset() {
         }
     }
 
-    let limited =
-        |schema: &str| format!("SELECT \"id\" FROM {schema}.\"items\" ORDER BY \"id\" LIMIT 2");
-    let rows = assert_matches_mirror(limited);
+    let limited = |schema: &str, table: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{table}\" ORDER BY \"id\" LIMIT 2")
+    };
+    let rows = assert_matches_mirror(ITEMS, limited);
     assert_eq!(
         column_values(&rows, "id"),
         vec!["1".to_string(), "2".to_string()],
@@ -1241,19 +1343,27 @@ fn column_names(schema: &str, table: &str) -> Vec<String> {
         .collect()
 }
 
-/// Runs `query(schema)` against the virtual schema and against its local mirror
-/// and asserts the two answers are identical.
+/// Runs `query(schema, table)` against `virtual_table` of the virtual schema
+/// and against the mirror's `items`, and asserts the two answers are identical.
 ///
 /// The two sides are independent computations — PostgreSQL evaluates one,
 /// Exasol the other — so their agreement is the differential proof this tier
 /// relies on: a semantic gap between the two engines shows up as a difference
-/// rather than having to be predicted case by case.
+/// rather than having to be predicted case by case. The query closure receives
+/// the table name beside the schema, so the virtual side can read a table the
+/// mirror has no counterpart of its own for — the mirror holds `items`, and
+/// `items_c` is the same rows under a different source collation.
 fn assert_matches_mirror(
-    query: impl Fn(&str) -> String,
+    virtual_table: &str,
+    query: impl Fn(&str, &str) -> String,
 ) -> Vec<serde_json::Map<String, serde_json::Value>> {
     let stack = stack::shared();
-    let virtual_rows = stack.exasol.query_rows(&query(VIRTUAL_SCHEMA));
-    let mirror_rows = stack.exasol.query_rows(&query(postgres_mirror::SCHEMA));
+    let virtual_rows = stack
+        .exasol
+        .query_rows(&query(VIRTUAL_SCHEMA, virtual_table));
+    let mirror_rows = stack
+        .exasol
+        .query_rows(&query(postgres_mirror::SCHEMA, ITEMS));
     assert_eq!(
         virtual_rows, mirror_rows,
         "the delegated query must return exactly the rows the local Exasol mirror returns: \
