@@ -32,7 +32,10 @@ The adapter installs the ADBC driver itself. It fetches the driver from the [ADB
 
 ## Quick start
 
-Install the shared library and create the scripts once. See [Install & Set Up](docs/install.md). Then create a virtual schema for a MySQL database and query it like any other Exasol schema:
+Install the shared library and create the scripts once. See [Install & Set Up](docs/install.md). Then create a virtual schema for a MySQL database and query it like any other Exasol schema.
+
+> [!NOTE]
+> This example uses MySQL. PostgreSQL and Trino work the same way. See [Create a Virtual Schema](docs/create-virtual-schema.md).
 
 ```sql
 CREATE OR REPLACE CONNECTION MYSQL_CONNECTION
@@ -45,8 +48,6 @@ CREATE VIRTUAL SCHEMA MYSQLVS USING ADBC_VS.ADBC_ADAPTER WITH
 
 SELECT * FROM MYSQLVS."customers";
 ```
-
-PostgreSQL and Trino work the same way. See [Create a Virtual Schema](docs/create-virtual-schema.md).
 
 ---
 
