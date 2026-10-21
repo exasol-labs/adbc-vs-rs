@@ -54,8 +54,8 @@ PostgreSQL and Trino work the same way. See [Create a Virtual Schema](docs/creat
 
 See [**docs/**](docs/index.md):
 
-- [Install & Set Up](docs/install.md) - Requirements, the Script Language Container, the scripts, and the driver
-  - [Air-gapped install](docs/install.md#install-the-driver-yourself)
+- [Install & Set Up](docs/install.md) - Requirements, scripts, drivers
+- [Air-gapped install](docs/install.md#install-the-driver-yourself) - Deployments without internet access
 - [Create a Virtual Schema](docs/create-virtual-schema.md) - Connections, properties, MySQL, PostgreSQL, and Trino
 - [How Does It Work](docs/how-it-works.md) - The adapter and the scan UDF, and the [limits](docs/how-it-works.md#limits)
 
