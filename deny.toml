@@ -49,10 +49,15 @@ allow-workspace = true
 [advisories]
 # Every ignore entry MUST be preceded by a comment giving the ISO-8601 date
 # the exception was granted and the condition under which it is re-evaluated
-# (see policy_test.rs::advisory_ignores_are_dated). None are needed yet: the
-# `serde_yaml` RUSTSEC-2024-0370 advisory was avoided outright by depending
-# on `serde_yaml_ng` instead (decision-log [11]).
-ignore = []
+# (see policy_test.rs::advisory_ignores_are_dated). The `serde_yaml`
+# RUSTSEC-2024-0370 advisory was avoided outright by depending on
+# `serde_yaml_ng` instead (decision-log [11]).
+ignore = [
+    # unsafe-libyaml is unmaintained with no safe upgrade. Only serde_yaml_ng
+    # reaches it, to parse the registry index fetched over verified TLS.
+    # 2026-10-22 re-evaluate when serde_yaml_ng drops unsafe-libyaml.
+    "RUSTSEC-2024-0449",
+]
 
 [sources]
 unknown-registry = "deny"
