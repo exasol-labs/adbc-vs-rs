@@ -1,6 +1,6 @@
 # `adbc-vs-rs` Documentation
 
-`adbc-vs-rs` is an Exasol Virtual Schema for MySQL, PostgreSQL, and Trino. It reads the source data through ADBC and returns it to Exasol as Apache Arrow record batches.
+`adbc-vs-rs` is an Exasol Virtual Schema for ADBC-compatible databases and query engines. It reads the source data through ADBC and returns it to Exasol as Apache Arrow record batches.
 
 ## Documentation
 

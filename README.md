@@ -8,7 +8,7 @@
 [![Exasol|database](https://img.shields.io/badge/Exasol-database-blue.svg)](https://www.exasol.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-**An Exasol Virtual Schema that queries ADBC-based databases and query engines and moves the data as Apache Arrow record batches.**
+**An Exasol Virtual Schema that queries ADBC-based databases and query engines, and moves the data as Apache Arrow record batches.**
 
 </div>
 
@@ -17,7 +17,7 @@
 ## What this is
 
 > [!NOTE]
-> [Exasol](https://www.exasol.com) is a high-performance analytics database built for agents, speed and scalability. You can try it with [Exasol Personal](https://github.com/exasol/exasol-personal), the [SaaS free trial](https://cloud.exasol.com), or a local [Docker image](https://hub.docker.com/r/exasol/docker-db).
+> [Exasol](https://www.exasol.com) is a high-performance analytics database built for agents, speed, and scalability. You can try it with [Exasol Personal](https://github.com/exasol/exasol-personal), the [SaaS free trial](https://cloud.exasol.com), or a local [Docker image](https://hub.docker.com/r/exasol/docker-db).
 
 `adbc-vs-rs` is an Exasol [Virtual Schema](https://docs.exasol.com/db/latest/database_concepts/virtual_schemas.htm). It shows the tables and views of a MySQL, PostgreSQL, or Trino database as virtual tables in Exasol. You query the source with Exasol SQL and copy no data first.
 
@@ -56,15 +56,13 @@ SELECT * FROM MYSQLVS."customers";
 See [**docs/**](docs/index.md):
 
 - [Install & Set Up](docs/install.md) - Requirements, scripts, drivers
-- [Air-gapped install](docs/install.md#install-the-driver-yourself) - Deployments without internet access
-- [Create a Virtual Schema](docs/create-virtual-schema.md) - Connections, properties, MySQL, PostgreSQL, and Trino
+- [Air-gapped environments](docs/install.md#install-the-driver-yourself) - Deployments without internet access
+- [Create a Virtual Schema](docs/create-virtual-schema.md) - Connections, properties, and specifics for each database
 - [How Does It Work](docs/how-it-works.md) - The adapter and the scan UDF, and the [limits](docs/how-it-works.md#limits)
 
 ---
 
-## Roadmap
-
-ADBC-backed databases supported:
+## Supported databases
 
 - [x] MySQL
 - [x] PostgreSQL

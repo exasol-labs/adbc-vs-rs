@@ -30,10 +30,7 @@ The adapter keeps no state between calls. The scan UDF is the only part that rea
 
 - `adbc-vs-rs` is read-only. `INSERT`, `UPDATE`, and `DELETE` are not supported on a virtual schema.
 - `adbc-vs-rs` does not cache. Every query runs against the source.
-- The supported sources are MySQL, PostgreSQL, and Trino. MySQL is tested with version 8.4.
 - `adbc-vs-rs` supports Linux x86_64 only. The release library is x86_64, and the automatic install requests only the `linux_amd64` driver. The registry also has `linux_arm64` drivers. On ARM, `adbc-vs-rs` does not run.
-- One PostgreSQL virtual schema shows one database and its `public` schema. Other schemas are not visible.
-- A Trino address must have a catalog and a schema.
 - Columns and tables with a type that has no Exasol match are left out.
 - `adbc-vs-rs` does not bundle ADBC drivers. The drivers come from the registry or from you.
 
@@ -47,22 +44,38 @@ Exasol runs `ORDER BY`, `LIMIT`, and `OFFSET` on the returned rows. Non-equi joi
 
 `adbc-vs-rs` renders no collation, and Exasol accepts no `COLLATE` in a query. A delegated comparison uses the collation that the source applies to the column. This applies to character comparison, `LIKE`, `IN`, grouping keys, `DISTINCT`, `MIN`, `MAX`, and join keys. `ORDER BY` runs in Exasol and sorts by code point.
 
-A source collation can ignore case or accents. MySQL does this by default with `utf8mb4_0900_ai_ci`. The result can then differ from the result in Exasol. A group, or a `MIN` or `MAX` tie, shows one of the equal spellings. The source chooses which one.
+A source collation can ignore case or accents. The result can then differ from the result in Exasol. A group, or a `MIN` or `MAX` tie, shows one of the equal spellings. The source chooses which one.
 
 To get the Exasol behavior, use one of two options:
 
-1. Declare a binary collation at the source, on the column or in a view that the virtual schema shows. Use `utf8mb4_0900_bin` on MySQL, or `"C"` on PostgreSQL. The query stays at the source. `utf8mb4_0900_bin` needs MySQL 8.0.17 or later. MariaDB has no equal collation.
+1. Declare a binary collation at the source, on the column or in a view that the virtual schema shows. The query stays at the source. The binary collation for each database is in [Database details](#database-details).
 2. Wrap the operand in an expression that `adbc-vs-rs` does not send, for example `"name" || ''`. Exasol then runs the comparison. This is slower, because Exasol fetches rows that the source could have removed.
-
-### Source details
-
-- PostgreSQL before version 18: a delegated `LIKE` on a column with a nondeterministic collation fails at the source.
-- Trino: a backslash in a `LIKE` pattern is an ordinary character, unless the query has an `ESCAPE` clause. Exasol then runs that predicate.
 
 ### Network and install
 
 - Exasol nodes must reach the source database on the network. A Docker service name does not resolve inside a UDF, so use an IP address or a DNS name that the nodes can resolve.
 - The automatic driver install needs outbound HTTPS to `dbc-cdn.columnar.tech`. The size limits are 4 MiB for the registry index, 256 MiB for a download, and 512 MiB for an unpacked driver.
 - The automatic install does not check a checksum or a signature.
-- Each source has a supported driver version range. `adbc-vs-rs` installs the newest version in that range: MySQL `>=0.6.0, <0.7.0`, PostgreSQL `>=1.12.0, <2.0.0`, Trino `>=0.5.3, <0.6.0`. A driver you install yourself is not checked.
+- Each database has a supported driver version range. `adbc-vs-rs` installs the newest version in that range. A driver that you install yourself is not checked.
 - The shared library works only with the SLC that has the matching version. See [Install & Set Up](install.md#1-install-the-script-language-container).
+
+### Database details
+
+#### MySQL
+
+- Tested with MySQL 8.4.
+- The default collation `utf8mb4_0900_ai_ci` ignores case and accents. Use `utf8mb4_0900_bin` for the Exasol behavior. It needs MySQL 8.0.17 or later. MariaDB has no equal collation.
+- Driver version range: `>=0.6.0, <0.7.0`.
+
+#### PostgreSQL
+
+- One virtual schema shows one database and its `public` schema. Other schemas are not visible.
+- Use the collation `"C"` for the Exasol behavior.
+- Before version 18, a delegated `LIKE` on a column with a nondeterministic collation fails at the source.
+- Driver version range: `>=1.12.0, <2.0.0`.
+
+#### Trino
+
+- The address must have a catalog and a schema.
+- A backslash in a `LIKE` pattern is an ordinary character, unless the query has an `ESCAPE` clause. Exasol then runs that predicate.
+- Driver version range: `>=0.5.3, <0.6.0`.

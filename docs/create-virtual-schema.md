@@ -22,9 +22,23 @@ A virtual schema needs two things:
 
 If you change a property later, use `ALTER VIRTUAL SCHEMA ... SET`. To read the source metadata again, use `ALTER VIRTUAL SCHEMA ... REFRESH`.
 
-## MySQL
+## Table and column names
 
-The address is `mysql://host:port/database`. The `CONNECTION` user and password are the credential for the source.
+Exasol keeps the case of the source names. Put the names in double quotes in your query, for example `MYSQLVS."customers"` for a schema named `MYSQLVS`.
+
+`adbc-vs-rs` leaves out a column that has no matching Exasol type. It leaves out a table that has no usable column. It records each omission in the `adapterNotes` of the schema.
+
+## Errors
+
+An error message never contains a password or a connection string. If the source is not reachable, the message names the source host and database.
+
+## Databases
+
+Each database has its own address form and a few details. The `CREATE VIRTUAL SCHEMA` statement is the same for all of them, except for the `DRIVER` value.
+
+### MySQL
+
+The address is `mysql://host:port/database`. The user and the password of the `CONNECTION` object are the credential for the source.
 
 ```sql
 CREATE OR REPLACE CONNECTION MYSQL_CONNECTION
@@ -38,7 +52,7 @@ CREATE VIRTUAL SCHEMA MYSQLVS USING ADBC_VS.ADBC_ADAPTER WITH
 SELECT * FROM MYSQLVS."customers";
 ```
 
-## PostgreSQL
+### PostgreSQL
 
 The address is `postgresql://host:port/database`. The virtual schema shows the `public` schema of that database.
 
@@ -52,9 +66,9 @@ CREATE VIRTUAL SCHEMA PGVS USING ADBC_VS.ADBC_ADAPTER WITH
   CONNECTION_NAME = 'PG_CONNECTION';
 ```
 
-## Trino
+### Trino
 
-The address is `trino://host[:port]/<catalog>/<schema>[?parameters]`. Put the user and the password in the `CONNECTION` fields, not in the address.
+The address is `trino://host[:port]/<catalog>/<schema>[?parameters]`. Put the user and the password in the fields of the `CONNECTION` object, not in the address.
 
 ```sql
 CREATE OR REPLACE CONNECTION TRINO_CONNECTION
@@ -68,15 +82,7 @@ CREATE VIRTUAL SCHEMA TRINOVS USING ADBC_VS.ADBC_ADAPTER WITH
 
 A Trino server that requires a password accepts it over HTTPS only. The driver uses HTTPS by default. If the server has a self-signed certificate, add `?SSLVerification=NONE` to the address.
 
-## Table and column names
-
-Exasol keeps the case of the source names. Put the names in double quotes in your query, for example `MYSQLVS."customers"`.
-
-`adbc-vs-rs` leaves out a column that has no matching Exasol type. It leaves out a table that has no usable column. It records each omission in the `adapterNotes` of the schema.
-
-## Errors
-
-An error message never contains a password or a connection string. If the source is not reachable, the message names the source host and database. For Trino, a wrong password is found only when the first statement runs. That message names the catalog and the schema, but not the host.
+Trino finds a wrong password only when the first statement runs. The error message then names the catalog and the schema, but not the host.
 
 ## Next
 
