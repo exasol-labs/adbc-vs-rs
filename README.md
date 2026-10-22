@@ -8,7 +8,7 @@
 [![Exasol|database](https://img.shields.io/badge/Exasol-database-blue.svg)](https://www.exasol.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 
-**An Exasol Virtual Schema that queries ADBC-based databases and query engines, and moves the data as Apache Arrow record batches.**
+**An Exasol Virtual Schema that queries ADBC-based databases and query engines, and moves the data as Apache Arrow record batches. Written in Rust 🦀**
 
 </div>
 
@@ -21,7 +21,7 @@
 
 `adbc-vs-rs` is an Exasol [Virtual Schema](https://docs.exasol.com/db/latest/database_concepts/virtual_schemas.htm). It shows the tables and views of a MySQL, PostgreSQL, or Trino database as virtual tables in Exasol. You query the source with Exasol SQL and copy no data first.
 
-Exasol's JVM Virtual Schemas read the source through JDBC, one row at a time. `adbc-vs-rs` reads the source through [ADBC](https://arrow.apache.org/adbc/) and returns Arrow record batches without a row-by-row step.
+`adbc-vs-rs` connects to the source through an [ADBC](https://arrow.apache.org/adbc/) driver and returns Arrow record batches without a row-by-row step.
 
 The adapter installs the ADBC driver itself. It fetches the driver from the [ADBC Driver Foundry](https://github.com/adbc-drivers) registry and writes it to [BucketFS](https://docs.exasol.com/db/latest/administration/on-premise/bucketfs/bucketfs.htm). On a cluster without internet access, you upload the driver to BucketFS yourself.
 
