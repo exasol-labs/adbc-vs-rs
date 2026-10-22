@@ -41,7 +41,7 @@ Read the existing value first with `SELECT SYSTEM_VALUE FROM EXA_PARAMETERS WHER
 
 ## 2. Upload the shared library
 
-1. Download `adbc-vs.tar.gz` from the [GitHub releases](https://github.com/exasol-labs/adbc-vs-rs/releases) and unpack it. It holds `udf/libadbc_vs_adapter.so`.
+1. Download `adbc-vs.tar.gz` from the [GitHub releases](https://github.com/exasol-labs/adbc-vs-rs/releases) and unpack it. It holds `udf/libadbc_vs_adapter.so` and `THIRD-PARTY-LICENSES.md`. Only the library goes to BucketFS.
 2. Upload the library to BucketFS:
 
 ```bash
@@ -70,7 +70,7 @@ CREATE OR REPLACE RUST SCALAR SCRIPT ADBC_VS.ADBC_SCAN(scan_spec VARCHAR(2000000
 
 ### Let `adbc-vs-rs` install the driver
 
-`adbc-vs-rs` reads the driver registry at `dbc-cdn.columnar.tech`. It downloads the driver for your platform and writes it to BucketFS at `adbc-drivers/<driver>/<version>/<library>`. It does this only if that version is not on BucketFS yet.
+`adbc-vs-rs` reads the [ADBC Driver Registry](https://dbc-cdn.columnar.tech) at `dbc-cdn.columnar.tech` directly over HTTPS. It does not call `dbc`. It downloads the driver for your platform and writes it to BucketFS at `adbc-drivers/<driver>/<version>/<library>`. It does this only if that version is not on BucketFS yet.
 
 The write needs a BucketFS write credential. Store it in a `CONNECTION` object with the reserved name `ADBC_VS_BUCKETFS`. The address is the HTTPS address of the BucketFS service, with the bucket name. The user and the password are the BucketFS write user and its password.
 

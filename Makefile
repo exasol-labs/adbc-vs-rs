@@ -161,7 +161,8 @@ bench-summary:
 # Both targets back the `release` CI job. release-tarball is a real-file
 # target keyed on the .so, like cross-udf-build itself, so re-running it
 # without a new .so is a no-op. third-party-licenses is always re-run: it
-# reflects whatever Cargo.lock currently resolves to.
+# reflects whatever Cargo.lock currently resolves to. release-tarball packs
+# its output, so run third-party-licenses first.
 
 DIST_DIR := dist
 RELEASE_TARBALL := $(DIST_DIR)/adbc-vs.tar.gz
@@ -170,7 +171,8 @@ $(RELEASE_TARBALL): $(SO_FILE)
 	mkdir -p $(DIST_DIR)/pkg/udf
 	cp $(SO_FILE) $(DIST_DIR)/pkg/udf/
 	chmod 755 $(DIST_DIR)/pkg/udf/libadbc_vs_adapter.so
-	tar -czf $(RELEASE_TARBALL) -C $(DIST_DIR)/pkg udf
+	cp $(DIST_DIR)/THIRD-PARTY-LICENSES.md $(DIST_DIR)/pkg/
+	tar -czf $(RELEASE_TARBALL) -C $(DIST_DIR)/pkg udf THIRD-PARTY-LICENSES.md
 
 .PHONY: release-tarball
 release-tarball: $(RELEASE_TARBALL)

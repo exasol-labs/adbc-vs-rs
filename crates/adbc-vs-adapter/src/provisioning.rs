@@ -971,12 +971,17 @@ fn unreadable_package(url: &str, error: &dyn fmt::Display) -> ProvisioningError 
     }
 }
 
+/// Identifies adbc-vs-rs to the registry operator. Unversioned on purpose;
+/// the format is a draft pending the operator's request.
+const REGISTRY_USER_AGENT: &str = "exasol:adbc-vs-rs";
+
 /// The client that reaches the public registry.
 ///
 /// It verifies the server certificate against the root store compiled into the
 /// binary, and takes no argument that could relax that.
 fn registry_client() -> Result<Client, ProvisioningError> {
     Client::builder()
+        .user_agent(REGISTRY_USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(TRANSFER_TIMEOUT)
         .build()

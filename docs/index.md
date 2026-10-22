@@ -15,4 +15,5 @@
 - [Exasol CREATE CONNECTION](https://docs.exasol.com/db/latest/sql/create_connection.htm)
 - [Exasol UDF scripts](https://docs.exasol.com/db/latest/database_concepts/udf_scripts.htm)
 - [Apache Arrow ADBC](https://arrow.apache.org/adbc/)
-- [ADBC Driver Foundry](https://github.com/adbc-drivers)
+- [ADBC Driver Foundry](https://adbc-drivers.org)
+- [ADBC Driver Registry](https://dbc-cdn.columnar.tech) and [dbc](https://github.com/columnar-tech/dbc), from [Columnar](https://github.com/columnar-tech)

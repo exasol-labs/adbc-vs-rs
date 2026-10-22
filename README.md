@@ -23,7 +23,7 @@
 
 `adbc-vs-rs` connects to the source through an [ADBC](https://arrow.apache.org/adbc/) driver and returns Arrow record batches without a row-by-row step.
 
-The adapter installs the ADBC driver itself. It fetches the driver from the [ADBC Driver Foundry](https://github.com/adbc-drivers) registry and writes it to [BucketFS](https://docs.exasol.com/db/latest/administration/on-premise/bucketfs/bucketfs.htm). On a cluster without internet access, you upload the driver to BucketFS yourself.
+The adapter installs the ADBC driver itself. It downloads ADBC drivers from the [ADBC Driver Registry](https://dbc-cdn.columnar.tech), the same one used by [dbc](https://github.com/columnar-tech/dbc). [Columnar](https://github.com/columnar-tech) runs the registry. The drivers themselves are developed by the [ADBC Driver Foundry](https://adbc-drivers.org) and the [Apache Arrow ADBC](https://github.com/apache/arrow-adbc) project. The adapter writes the driver to [BucketFS](https://docs.exasol.com/db/latest/administration/on-premise/bucketfs/bucketfs.htm). On a cluster without internet access, you upload the driver to BucketFS yourself.
 
 - **SQL pushdown.** Column selection, filters, aggregation, and equi and outer joins run at the source.
 - **Read-only.** `adbc-vs-rs` does not write to the source.

@@ -204,10 +204,6 @@ jobs:
           name: adbc-vs-so
           path: target/release
 
-      - name: Package release tarball
-        if: steps.gate.outputs.release == 'true'
-        run: make release-tarball
-
       - name: Install Rust 1.94
         if: steps.gate.outputs.release == 'true'
         uses: dtolnay/rust-toolchain@1.94
@@ -221,6 +217,10 @@ jobs:
       - name: Generate third-party notices
         if: steps.gate.outputs.release == 'true'
         run: make third-party-licenses
+
+      - name: Package release tarball
+        if: steps.gate.outputs.release == 'true'
+        run: make release-tarball
 
       - name: Create and push tag
         if: steps.gate.outputs.release == 'true'
