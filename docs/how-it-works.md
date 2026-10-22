@@ -63,7 +63,6 @@ To get the Exasol behavior, use one of two options:
 
 #### MySQL
 
-- Tested with MySQL 8.4.
 - The default collation `utf8mb4_0900_ai_ci` ignores case and accents. Use `utf8mb4_0900_bin` for the Exasol behavior. It needs MySQL 8.0.17 or later. MariaDB has no equal collation.
 - Driver version range: `>=0.6.0, <0.7.0`.
 
