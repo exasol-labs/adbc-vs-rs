@@ -6,3 +6,30 @@ members = ["crates/adbc-vs-adapter", "crates/adbc-vs-scan"]
 version = "0.6.0"
 edition = "2021"
 license = "MIT"
+
+[workspace.dependencies]
+adbc_core = "0.23"
+adbc_driver_manager = "0.23"
+# No default features: the scan needs only the cast kernels. The adapter adds the codecs back.
+arrow = { version = "58", default-features = false }
+exasol-udf-macros = "0.23.0"
+exasol-udf-sdk = { version = "0.23.1", features = ["emit-arrow"] }
+flate2 = "1.1.9"
+# rustls with bundled roots and ring: the UDF sandbox has no CA bundle, and this keeps OpenSSL out of the tree.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls-webpki-roots",
+] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10.0"
+tar = "0.4.46"
+tempfile = "3.27.0"
+toml = "0.8"
+sha2 = "0.10"
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }

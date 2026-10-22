@@ -8,65 +8,30 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# The assertions against the shared object `make cross-udf-build` produces;
-# `make test-artifact` enables it, so a plain `cargo test --workspace` needs no
-# Docker.
 built-artifact = []
-# The end-to-end tier against the full Docker Compose stack. `make test-e2e`
-# enables it; a plain `cargo test --workspace` leaves
-# `tests/e2e_mysql_test.rs` empty, so the fast tier never needs a container.
 exasol-e2e = []
-# The `cargo deny` invocation, which needs cargo-deny on the host; `make deny`
-# enables it.
 policy-check = []
-# The transmission-throughput benchmark against the full Docker Compose
-# stack. `make bench` enables it; a plain `cargo test --workspace` leaves
-# every `tests/bench_*_test.rs` empty, so the fast tier never needs a container.
 bench = []
-# The one check that reaches the public driver registry: it resolves every
-# driver's declared version range against the index the CDN publishes today,
-# so a range the registry has moved past is caught. `make test-registry-live`
-# enables it. Default-off and in no CI job, because a CDN outage is not a
-# defect in the commit under test.
 registry-live = []
 
 [dependencies]
 adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.6.0" }
-adbc_core = "0.23"
-adbc_driver_manager = "0.23"
-arrow = "58"
-exasol-udf-macros = "0.23.0"
-exasol-udf-sdk = { version = "0.23.1", features = ["emit-arrow"] }
-flate2 = "1.1.9"
-# rustls with the bundled webpki root store and the ring provider: the UDF
-# sandbox guarantees no CA bundle, and ring needs no cmake in the SLC build
-# image. `default-features = false` keeps native-tls, and with it OpenSSL,
-# out of the tree entirely.
-reqwest = { version = "0.12", default-features = false, features = [
-    "blocking",
-    "rustls-tls-webpki-roots",
-] }
-# Compares the registry index's published version scalars against each
-# driver's declared range. String equality cannot do it: the index mixes the
-# `v0.6.0` and `1.12.0` spellings, and a range needs an ordering.
-semver = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml_ng = "0.10.0"
-tar = "0.4.46"
-tempfile = "3.27.0"
-toml = "0.8"
+adbc_core.workspace = true
+adbc_driver_manager.workspace = true
+arrow = { workspace = true, features = ["csv", "ipc", "json"] }
+exasol-udf-macros.workspace = true
+exasol-udf-sdk.workspace = true
+flate2.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
-# Verifies the JDBC jars the benchmark's reference virtual schema installs.
-# Not a runtime dependency of the adapter: self-install verifies no digest, so
-# nothing the shipped `.so` does needs a hash.
-sha2 = "0.10"
-# A self-signed certificate and the TLS server that presents it, so the
-# registry client's certificate verification is asserted against a real
-# handshake rather than inspected.
-rcgen = { version = "0.14", default-features = false, features = ["ring"] }
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "std",
-] }
+rcgen.workspace = true
+rustls.workspace = true
+sha2.workspace = true

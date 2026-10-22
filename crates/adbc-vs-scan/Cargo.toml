@@ -8,49 +8,25 @@ license.workspace = true
 crate-type = ["rlib"]
 
 [features]
-# The MySQL-only integration tier. `make test-it` enables it; a plain
-# `cargo test --workspace` leaves `tests/mysql_it_test.rs` empty, so the fast
-# tier never needs a container.
 mysql-it = []
 
-# The PostgreSQL-only integration tier. `make test-it-postgres` enables it; a
-# plain `cargo test --workspace` leaves `tests/postgres_it_test.rs` empty, so
-# the fast tier never needs a container.
 postgres-it = []
 
-# The Trino-only integration tier. `make test-it-trino` enables it; a plain
-# `cargo test --workspace` leaves `tests/trino_it_test.rs` empty, so the fast
-# tier never needs a container.
 trino-it = []
 
-# `drivers/*.toml` is read at build time and never at run time, so the parser
-# that reads it is a build dependency: the shipped `.so` links neither.
+# Read at build time only; the shipped `.so` links neither.
 [build-dependencies]
-serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+serde.workspace = true
+toml.workspace = true
 
 [dependencies]
-adbc_core = "0.23"
-adbc_driver_manager = "0.23"
-# The same `arrow-array` the ADBC crates expose across their trait surface —
-# `default-features = false` drops the CSV, IPC, and JSON codecs the scan
-# never touches while keeping the cast kernels the coercion is built on.
-arrow = { version = "58", default-features = false }
+adbc_core.workspace = true
+adbc_driver_manager.workspace = true
+arrow.workspace = true
 
-# The integration tier fetches the pinned ADBC driver package itself, so
-# `make test-it` needs nothing on the host beyond the MySQL container. Same
-# crates the adapter already uses for the production install path.
 [dev-dependencies]
-# The integration tier resolves and reads a driver package exactly the way the
-# production install path does, by calling that code rather than restating the
-# registry's document shape beside it. A dev-dependency back onto the adapter
-# is the only direction that can express that: `[dependencies]` runs
-# adapter -> scan, and cargo resolves dev-dependencies separately, so the two
-# together are not a cycle it refuses.
+# Dev-only back edge onto the adapter, so the integration tier reuses its install code.
 adbc-vs-adapter = { path = "../adbc-vs-adapter", version = "0.6.0" }
-flate2 = "1.1.9"
-reqwest = { version = "0.12", default-features = false, features = [
-    "blocking",
-    "rustls-tls-webpki-roots",
-] }
-tar = "0.4.46"
+flate2.workspace = true
+reqwest.workspace = true
+tar.workspace = true
