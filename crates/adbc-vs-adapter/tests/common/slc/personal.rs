@@ -61,7 +61,7 @@ pub fn install(exasol: &Exasol) {
 enum ContainerStep {
     /// No container claims the alias.
     Install,
-    /// The container is the pinned asset of the host's architecture.
+    /// The container is the pinned asset of the host's architecture and available.
     Keep,
     /// A custom container from another source, such as an earlier pinned
     /// version, holds the alias.
@@ -90,7 +90,12 @@ fn container_step(listing: &str, pinned_asset: &str) -> ContainerStep {
 
     let asset = source.rsplit_once('/').map_or(source, |(_, asset)| asset);
     if asset == pinned_asset {
-        ContainerStep::Keep
+        // An unavailable container cannot run UDFs, so reinstalling the pinned asset repairs it.
+        if rust["available"].as_bool() == Some(true) {
+            ContainerStep::Keep
+        } else {
+            ContainerStep::Update
+        }
     } else if source.starts_with(RELEASE_DOWNLOADS) {
         ContainerStep::TracksLatestRelease(source.to_owned())
     } else {
@@ -170,6 +175,16 @@ mod tests {
             ),
             ContainerStep::Keep
         );
+    }
+
+    #[test]
+    fn the_pinned_asset_in_an_unavailable_container_is_updated() {
+        let unavailable = listing(
+            r#",
+  {"type": "custom", "language": "rust", "alias": "RUST", "source": "/w/target/slc/lc-rust-0.23.1.tar.gz", "installed": true, "available": false}"#,
+        );
+
+        assert_eq!(container_step(&unavailable, PINNED), ContainerStep::Update);
     }
 
     #[test]
