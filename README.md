@@ -2,6 +2,8 @@
 
 <img src="assets/logo.svg" alt="adbc-vs-rs logo" width="200">
 
+# adbc-vs-rs
+
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![CI](https://github.com/exasol-labs/adbc-vs-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/exasol-labs/adbc-vs-rs/actions/workflows/ci.yml)
 [![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)](specs/)
