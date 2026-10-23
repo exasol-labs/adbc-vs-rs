@@ -17,6 +17,8 @@
 
 use std::sync::OnceLock;
 
+use adbc_vs_scan::driver::Driver;
+
 use super::bench_data::SourceDb;
 use super::exasol::Exasol;
 use super::jdbc_vs;
@@ -110,11 +112,11 @@ fn bring_up_mysql() -> BenchStack {
 
     slc::install(&exasol);
     udf::deploy(&exasol);
-    schema::create_bucketfs_connection(&exasol);
+    schema::provide_drivers(&exasol, &[Driver::MySql]);
     schema::create_mysql_connection(&exasol, MYSQL_CONNECTION, mysql::DATABASE);
     schema::create_virtual_schema(
         &exasol,
-        adbc_vs_scan::driver::Driver::MySql,
+        Driver::MySql,
         ADBC_VIRTUAL_SCHEMA,
         MYSQL_CONNECTION,
     );
@@ -172,11 +174,11 @@ fn bring_up_postgres() -> BenchStack {
 
     slc::install(&exasol);
     udf::deploy(&exasol);
-    schema::create_bucketfs_connection(&exasol);
+    schema::provide_drivers(&exasol, &[Driver::Postgres]);
     schema::create_postgres_connection(&exasol, POSTGRES_CONNECTION, super::postgres::DATABASE);
     schema::create_virtual_schema(
         &exasol,
-        adbc_vs_scan::driver::Driver::Postgres,
+        Driver::Postgres,
         POSTGRES_ADBC_VIRTUAL_SCHEMA,
         POSTGRES_CONNECTION,
     );
@@ -234,7 +236,7 @@ fn bring_up_trino() -> BenchStack {
 
     slc::install(&exasol);
     udf::deploy(&exasol);
-    schema::create_bucketfs_connection(&exasol);
+    schema::provide_drivers(&exasol, &[Driver::Trino]);
     exasol.execute(&format!(
         "CREATE OR REPLACE CONNECTION {TRINO_CONNECTION} TO {} USER {} IDENTIFIED BY {}",
         schema::quote_literal(&trino::driver_uri()),
@@ -243,7 +245,7 @@ fn bring_up_trino() -> BenchStack {
     ));
     schema::create_virtual_schema(
         &exasol,
-        adbc_vs_scan::driver::Driver::Trino,
+        Driver::Trino,
         TRINO_ADBC_VIRTUAL_SCHEMA,
         TRINO_CONNECTION,
     );

@@ -96,6 +96,118 @@ fn job_names(workflow: &Value) -> Vec<String> {
         .collect()
 }
 
+const X86_RUNNER: &str = "ubuntu-latest";
+const ARM_RUNNER: &str = "ubuntu-24.04-arm";
+const MATRIX_RUNNER: &str = "${{ matrix.runner }}";
+const RUST_ACTION: &str = "dtolnay/rust-toolchain@1.94";
+
+const E2E_JOBS: [&str; 3] = ["e2e", "e2e-postgres", "e2e-trino"];
+
+/// The jobs a release is gated on, which `package` needs one by one.
+const GATING_JOBS: [&str; 10] = [
+    "build-so",
+    "lint",
+    "unit-tests",
+    "deny",
+    "integration-tests",
+    "integration-tests-postgres",
+    "integration-tests-trino",
+    "e2e",
+    "e2e-postgres",
+    "e2e-trino",
+];
+
+/// Jobs that run once on each architecture.
+const BOTH_ARCHITECTURE_JOBS: [&str; 7] = [
+    "build-so",
+    "lint",
+    "unit-tests",
+    "integration-tests",
+    "integration-tests-postgres",
+    "integration-tests-trino",
+    "package",
+];
+
+/// Jobs that run cargo on the host, so the toolchain is theirs to install.
+const HOST_CARGO_JOBS: [&str; 10] = [
+    "build-so",
+    "lint",
+    "unit-tests",
+    "integration-tests",
+    "integration-tests-postgres",
+    "integration-tests-trino",
+    "e2e",
+    "e2e-postgres",
+    "e2e-trino",
+    "package",
+];
+
+fn matrix_of<'a>(job: &'a Value, name: &str) -> &'a Value {
+    job.get("strategy")
+        .and_then(|strategy| strategy.get("matrix"))
+        .unwrap_or_else(|| panic!("job `{name}` must declare `strategy.matrix`"))
+}
+
+/// Every runner a job's matrix names: a plain `runner` list, or the `runner` of
+/// each `include` row.
+fn matrix_runners(job: &Value, name: &str) -> Vec<String> {
+    let matrix = matrix_of(job, name);
+    let values: Vec<&Value> = if let Some(runners) = matrix.get("runner") {
+        runners
+            .as_sequence()
+            .unwrap_or_else(|| panic!("`{name}` matrix.runner must be a sequence"))
+            .iter()
+            .collect()
+    } else {
+        matrix
+            .get("include")
+            .and_then(Value::as_sequence)
+            .unwrap_or_else(|| panic!("`{name}` matrix must list runners or `include` rows"))
+            .iter()
+            .map(|row| {
+                row.get("runner")
+                    .unwrap_or_else(|| panic!("every `{name}` include row must name a runner"))
+            })
+            .collect()
+    };
+    values
+        .into_iter()
+        .map(|runner| {
+            runner
+                .as_str()
+                .unwrap_or_else(|| panic!("`{name}` runner must be a string"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn both_runners() -> HashSet<String> {
+    [X86_RUNNER, ARM_RUNNER].map(str::to_string).into()
+}
+
+fn step_uses(job: &Value) -> Vec<String> {
+    job.get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap_or_else(|| panic!("job must declare a `steps` sequence"))
+        .iter()
+        .filter_map(|step| step.get("uses"))
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn needs_of(job: &Value, name: &str) -> Vec<String> {
+    match job.get("needs") {
+        Some(Value::Sequence(needs)) => needs
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(need)) => vec![need.clone()],
+        _ => panic!("job `{name}` must declare `needs`"),
+    }
+}
+
 #[test]
 fn workflow_make_targets_exist() {
     let workflow = workflow();
@@ -249,19 +361,28 @@ fn policy_and_container_jobs_call_make() {
     }
 
     for name in job_names(&workflow) {
-        let runs_on = job(&workflow, &name)
+        let job = job(&workflow, &name);
+        let runs_on = job
             .get("runs-on")
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("job `{name}` must declare `runs-on`"));
-        assert_eq!(
-            runs_on, "ubuntu-latest",
-            "job `{name}` must run on ubuntu-latest, got: {runs_on}"
+        assert!(
+            [X86_RUNNER, ARM_RUNNER, MATRIX_RUNNER].contains(&runs_on),
+            "job `{name}` must run on {X86_RUNNER}, {ARM_RUNNER}, or {MATRIX_RUNNER}, got: {runs_on}"
         );
+        if runs_on == MATRIX_RUNNER {
+            for runner in matrix_runners(job, &name) {
+                assert!(
+                    [X86_RUNNER, ARM_RUNNER].contains(&runner.as_str()),
+                    "job `{name}` matrix runner must be {X86_RUNNER} or {ARM_RUNNER}, got: {runner}"
+                );
+            }
+        }
     }
 }
 
 #[test]
-fn workflow_has_no_cloud_or_arm_job() {
+fn workflow_has_no_cloud_job() {
     let text = workflow_text().to_lowercase();
     for forbidden in [
         "azure",
@@ -274,12 +395,6 @@ fn workflow_has_no_cloud_or_arm_job() {
         assert!(
             !text.contains(forbidden),
             "workflow must not reference {forbidden}"
-        );
-    }
-    for forbidden in ["arm64", "aarch64", "ubuntu-24.04-arm", "runs-on: arm"] {
-        assert!(
-            !text.contains(forbidden),
-            "workflow must not declare an ARM runner ({forbidden})"
         );
     }
 
@@ -299,63 +414,308 @@ fn workflow_has_no_cloud_or_arm_job() {
 #[test]
 fn release_job_is_gated_and_packages_artifacts() {
     let workflow = workflow();
+    let package = job(&workflow, "package");
     let release = job(&workflow, "release");
 
-    let needs = release
-        .get("needs")
-        .and_then(Value::as_sequence)
-        .expect("release job must declare `needs`");
-    for required in [
-        "build-so",
-        "lint",
-        "unit-tests",
-        "deny",
-        "integration-tests",
-        "integration-tests-postgres",
-        "integration-tests-trino",
-        "e2e",
-        "e2e-postgres",
-        "e2e-trino",
-    ] {
+    assert_eq!(
+        matrix_runners(package, "package")
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        both_runners(),
+        "package must run on both runners, so each architecture packs its own tarball"
+    );
+
+    let package_needs = needs_of(package, "package");
+    for required in GATING_JOBS {
         assert!(
-            needs.iter().any(|n| n.as_str() == Some(required)),
-            "release must need `{required}` so a red job blocks it"
+            package_needs.iter().any(|n| n == required),
+            "package must need `{required}` so a red job blocks it"
         );
     }
 
-    let condition = release
-        .get("if")
-        .and_then(Value::as_str)
-        .expect("release job must declare an `if` condition");
+    let release_needs = needs_of(release, "release");
     assert!(
-        condition.contains("refs/heads/main"),
-        "release must only run on push to main: {condition}"
+        release_needs.iter().any(|n| n == "package"),
+        "release must need `package`"
     );
 
-    let targets = make_targets_invoked(release);
+    for (name, gated) in [("package", package), ("release", release)] {
+        let condition = gated
+            .get("if")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("`{name}` job must declare an `if` condition"));
+        assert!(
+            condition.contains("refs/heads/main"),
+            "`{name}` must only run on push to main: {condition}"
+        );
+    }
+
+    let package_targets = make_targets_invoked(package);
+    for target in ["release-tarball", "third-party-licenses"] {
+        assert!(
+            package_targets.iter().any(|t| t == target),
+            "package must call `make {target}`"
+        );
+    }
+    let release_targets = make_targets_invoked(release);
+    for target in ["release-tarball", "third-party-licenses"] {
+        assert!(
+            !release_targets.iter().any(|t| t == target),
+            "release only publishes, so it must not call `make {target}`"
+        );
+    }
+
+    let build_so_artifact = artifact_names(job(&workflow, "build-so"), "actions/upload-artifact");
     assert!(
-        targets.iter().any(|t| t == "release-tarball"),
-        "release must call `make release-tarball`"
+        build_so_artifact
+            .iter()
+            .any(|name| name.contains("runner.arch")),
+        "build-so must name its .so artifact after `runner.arch`: {build_so_artifact:?}"
     );
-    assert!(
-        targets.iter().any(|t| t == "third-party-licenses"),
-        "release must call `make third-party-licenses`"
+    assert_eq!(
+        artifact_names(package, "actions/download-artifact")
+            .into_iter()
+            .next(),
+        build_so_artifact.into_iter().next(),
+        "package must download the .so of its own architecture"
     );
 
-    let build_so_uploads = job(&workflow, "build-so")
+    let release_files = release
         .get("steps")
         .and_then(Value::as_sequence)
-        .expect("build-so job must declare steps")
+        .expect("release job must declare steps")
         .iter()
-        .any(|step| {
+        .filter(|step| {
             step.get("uses")
                 .and_then(Value::as_str)
-                .is_some_and(|u| u.starts_with("actions/upload-artifact"))
+                .is_some_and(|u| u.starts_with("softprops/action-gh-release"))
+        })
+        .filter_map(|step| step.get("with").and_then(|with| with.get("files")))
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for asset in [
+        "dist/adbc-vs.tar.gz",
+        "dist/adbc-vs-linux-arm64.tar.gz",
+        "dist/THIRD-PARTY-LICENSES.md",
+    ] {
+        assert!(
+            release_files.lines().any(|line| line.trim() == asset),
+            "release must publish `{asset}`: {release_files}"
+        );
+    }
+
+    let release_steps = release
+        .get("steps")
+        .and_then(Value::as_sequence)
+        .expect("release job must declare steps");
+    let publishes_strictly = release_steps
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .and_then(Value::as_str)
+                .is_some_and(|u| u.starts_with("softprops/action-gh-release"))
+        })
+        .all(|step| {
+            step.get("with")
+                .and_then(|with| with.get("fail_on_unmatched_files"))
+                .and_then(Value::as_bool)
+                == Some(true)
         });
     assert!(
-        build_so_uploads,
-        "build-so must upload the .so artifact for the release job to download"
+        publishes_strictly,
+        "the release step must set `fail_on_unmatched_files: true`, so a missing asset fails the job"
     );
+
+    let run_of = |step: &Value| {
+        step.get("run")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let verify_at = release_steps.iter().position(|step| {
+        let run = run_of(step);
+        [
+            "dist/adbc-vs.tar.gz",
+            "dist/adbc-vs-linux-arm64.tar.gz",
+            "dist/THIRD-PARTY-LICENSES.md",
+        ]
+        .iter()
+        .all(|asset| run.contains(asset))
+    });
+    let push_at = release_steps
+        .iter()
+        .position(|step| run_of(step).contains("git push origin"))
+        .expect("release must push the tag");
+    assert!(
+        verify_at.is_some_and(|verify| verify < push_at),
+        "a step naming all three assets must run before the tag is pushed: verify at {verify_at:?}, push at {push_at}"
+    );
+}
+
+/// The `name:` input of every step in `job` whose action starts with `action`.
+fn artifact_names(job: &Value, action: &str) -> Vec<String> {
+    job.get("steps")
+        .and_then(Value::as_sequence)
+        .unwrap_or_else(|| panic!("job must declare a `steps` sequence"))
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .and_then(Value::as_str)
+                .is_some_and(|u| u.starts_with(action))
+        })
+        .filter_map(|step| step.get("with").and_then(|with| with.get("name")))
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn library_jobs_cover_both_architectures() {
+    let workflow = workflow();
+
+    for name in BOTH_ARCHITECTURE_JOBS {
+        let runners = matrix_runners(job(&workflow, name), name);
+        assert_eq!(
+            runners.iter().collect::<HashSet<_>>().len(),
+            runners.len(),
+            "`{name}` must not list a runner twice"
+        );
+        assert_eq!(
+            runners.into_iter().collect::<HashSet<_>>(),
+            both_runners(),
+            "`{name}` must run on both ubuntu-latest and ubuntu-24.04-arm, so the aarch64 \
+             branches are compiled and tested, not only written"
+        );
+    }
+}
+
+#[test]
+fn every_job_that_runs_cargo_on_the_host_installs_rust_1_94() {
+    let workflow = workflow();
+
+    for name in HOST_CARGO_JOBS {
+        assert!(
+            step_uses(job(&workflow, name))
+                .iter()
+                .any(|u| u == RUST_ACTION),
+            "`{name}` runs cargo on the host and must install Rust with `{RUST_ACTION}`: no \
+             source confirms that the ubuntu-24.04-arm image ships rustup"
+        );
+    }
+}
+
+/// The four Exasol rows each E2E job runs: two Docker images on x86_64, and
+/// Exasol Personal on both architectures, because no Docker Exasol image exists
+/// for arm64.
+#[test]
+fn every_e2e_job_runs_the_four_exasol_rows() {
+    let workflow = workflow();
+    let expected: [(&str, &str, &str, Option<&str>); 4] = [
+        (
+            "docker-2025",
+            X86_RUNNER,
+            "docker",
+            Some("exasol/docker-db:latest-2025.2"),
+        ),
+        (
+            "docker-2026",
+            X86_RUNNER,
+            "docker",
+            Some("exasol/docker-db:latest-2026.1"),
+        ),
+        ("personal-x86_64", X86_RUNNER, "personal", None),
+        ("personal-arm64", ARM_RUNNER, "personal", None),
+    ];
+
+    for name in E2E_JOBS {
+        let e2e = job(&workflow, name);
+        let strategy = e2e
+            .get("strategy")
+            .expect("e2e job must declare a strategy");
+        assert_eq!(
+            strategy.get("fail-fast").and_then(Value::as_bool),
+            Some(false),
+            "`{name}` must not cancel the other rows when one fails"
+        );
+
+        let rows = matrix_of(e2e, name)
+            .get("include")
+            .and_then(Value::as_sequence)
+            .unwrap_or_else(|| panic!("`{name}` matrix must list its rows under `include`"));
+        assert_eq!(rows.len(), expected.len(), "`{name}` must have four rows");
+        for (row, (row_name, runner, target, image)) in rows.iter().zip(expected) {
+            let field = |key: &str| row.get(key).and_then(Value::as_str);
+            assert_eq!(field("name"), Some(row_name), "`{name}` row name");
+            assert_eq!(
+                field("runner"),
+                Some(runner),
+                "`{name}` row {row_name} runner"
+            );
+            assert_eq!(
+                field("target"),
+                Some(target),
+                "`{name}` row {row_name} target"
+            );
+            assert_eq!(field("image"), image, "`{name}` row {row_name} image");
+        }
+
+        let target_step = e2e
+            .get("steps")
+            .and_then(Value::as_sequence)
+            .expect("e2e job must declare steps")
+            .iter()
+            .find(|step| {
+                step.get("run")
+                    .and_then(Value::as_str)
+                    .is_some_and(|r| r.starts_with("make test-e2e"))
+            })
+            .unwrap_or_else(|| panic!("`{name}` must call an end-to-end make target"));
+        let env = |key: &str| {
+            target_step
+                .get("env")
+                .and_then(|env| env.get(key))
+                .and_then(Value::as_str)
+        };
+        assert_eq!(env("EXASOL_TARGET"), Some("${{ matrix.target }}"));
+        assert_eq!(env("EXASOL_IMAGE"), Some("${{ matrix.image }}"));
+    }
+}
+
+/// The launcher pulls the `exasol/nano` image it pins, so a nano tag named in
+/// the workflow would be a second pin that can disagree with it.
+#[test]
+fn personal_rows_install_podman_and_the_launcher_without_naming_a_nano_tag() {
+    let workflow = workflow();
+
+    assert!(
+        !workflow_text().to_lowercase().contains("nano"),
+        "the workflow must not name an exasol/nano tag"
+    );
+
+    for name in E2E_JOBS {
+        let steps = job(&workflow, name)
+            .get("steps")
+            .and_then(Value::as_sequence)
+            .expect("e2e job must declare steps");
+        let personal_runs: Vec<&str> = steps
+            .iter()
+            .filter(|step| {
+                step.get("if").and_then(Value::as_str) == Some("matrix.target == 'personal'")
+            })
+            .filter_map(|step| step.get("run").and_then(Value::as_str))
+            .collect();
+        assert!(
+            personal_runs.iter().any(|r| r.contains("podman")),
+            "`{name}` must install Podman on a Personal row when it is absent"
+        );
+        assert!(
+            personal_runs
+                .iter()
+                .any(|r| r.contains("https://downloads.exasol.com/exasol-personal/installer.sh")),
+            "`{name}` must install the Exasol Personal launcher on a Personal row"
+        );
+    }
 }
 
 /// Every job that starts the Exasol container carries the same runner

@@ -81,7 +81,7 @@ fn bring_up() -> Stack {
 
     slc::install(&exasol);
     udf::deploy(&exasol);
-    schema::create_bucketfs_connection(&exasol);
+    schema::provide_drivers(&exasol, &[Driver::Trino, Driver::MySql]);
 
     exasol.execute(&format!(
         "CREATE OR REPLACE CONNECTION {TRINO_CONNECTION} TO {} USER {} IDENTIFIED BY {}",

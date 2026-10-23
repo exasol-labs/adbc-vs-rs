@@ -11,7 +11,7 @@ volumes:
 
 services:
   exasol:
-    image: exasol/docker-db:2025.2.1
+    image: ${EXASOL_IMAGE:-exasol/docker-db:latest-2025.2}
     privileged: true
     shm_size: 2g
     stop_grace_period: 120s

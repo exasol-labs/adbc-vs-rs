@@ -20,6 +20,7 @@ use adbc_vs_scan::driver::Driver;
 use common::exasol::cell;
 use common::stack::{self, MYSQL_CONNECTION, VIRTUAL_SCHEMA};
 use common::{items, mirror, mysql, probe, schema};
+#[cfg(not(feature = "exasol-personal"))]
 use semver::Version;
 
 /// Where the MySQL driver is installed, in the pieces the tests assert
@@ -32,8 +33,11 @@ use semver::Version;
 /// here spells it: the tests find the installed object and read the version
 /// back out of the path, rather than asserting a version this repository
 /// cannot pin.
+#[cfg(not(feature = "exasol-personal"))]
 const DRIVER_BUCKET_PREFIX: &str = "adbc-drivers/mysql/";
+#[cfg(not(feature = "exasol-personal"))]
 const DRIVER_LIBRARY: &str = "libadbc_driver_mysql.so";
+#[cfg(not(feature = "exasol-personal"))]
 const BUCKET_MOUNT: &str = "/buckets/bfsdefault/default";
 
 /// Where tasks 2.3 and 3.2 copy an already-installed driver library to, to
@@ -41,6 +45,7 @@ const BUCKET_MOUNT: &str = "/buckets/bfsdefault/default";
 /// operator-owned object, not an installed driver — its `supplied` path
 /// segment is not a version, which is exactly what [`installed_driver_entries`]
 /// filters on to keep it out of [`installed_drivers`].
+#[cfg(not(feature = "exasol-personal"))]
 const SUPPLIED_BUCKET_PATH: &str = "adbc-drivers/mysql/supplied/libadbc_driver_mysql.so";
 
 /// A lower bound distinguishing an installed driver package from a stray
@@ -48,6 +53,7 @@ const SUPPLIED_BUCKET_PATH: &str = "adbc-drivers/mysql/supplied/libadbc_driver_m
 /// bytes (about 44.3 MiB) on the registry this release pins, so any file
 /// large enough to be the real library clears this by two orders of
 /// magnitude.
+#[cfg(not(feature = "exasol-personal"))]
 const MIN_PLAUSIBLE_DRIVER_BYTES: u64 = 1_000_000;
 
 /// How many times the ordering tier repeats a query before trusting its
@@ -74,6 +80,7 @@ const ITEMS: &str = "items";
 /// so a successful install is also the proof that the PUT succeeded against
 /// the container's self-signed certificate: a client rejecting it would fail
 /// here rather than silently falling back to plain HTTP.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn first_use_installs_driver_from_registry() {
     let stack = stack::shared();
@@ -107,6 +114,7 @@ fn first_use_installs_driver_from_registry() {
     );
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn driver_lands_in_bucketfs() {
     let stack = stack::shared();
@@ -130,6 +138,7 @@ fn driver_lands_in_bucketfs() {
 /// misses, so a second schema created through a BucketFS endpoint nothing
 /// answers proves the driver was reused rather than fetched and written again:
 /// had provisioning re-run, the upload would have failed the statement.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn second_schema_reuses_driver() {
     let stack = stack::shared();
@@ -163,6 +172,7 @@ fn second_schema_reuses_driver() {
 /// [`schema::BUCKETFS_CONNECTION`] on its own, which the shared stack already
 /// holds. This proves the default path end to end, not merely that the
 /// property is optional syntactically.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn default_bucketfs_connection_needs_no_property() {
     let stack = stack::shared();
@@ -222,6 +232,7 @@ fn default_bucketfs_connection_needs_no_property() {
 /// The report names what was left changed and how to change it back, because
 /// nothing else will: the stack stays dirty from here on, and the next
 /// `make test-e2e` reads the same BucketFS and the same Exasol.
+#[cfg(not(feature = "exasol-personal"))]
 fn raise_or_report(guard: &str, subject: &str, cleanup: std::thread::Result<()>) {
     let Err(failure) = cleanup else {
         return;
@@ -247,11 +258,13 @@ fn raise_or_report(guard: &str, subject: &str, cleanup: std::thread::Result<()>)
 /// A failed delete goes through [`raise_or_report`] rather than out of `drop`,
 /// because this guard drops *first* and an abort here would cancel the restore
 /// [`ReservedConnectionGuard`] still owes.
+#[cfg(not(feature = "exasol-personal"))]
 struct BucketObjectGuard {
     exasol: &'static common::exasol::Exasol,
     bucket_path: &'static str,
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 impl BucketObjectGuard {
     fn new(exasol: &'static common::exasol::Exasol, bucket_path: &'static str) -> Self {
         Self {
@@ -261,6 +274,7 @@ impl BucketObjectGuard {
     }
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 impl Drop for BucketObjectGuard {
     fn drop(&mut self) {
         let removed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -274,6 +288,7 @@ impl Drop for BucketObjectGuard {
 /// short-circuit self-install while the registry is reachable: provisioning
 /// still installs its own versioned copy rather than reusing the pre-placed
 /// one.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn a_supplied_library_does_not_short_circuit_self_install() {
     let stack = stack::shared();
@@ -335,16 +350,19 @@ fn a_supplied_library_does_not_short_circuit_self_install() {
 /// panic, which Rust turns into `std::process::abort()` — and that abort would
 /// cancel every guard that has not dropped yet, so a guard raising its own
 /// failure could destroy the very restores this pattern exists to guarantee.
+#[cfg(not(feature = "exasol-personal"))]
 struct ReservedConnectionGuard {
     exasol: &'static common::exasol::Exasol,
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 impl ReservedConnectionGuard {
     fn new(exasol: &'static common::exasol::Exasol) -> Self {
         Self { exasol }
     }
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 impl Drop for ReservedConnectionGuard {
     fn drop(&mut self) {
         let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -378,6 +396,7 @@ impl Drop for ReservedConnectionGuard {
 /// unwind runs exactly the restores that are owed: a panic before the copy
 /// recreates the connection and does not try to delete an object that was
 /// never placed.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn a_preplaced_library_answers_when_no_bucketfs_connection_resolves() {
     const SCHEMA: &str = "PREPLACEDVS";
@@ -779,6 +798,7 @@ fn views_are_exposed() {
     assert_eq!(cell(&rows[0], "N"), Some("3".to_string()));
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn adapter_notes_hold_state_not_credentials() {
     let stack = stack::shared();
@@ -1962,6 +1982,7 @@ fn generated_statement_carries_no_order_or_limit() {
 /// short-circuit off a pre-placed library. That object is deliberately not
 /// an installed driver, so it must not reach [`driver_semver`], which panics
 /// on a non-version segment.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_drivers(stack: &stack::Stack) -> Vec<String> {
     installed_driver_entries(stack.exasol.bucket_entries())
 }
@@ -1970,6 +1991,7 @@ fn installed_drivers(stack: &stack::Stack) -> Vec<String> {
 /// MySQL driver library, rather than any other object placed under the same
 /// prefix. Split out from [`installed_drivers`] so the exclusion is
 /// assertable without a running stack.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_driver_entries(entries: Vec<String>) -> Vec<String> {
     entries
         .into_iter()
@@ -1980,6 +2002,7 @@ fn installed_driver_entries(entries: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn the_supplied_object_is_not_an_installed_driver() {
     let versioned_a = format!("{DRIVER_BUCKET_PREFIX}0.6.1/{DRIVER_LIBRARY}");
@@ -2007,6 +2030,7 @@ fn the_supplied_object_is_not_an_installed_driver() {
 /// version resolution would select again today, so picking it (rather than
 /// an arbitrary listing order) is what keeps this in agreement with
 /// `adapterNotes.driverVersion`.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_driver(stack: &stack::Stack) -> Option<String> {
     installed_drivers(stack)
         .into_iter()
@@ -2020,6 +2044,7 @@ fn installed_driver(stack: &stack::Stack) -> Option<String> {
 /// this wraps: every caller of this function has already gone through
 /// [`installed_drivers`], which excludes the one bucket object that is
 /// deliberately not a version, so a panic here means that filter regressed.
+#[cfg(not(feature = "exasol-personal"))]
 fn driver_semver(version: &str) -> Version {
     common::driver::parse_driver_semver(version)
         .unwrap_or_else(|| panic!("installed driver version {version} is not a semantic version"))
@@ -2027,6 +2052,7 @@ fn driver_semver(version: &str) -> Version {
 
 /// The version segment of an installed driver's bucket-relative path, which is
 /// the version resolution selected for it.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_version(installed: &str) -> String {
     installed
         .strip_prefix(DRIVER_BUCKET_PREFIX)

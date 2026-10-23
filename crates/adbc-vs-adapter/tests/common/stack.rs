@@ -48,7 +48,7 @@ fn bring_up() -> Stack {
 
     slc::install(&exasol);
     udf::deploy(&exasol);
-    schema::create_bucketfs_connection(&exasol);
+    schema::provide_drivers(&exasol, &[Driver::MySql]);
     schema::create_mysql_connection(&exasol, MYSQL_CONNECTION, mysql::DATABASE);
     schema::create_virtual_schema(&exasol, Driver::MySql, VIRTUAL_SCHEMA, MYSQL_CONNECTION);
     mirror::install(&exasol);

@@ -282,9 +282,6 @@ fn source_setting_query(source: Source) -> Option<(&'static str, &'static str)> 
 pub fn gather_provenance(stack: &BenchStack) -> Provenance {
     let workspace_root = exasol::workspace_root();
 
-    let compose_text = fs::read_to_string(workspace_root.join("docker-compose.yml"))
-        .unwrap_or_else(|error| panic!("reading docker-compose.yml: {error}"));
-
     let so_path = workspace_root.join(BUILT_LIBRARY);
     let so_metadata = fs::metadata(&so_path)
         .unwrap_or_else(|error| panic!("reading metadata for {}: {error}", so_path.display()));
@@ -318,8 +315,8 @@ pub fn gather_provenance(stack: &BenchStack) -> Provenance {
 
     Provenance {
         source,
-        exasol_image: parse_service_image(&compose_text, "exasol"),
-        source_image: parse_service_image(&compose_text, source.name()),
+        exasol_image: service_image("exasol"),
+        source_image: service_image(source.name()),
         jdbc: stack.jdbc,
         so_size_bytes: so_metadata.len(),
         so_mtime: format_utc(so_modified),
@@ -331,37 +328,41 @@ pub fn gather_provenance(stack: &BenchStack) -> Provenance {
     }
 }
 
-/// The image tag `docker-compose.yml` declares for `service`, read out of its
-/// raw text rather than a YAML parser: the file's shape is stable and simple
-/// enough — a two-space-indented service name, its properties indented
-/// further underneath — that matching that shape directly is simpler than
-/// bringing in a parser to do it.
-fn parse_service_image(compose_text: &str, service: &str) -> String {
-    let header = format!("  {service}:");
-    let mut lines = compose_text.lines().skip_while(|line| *line != "services:");
-    assert!(
-        lines.next().is_some(),
-        "docker-compose.yml declares no `services:` section"
+/// The image `docker-compose.yml` resolves for `service` once Compose has
+/// interpolated it, so a report names the `EXASOL_IMAGE` the run started
+/// rather than the file's default.
+fn service_image(service: &str) -> String {
+    let compose_file = exasol::workspace_root().join("docker-compose.yml");
+    let compose_file = compose_file.to_string_lossy().into_owned();
+    let images = super::run(
+        &format!("resolving the image of the Compose service `{service}`"),
+        "docker",
+        &[
+            "compose",
+            "--file",
+            &compose_file,
+            "config",
+            "--images",
+            service,
+        ],
     );
+    single_image(&images, service)
+}
 
-    let mut in_service = false;
-    for line in lines {
-        if line == header {
-            in_service = true;
-            continue;
-        }
-        if !in_service {
-            continue;
-        }
-        if let Some(value) = line.trim().strip_prefix("image:") {
-            return value.trim().to_string();
-        }
-        if line.starts_with("  ") && !line.starts_with("    ") {
-            break;
-        }
+/// The one image `docker compose config --images <service>` printed.
+fn single_image(images: &str, service: &str) -> String {
+    let images: Vec<&str> = images
+        .lines()
+        .map(str::trim)
+        .filter(|image| !image.is_empty())
+        .collect();
+    match images.as_slice() {
+        [image] => (*image).to_string(),
+        other => panic!(
+            "`docker compose config --images {service}` must resolve one image, but resolved \
+             {other:?}"
+        ),
     }
-
-    panic!("docker-compose.yml declares no `image:` under service `{service}`")
 }
 
 /// The version number out of `docker --version`'s `Docker version X, build Y`
@@ -563,16 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_service_image_reads_the_postgres_and_trino_services() {
-        let compose = "services:\n  postgres:\n    image: postgres:18.6-trixie\n  trino:\n    image: trinodb/trino:483\n";
-        assert_eq!(
-            parse_service_image(compose, "postgres"),
-            "postgres:18.6-trixie"
-        );
-        assert_eq!(parse_service_image(compose, "trino"), "trinodb/trino:483");
-    }
-
-    #[test]
     fn id_column_reads_the_tiers_first_declared_column() {
         for tier in Tier::all() {
             assert_eq!(id_column(&tier), "id");
@@ -688,49 +679,36 @@ mod tests {
         assert!(message.contains("not docker at all"), "{message}");
     }
 
-    const COMPOSE_FIXTURE: &str = "\
-networks:
-  adbc-vs:
-    driver: bridge
-
-volumes:
-  exasol-data:
-
-services:
-  exasol:
-    image: exasol/docker-db:2025.2.1
-    privileged: true
-    ports:
-      - \"127.0.0.1:8563:8563\"
-
-  mysql:
-    image: mysql:8.4
-    ports:
-      - \"127.0.0.1:3306:3306\"
-";
-
     #[test]
-    fn parse_service_image_reads_the_first_services_image() {
+    fn single_image_reads_the_one_image_compose_resolved() {
         assert_eq!(
-            parse_service_image(COMPOSE_FIXTURE, "exasol"),
-            "exasol/docker-db:2025.2.1"
+            single_image("exasol/docker-db:latest-2026.1\n", "exasol"),
+            "exasol/docker-db:latest-2026.1"
         );
     }
 
-    #[test]
-    fn parse_service_image_reads_the_second_services_image() {
-        assert_eq!(parse_service_image(COMPOSE_FIXTURE, "mysql"), "mysql:8.4");
+    fn single_image_refusal(images: &'static str) -> String {
+        let payload = std::panic::catch_unwind(|| single_image(images, "postgres"))
+            .expect_err("a listing that is not exactly one image names no image");
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("a message")
     }
 
     #[test]
-    fn parse_service_image_fails_the_run_for_an_undeclared_service() {
-        let payload = std::panic::catch_unwind(|| parse_service_image(COMPOSE_FIXTURE, "postgres"))
-            .expect_err("a service the compose file does not declare cannot have an image");
-        let message = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .expect("a message");
+    fn single_image_fails_the_run_when_compose_resolved_no_image() {
+        let message = single_image_refusal("\n");
         assert!(message.contains("postgres"), "{message}");
+    }
+
+    #[test]
+    fn single_image_fails_the_run_when_compose_resolved_more_than_one_image() {
+        let message = single_image_refusal("postgres:18.6-trixie\nmysql:8.4\n");
+        assert!(
+            message.contains("postgres:18.6-trixie") && message.contains("mysql:8.4"),
+            "{message}"
+        );
     }
 
     #[test]

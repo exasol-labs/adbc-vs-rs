@@ -1108,6 +1108,7 @@ fn two_virtual_schemas_advertise_their_own_capability_sets() {
 /// defaulted to one driver: each technology's library lands under its own
 /// BucketFS path, and a query against each virtual schema returns the row
 /// its own source holds rather than the other source's.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn two_drivers_install_distinct_libraries_and_each_query_reaches_its_own_source() {
     let stack = stack::shared();
@@ -1165,6 +1166,7 @@ fn two_drivers_install_distinct_libraries_and_each_query_reaches_its_own_source(
 /// The bucket-relative path of one technology's installed driver library,
 /// whatever version resolution selected for it, or nothing when no version
 /// is installed for that driver.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_driver(stack: &stack::Stack, driver: Driver) -> Option<String> {
     let prefix = format!("adbc-drivers/{}/", driver.as_str());
     let library = driver.package().library;

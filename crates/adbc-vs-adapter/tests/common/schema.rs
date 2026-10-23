@@ -10,10 +10,23 @@
 //! identity the adapter resolves the statement's property back into, so a
 //! test enumerating the supported technologies and the statement it generates
 //! cannot disagree about how one is spelled.
+//!
+//! How a driver becomes loadable differs per Exasol backend, and
+//! [`provide_drivers`] is the one place that decides it, together with the
+//! `BUCKETFS_CONNECTION` the shared statements name.
 
+#[cfg(feature = "exasol-personal")]
+use std::path::Path;
+
+#[cfg(feature = "exasol-personal")]
+use adbc_vs_adapter::provisioning::default_driver_path;
 use adbc_vs_scan::driver::Driver;
 
-use super::exasol::{Exasol, BUCKETFS_WRITE_USER};
+#[cfg(feature = "exasol-personal")]
+use super::driver_fetch;
+use super::exasol::Exasol;
+#[cfg(not(feature = "exasol-personal"))]
+use super::exasol::BUCKETFS_WRITE_USER;
 use super::udf::ADAPTER_SCRIPT;
 use super::{mysql, postgres};
 
@@ -22,6 +35,50 @@ use super::{mysql, postgres};
 /// constant, so the harness cannot create a connection under a name the
 /// product no longer reserves.
 pub use adbc_vs_adapter::create_schema::DEFAULT_BUCKETFS_CONNECTION as BUCKETFS_CONNECTION;
+
+/// The `BUCKETFS_CONNECTION` the shared statements name: the reserved
+/// connection self-install writes through on Docker Exasol, and none on
+/// Exasol Personal, where the adapter then loads the `supplied` library.
+#[cfg(not(feature = "exasol-personal"))]
+const DRIVER_ROUTE_CONNECTION: Option<&str> = Some(BUCKETFS_CONNECTION);
+#[cfg(feature = "exasol-personal")]
+const DRIVER_ROUTE_CONNECTION: Option<&str> = None;
+
+/// Makes each of `drivers` loadable by the virtual schemas a bring-up then
+/// creates over it.
+///
+/// On Docker Exasol, self-install fetches each driver when the first schema
+/// over it is created, so the route needs only the reserved connection it
+/// writes through, and `drivers` names nothing this backend has to act on.
+#[cfg(not(feature = "exasol-personal"))]
+pub fn provide_drivers(exasol: &Exasol, _drivers: &[Driver]) {
+    create_bucketfs_connection(exasol);
+}
+
+/// Makes each of `drivers` loadable by the virtual schemas a bring-up then
+/// creates over it.
+///
+/// Exasol Personal has no BucketFS endpoint self-install could write through,
+/// so each driver is fetched from the registry here and placed at the
+/// `supplied` default location, which the adapter falls back to when the
+/// reserved connection does not resolve. No reserved connection is created.
+#[cfg(feature = "exasol-personal")]
+pub fn provide_drivers(exasol: &Exasol, drivers: &[Driver]) {
+    for driver in drivers {
+        let library = driver_fetch::fetch_driver_library(*driver);
+        exasol.put_library(&library, &supplied_bucket_path(*driver));
+    }
+}
+
+/// The bucket-relative path of `driver`'s `supplied` default location, laid
+/// out by the adapter's own provisioning code over an empty mount.
+#[cfg(feature = "exasol-personal")]
+fn supplied_bucket_path(driver: Driver) -> String {
+    let path = default_driver_path(Path::new(""), driver);
+    path.to_str()
+        .unwrap_or_else(|| panic!("the supplied driver path {path:?} is not UTF-8"))
+        .to_owned()
+}
 
 /// The name, address, and credentials a `CONNECTION` object is created from.
 pub struct ConnectionSpec<'a> {
@@ -48,6 +105,7 @@ pub struct VirtualSchemaSpec<'a> {
 }
 
 /// Creates the `CONNECTION` object the adapter writes the driver through.
+#[cfg(not(feature = "exasol-personal"))]
 pub fn create_bucketfs_connection(exasol: &Exasol) {
     exasol.execute(&connection_statement(&ConnectionSpec {
         name: BUCKETFS_CONNECTION,
@@ -87,16 +145,23 @@ pub fn create_postgres_connection(exasol: &Exasol, name: &str, database: &str) {
 /// Creates a virtual schema over the source database `connection` addresses,
 /// replacing any schema of the same name left by an earlier run.
 pub fn create_virtual_schema(exasol: &Exasol, driver: Driver, schema: &str, connection: &str) {
-    create_virtual_schema_through(
-        exasol,
-        VirtualSchemaSpec {
-            schema,
-            driver,
-            connection,
-            bucketfs_connection: Some(BUCKETFS_CONNECTION),
-            driver_path: None,
-        },
-    );
+    create_virtual_schema_through(exasol, provided_driver_spec(schema, driver, connection));
+}
+
+/// A statement that loads its driver through the route [`provide_drivers`]
+/// prepared.
+fn provided_driver_spec<'a>(
+    schema: &'a str,
+    driver: Driver,
+    connection: &'a str,
+) -> VirtualSchemaSpec<'a> {
+    VirtualSchemaSpec {
+        schema,
+        driver,
+        connection,
+        bucketfs_connection: DRIVER_ROUTE_CONNECTION,
+        driver_path: None,
+    }
 }
 
 /// Creates a virtual schema that provisions its driver through
@@ -116,20 +181,16 @@ pub fn create_virtual_schema_expecting_failure(
     connection: &str,
 ) -> String {
     drop_virtual_schema(exasol, schema);
-    exasol.execute_expecting_failure(&create_statement(&VirtualSchemaSpec {
-        schema,
-        driver,
-        connection,
-        bucketfs_connection: Some(BUCKETFS_CONNECTION),
-        driver_path: None,
-    }))
+    exasol.execute_expecting_failure(&create_statement(&provided_driver_spec(
+        schema, driver, connection,
+    )))
 }
 
 /// Creates a virtual schema that is expected to fail, from a caller-supplied
 /// spec, and returns the error Exasol surfaced to the session.
 ///
-/// Unlike [`create_virtual_schema_expecting_failure`], which hardcodes
-/// `bucketfs_connection` to [`BUCKETFS_CONNECTION`], this takes the full
+/// Unlike [`create_virtual_schema_expecting_failure`], which names the
+/// connection of the route [`provide_drivers`] prepared, this takes the full
 /// [`VirtualSchemaSpec`] — needed by a test asserting on a statement whose
 /// `BUCKETFS_CONNECTION` is something other than the reserved connection.
 pub fn create_virtual_schema_through_expecting_failure(
@@ -296,6 +357,54 @@ mod tests {
              DRIVER = 'postgresql' CONNECTION_NAME = 'ADBC_VS_PG' \
              DRIVER_PATH = '/buckets/bfsdefault/default/mine/libadbc_driver_postgresql.so'"
         );
+    }
+
+    /// Docker Exasol's shared statements self-install through the reserved
+    /// connection [`provide_drivers`] created.
+    #[cfg(not(feature = "exasol-personal"))]
+    #[test]
+    fn a_provided_driver_statement_self_installs_through_the_reserved_connection() {
+        let statement = create_statement(&provided_driver_spec("S", Driver::MySql, "C"));
+
+        assert!(
+            statement.ends_with("BUCKETFS_CONNECTION = 'ADBC_VS_BUCKETFS'"),
+            "{statement}"
+        );
+    }
+
+    /// Exasol Personal's shared statements name no BucketFS connection and no
+    /// library, so the adapter falls back to the `supplied` default location
+    /// [`provide_drivers`] placed each driver at.
+    #[cfg(feature = "exasol-personal")]
+    #[test]
+    fn a_provided_driver_statement_leaves_the_route_to_the_supplied_default() {
+        let statement = create_statement(&provided_driver_spec("S", Driver::MySql, "C"));
+
+        assert!(
+            !statement.contains("BUCKETFS_CONNECTION") && !statement.contains("DRIVER_PATH"),
+            "{statement}"
+        );
+    }
+
+    /// Where the harness writes each driver is where the adapter looks for a
+    /// supplied one, once the bucket is mounted where a UDF opens it.
+    #[cfg(feature = "exasol-personal")]
+    #[test]
+    fn each_driver_is_supplied_where_the_adapter_loads_its_default_library() {
+        assert_eq!(
+            supplied_bucket_path(Driver::MySql),
+            "adbc-drivers/mysql/supplied/libadbc_driver_mysql.so"
+        );
+        for driver in Driver::ALL {
+            assert_eq!(
+                Path::new(&super::super::exasol::udf_object_path(
+                    &supplied_bucket_path(*driver)
+                )),
+                default_driver_path(Path::new("/buckets/bfsdefault/default"), *driver),
+                "{}",
+                driver.as_str()
+            );
+        }
     }
 
     #[test]

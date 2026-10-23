@@ -8,6 +8,28 @@ SHELL := /bin/bash
 
 COMPOSE := docker compose
 
+# --- Exasol target -------------------------------------------------------------
+#
+# The Exasol the E2E tiers run against: `docker`, the Compose `exasol` service
+# (image from EXASOL_IMAGE), or `personal`, an Exasol Personal local deployment.
+
+EXASOL_TARGET ?= docker
+# Concatenates the unknown words and the word count, so only one known word passes.
+ifneq ($(filter-out docker personal,$(EXASOL_TARGET))$(words $(EXASOL_TARGET)),1)
+$(error EXASOL_TARGET must be `docker` or `personal`, but is `$(EXASOL_TARGET)`)
+endif
+export EXASOL_IMAGE
+
+# Its own name rather than the launcher's default deployment, so stack-down
+# destroys only the deployment stack-up-exasol installed.
+EXASOL_PERSONAL_DEPLOYMENT := adbc-vs
+
+# Personal local has no BucketFS HTTP endpoint, so the harness needs its other backend.
+E2E_FEATURES := exasol-e2e
+ifeq ($(EXASOL_TARGET),personal)
+E2E_FEATURES := exasol-e2e,exasol-personal
+endif
+
 # --- cross-udf-build --------------------------------------------------------
 #
 # The SLC-compatible shared object MUST be built inside rust:1.94-trixie,
@@ -77,9 +99,12 @@ cross-udf-build: $(SO_FILE)
 fmt-check:
 	cargo fmt --all -- --check
 
+# Two runs, because `exasol-personal` compiles out the Docker backend and every
+# self-install test. A new cargo feature goes into the first run's list.
 .PHONY: lint
 lint:
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --features adbc-vs-adapter/built-artifact,adbc-vs-adapter/exasol-e2e,adbc-vs-adapter/policy-check,adbc-vs-adapter/bench,adbc-vs-adapter/registry-live,adbc-vs-scan/mysql-it,adbc-vs-scan/postgres-it,adbc-vs-scan/trino-it -- -D warnings
+	cargo clippy -p adbc-vs-adapter --all-targets --features exasol-e2e,exasol-personal -- -D warnings
 
 .PHONY: test
 test:
@@ -110,15 +135,15 @@ test-it-trino: stack-up-trino
 
 .PHONY: test-e2e
 test-e2e: cross-udf-build stack-up-exasol stack-up-mysql
-	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_mysql_test -- --test-threads=1
+	cargo test -p adbc-vs-adapter --features $(E2E_FEATURES) --test e2e_mysql_test -- --test-threads=1
 
 .PHONY: test-e2e-postgres
 test-e2e-postgres: cross-udf-build stack-up-exasol stack-up-postgres stack-up-mysql
-	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_postgres_test -- --test-threads=1
+	cargo test -p adbc-vs-adapter --features $(E2E_FEATURES) --test e2e_postgres_test -- --test-threads=1
 
 .PHONY: test-e2e-trino
 test-e2e-trino: cross-udf-build stack-up-exasol stack-up-trino stack-up-mysql
-	cargo test -p adbc-vs-adapter --features exasol-e2e --test e2e_trino_test -- --test-threads=1
+	cargo test -p adbc-vs-adapter --features $(E2E_FEATURES) --test e2e_trino_test -- --test-threads=1
 
 # Reaches the public driver registry, and is the only target that does. Run
 # by hand when a declared version range is changed or suspected stale; no CI
@@ -158,14 +183,23 @@ bench-summary:
 
 # --- release packaging --------------------------------------------------------
 #
-# Both targets back the `release` CI job. release-tarball is a real-file
+# Both targets back the `package` CI job. release-tarball is a real-file
 # target keyed on the .so, like cross-udf-build itself, so re-running it
 # without a new .so is a no-op. third-party-licenses is always re-run: it
 # reflects whatever Cargo.lock currently resolves to. release-tarball packs
 # its output, so run third-party-licenses first.
 
+# The .so loads only on the architecture it was built for, so each architecture packs its own tarball.
+# The x86_64 asset keeps its unsuffixed name, so existing download links keep working.
+HOST_ARCH := $(shell uname -m)
 DIST_DIR := dist
+ifeq ($(HOST_ARCH),x86_64)
 RELEASE_TARBALL := $(DIST_DIR)/adbc-vs.tar.gz
+else ifneq ($(filter aarch64 arm64,$(HOST_ARCH)),)
+RELEASE_TARBALL := $(DIST_DIR)/adbc-vs-linux-arm64.tar.gz
+else
+$(error HOST_ARCH must be `x86_64`, `aarch64`, or `arm64`, but is `$(HOST_ARCH)`)
+endif
 
 $(RELEASE_TARBALL): $(SO_FILE)
 	mkdir -p $(DIST_DIR)/pkg/udf
@@ -206,8 +240,27 @@ EXASOL_WAIT_TIMEOUT ?= 300
 # only one of the two were tunable.
 POLL_INTERVAL ?= 5
 
+# Under `personal`, readiness is the launcher's own status: the deployment's
+# password lives only in its secrets.json, so no recipe line can carry it.
 .PHONY: stack-up-exasol
 stack-up-exasol:
+ifeq ($(EXASOL_TARGET),personal)
+	if exasol info --json --deployment $(EXASOL_PERSONAL_DEPLOYMENT) \
+		| jq -e '.deploymentState == "not_initialized"' >/dev/null; then \
+		exasol install local --auto-approve --deployment $(EXASOL_PERSONAL_DEPLOYMENT); \
+	else \
+		exasol start --deployment $(EXASOL_PERSONAL_DEPLOYMENT); \
+	fi
+	SECONDS=0; \
+	until exasol status --json --deployment $(EXASOL_PERSONAL_DEPLOYMENT) \
+		| jq -e '.status == "database_ready"' >/dev/null; do \
+		if [ "$$SECONDS" -ge "$(EXASOL_WAIT_TIMEOUT)" ]; then \
+			echo "Exasol Personal deployment $(EXASOL_PERSONAL_DEPLOYMENT) was not database_ready within $(EXASOL_WAIT_TIMEOUT)s" >&2; \
+			exit 1; \
+		fi; \
+		sleep $(POLL_INTERVAL); \
+	done
+else
 	$(COMPOSE) up -d exasol
 	SECONDS=0; \
 	until exapump sql --dsn "$(EXASOL_DSN)" "SELECT 1" >/dev/null 2>&1; do \
@@ -217,6 +270,7 @@ stack-up-exasol:
 		fi; \
 		sleep $(POLL_INTERVAL); \
 	done
+endif
 
 # TRINO_PASSWORD is the plaintext behind docker/trino/password.db's bcrypt
 # hash for user adbc_vs. `export` makes it visible to `docker compose exec`'s
@@ -291,6 +345,13 @@ stack-up-trino: $(TRINO_KEYSTORE)
 .PHONY: stack-up
 stack-up: stack-up-mysql stack-up-postgres stack-up-trino stack-up-exasol
 
+# `exasol destroy` refuses a deployment that does not exist, so the check keeps stack-down repeatable.
 .PHONY: stack-down
 stack-down:
 	$(COMPOSE) down
+ifeq ($(EXASOL_TARGET),personal)
+	if ! exasol info --json --deployment $(EXASOL_PERSONAL_DEPLOYMENT) \
+		| jq -e '.deploymentState == "not_initialized"' >/dev/null; then \
+		exasol destroy --remove --auto-approve --deployment $(EXASOL_PERSONAL_DEPLOYMENT); \
+	fi
+endif

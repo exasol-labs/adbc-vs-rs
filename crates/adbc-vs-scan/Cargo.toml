@@ -26,7 +26,7 @@ arrow.workspace = true
 
 [dev-dependencies]
 # Dev-only back edge onto the adapter, so the integration tier reuses its install code.
-adbc-vs-adapter = { path = "../adbc-vs-adapter", version = "0.6.0" }
+adbc-vs-adapter = { path = "../adbc-vs-adapter", version = "0.7.0" }
 flate2.workspace = true
 reqwest.workspace = true
 tar.workspace = true

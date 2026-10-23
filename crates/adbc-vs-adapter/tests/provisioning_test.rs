@@ -21,7 +21,7 @@ use adbc_vs_adapter::provisioning::{
     default_driver_path, ensure_driver, readable_library, supplied_driver, Bucket, Credentials,
     Registry,
 };
-use adbc_vs_scan::driver::Driver;
+use adbc_vs_scan::driver::{Driver, PLATFORM};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 
@@ -49,6 +49,15 @@ const OLDER_VERSION: &str = "0.6.0";
 const RESOLVED_VERSION: &str = "0.6.1";
 
 const LIBRARY_BYTES: &[u8] = b"\x7fELF a driver, for the purposes of this test";
+/// The Linux platform this binary was not compiled for, which an index can
+/// publish without publishing the compile target's own.
+#[cfg(target_arch = "x86_64")]
+const OTHER_LINUX_PLATFORM: &str = "linux_arm64";
+#[cfg(target_arch = "aarch64")]
+const OTHER_LINUX_PLATFORM: &str = "linux_amd64";
+
+const AMD64_LIBRARY_BYTES: &[u8] = b"\x7fELF the linux_amd64 build of the driver";
+const ARM64_LIBRARY_BYTES: &[u8] = b"\x7fELF the linux_arm64 build of the driver";
 const OLDER_LIBRARY_BYTES: &[u8] = b"\x7fELF the driver an earlier statement installed";
 const WRITE_USER: &str = "w";
 const WRITE_PASSWORD: &str = "M4b7-bucketfs-write";
@@ -165,6 +174,46 @@ fn newer_in_range_version_is_not_short_circuited() {
         bucketfs.requested_paths(),
         vec![driver_put_path(RESOLVED_VERSION)],
         "only the newly resolved version is written, and under its own version segment"
+    );
+}
+
+#[test]
+fn self_install_downloads_the_package_of_the_compile_targets_platform() {
+    #[cfg(target_arch = "x86_64")]
+    let (expected_platform, expected_bytes) = ("linux_amd64", AMD64_LIBRARY_BYTES);
+    #[cfg(target_arch = "aarch64")]
+    let (expected_platform, expected_bytes) = ("linux_arm64", ARM64_LIBRARY_BYTES);
+
+    let mount = MountDirectory::new();
+    let registry = StubServer::serving(routes(&[
+        (INDEX_PATH, index_publishing_both_linux_platforms()),
+        (
+            &package_path_on(DRIVER, PUBLISHED_NEWEST, "linux_amd64"),
+            package_declaring(driver_library(), AMD64_LIBRARY_BYTES),
+        ),
+        (
+            &package_path_on(DRIVER, PUBLISHED_NEWEST, "linux_arm64"),
+            package_declaring(driver_library(), ARM64_LIBRARY_BYTES),
+        ),
+    ]));
+    let bucketfs = StubServer::serving(mount.accepting_writes());
+
+    let installed = ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount))
+        .expect("an index publishing both Linux architectures must install one of them");
+
+    assert_eq!(
+        fs::read(&installed.path).expect("the installed driver must be readable"),
+        expected_bytes,
+        "the library must come from the {expected_platform} package, the platform this \
+         binary was compiled for"
+    );
+    assert_eq!(
+        registry.requested_paths(),
+        vec![
+            INDEX_PATH.to_string(),
+            package_path_on(DRIVER, PUBLISHED_NEWEST, expected_platform)
+        ],
+        "only the compile target's package may be downloaded"
     );
 }
 
@@ -313,16 +362,18 @@ fn missing_platform_names_driver_and_version() {
         "        packages:\n",
         "          - platform: darwin_arm64\n",
         "            url: mysql/v0.6.1/mysql_darwin_arm64_v0.6.1.tar.gz\n",
-    );
+    )
+    .to_owned()
+        + &other_linux_package_entry("mysql", "v0.6.1");
     let registry = StubServer::serving(routes(&[(INDEX_PATH, index.as_bytes().to_vec())]));
     let bucketfs = StubServer::serving(routes(&[]));
 
     let error = ensure_driver(&registry.as_registry(), &bucketfs.as_bucket(&mount))
-        .expect_err("an index without a linux_amd64 package must fail provisioning");
+        .expect_err("an index without the compile target's package must fail provisioning");
 
     let message = error.to_string();
     assert!(
-        message.contains("linux_amd64"),
+        message.contains(PLATFORM),
         "the error must name the platform it looked for: {message}"
     );
     assert!(
@@ -352,7 +403,9 @@ fn missing_platform_names_driver_and_version_for_postgresql() {
         "        packages:\n",
         "          - platform: darwin_arm64\n",
         "            url: postgresql/1.13.0/postgresql_darwin_arm64_1.13.0.tar.gz\n",
-    );
+    )
+    .to_owned()
+        + &other_linux_package_entry("postgresql", "1.13.0");
     let registry = StubServer::serving(routes(&[(INDEX_PATH, index.as_bytes().to_vec())]));
     let bucketfs = StubServer::serving(routes(&[]));
 
@@ -360,11 +413,11 @@ fn missing_platform_names_driver_and_version_for_postgresql() {
         &Registry::at(&registry.url(), Driver::Postgres),
         &bucketfs.as_bucket(&mount),
     )
-    .expect_err("an index without a linux_amd64 package must fail provisioning");
+    .expect_err("an index without the compile target's package must fail provisioning");
 
     let message = error.to_string();
     assert!(
-        message.contains("linux_amd64"),
+        message.contains(PLATFORM),
         "the error must name the platform it looked for: {message}"
     );
     assert!(
@@ -1087,17 +1140,48 @@ fn place_supplied_library(mount: &MountDirectory, driver: Driver, bytes: &[u8]) 
 // Package and index fixtures
 // ---------------------------------------------------------------------------
 
-/// Where the stub registry publishes one version's `linux_amd64` package, for
-/// the scenario's own driver (`DRIVER`, MySQL).
+/// Where the stub registry publishes one version's package for the compile
+/// target's platform, for the scenario's own driver (`DRIVER`, MySQL).
 fn package_path(published: &str) -> String {
     package_path_for(DRIVER, published)
 }
 
-/// Where the stub registry publishes one version's `linux_amd64` package, for
-/// an explicitly named driver.
+/// Where the stub registry publishes one version's package for the compile
+/// target's platform, for an explicitly named driver.
 fn package_path_for(driver: Driver, published: &str) -> String {
+    package_path_on(driver, published, PLATFORM)
+}
+
+/// Where the stub registry publishes one version's package for a named
+/// platform.
+fn package_path_on(driver: Driver, published: &str, platform: &str) -> String {
     let path = driver.as_str();
-    format!("/{path}/{published}/{path}_linux_amd64_{published}.tar.gz")
+    format!("/{path}/{published}/{path}_{platform}_{published}.tar.gz")
+}
+
+/// The index lines publishing the other Linux architecture's package of one
+/// version, as the tail of a `packages:` list.
+fn other_linux_package_entry(driver_path: &str, version: &str) -> String {
+    format!(
+        "          - platform: {OTHER_LINUX_PLATFORM}\n            url: \
+         {driver_path}/{version}/{driver_path}_{OTHER_LINUX_PLATFORM}_{version}.tar.gz\n"
+    )
+}
+
+/// The architecture-neutral index a registry publishes for one version: both
+/// Linux platforms, so only the client's own choice decides which it downloads.
+fn index_publishing_both_linux_platforms() -> Vec<u8> {
+    let mut block = format!("  - path: {}\n    pkginfo:\n", DRIVER.as_str());
+    block.push_str(&format!(
+        "      - version: {PUBLISHED_NEWEST}\n        packages:\n"
+    ));
+    for platform in ["linux_amd64", "linux_arm64"] {
+        block.push_str(&format!(
+            "          - platform: {platform}\n            url: {}\n",
+            package_path_on(DRIVER, PUBLISHED_NEWEST, platform).trim_start_matches('/')
+        ));
+    }
+    format!("drivers:\n{block}").into_bytes()
 }
 
 /// Where BucketFS receives one version of the scenario's own driver's library
@@ -1117,14 +1201,14 @@ fn driver_put_path_for(driver: Driver, version: &str) -> String {
 }
 
 /// An index publishing every given version of the scenario's own driver
-/// (`DRIVER`, MySQL), each with the `linux_amd64` package [`package_path`]
+/// (`DRIVER`, MySQL), each with the compile target's package [`package_path`]
 /// locates.
 fn index_publishing(published: &[&str]) -> Vec<u8> {
     index_publishing_for(DRIVER, published)
 }
 
 /// An index publishing every given version of one named driver, each with the
-/// `linux_amd64` package [`package_path_for`] locates.
+/// compile-target package [`package_path_for`] locates.
 fn index_publishing_for(driver: Driver, published: &[&str]) -> Vec<u8> {
     format!("drivers:\n{}", driver_block(driver, published)).into_bytes()
 }
@@ -1145,14 +1229,14 @@ fn index_publishing_both_drivers(
 }
 
 /// One driver's entry within a registry index document: its `path` and every
-/// given published version, each with the `linux_amd64` package
+/// given published version, each with the compile target's package
 /// [`package_path_for`] locates.
 fn driver_block(driver: Driver, published: &[&str]) -> String {
     let mut block = format!("  - path: {}\n    pkginfo:\n", driver.as_str());
     for version in published {
         block.push_str(&format!(
             "      - version: {version}\n        packages:\n          - platform: \
-             linux_amd64\n            url: {}\n",
+             {PLATFORM}\n            url: {}\n",
             package_path_for(driver, version).trim_start_matches('/')
         ));
     }

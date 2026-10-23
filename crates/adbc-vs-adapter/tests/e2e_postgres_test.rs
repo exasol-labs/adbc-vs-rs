@@ -775,6 +775,7 @@ fn no_generated_statement_carries_order_limit_or_offset() {
 /// own source holds rather than the other source's. Task 8.5 owns the
 /// capability half of the two-driver claim and states its own mechanism, so
 /// this test does not restate it.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn two_drivers_install_distinct_libraries_and_each_query_reaches_its_own_source() {
     let stack = stack::shared();
@@ -1299,6 +1300,7 @@ fn two_virtual_schemas_advertise_their_own_capability_sets() {
 /// self-install does not short-circuit off a pre-placed library. The two
 /// binaries share one BucketFS, so a `supplied` object a MySQL-binary failure
 /// left behind must not be returned here as the installed driver.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_driver(stack: &stack::Stack, driver: Driver) -> Option<String> {
     let prefix = format!("adbc-drivers/{}/", driver.as_str());
     let library = driver.package().library;

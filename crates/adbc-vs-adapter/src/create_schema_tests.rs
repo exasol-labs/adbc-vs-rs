@@ -1,3 +1,4 @@
+use adbc_vs_scan::driver::PLATFORM;
 use semver::Version;
 use serde_json::json;
 use tempfile::TempDir;
@@ -961,8 +962,7 @@ fn an_explicit_bucketfs_connection_never_falls_back() {
             "a package download that reached no host, which runs only after a version \
              resolved and the versioned presence check ran",
             ProvisioningError::PackageUnreachable {
-                url: "https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_linux_amd64.tar.gz"
-                    .to_string(),
+                url: format!("https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_{PLATFORM}.tar.gz"),
                 driver: Driver::MySql.as_str().to_string(),
                 cause: "error trying to connect: connection refused".to_string(),
             },
@@ -978,8 +978,7 @@ fn an_explicit_bucketfs_connection_never_falls_back() {
         (
             "a package body that stopped arriving after its status did",
             ProvisioningError::TransferInterrupted {
-                url: "https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_linux_amd64.tar.gz"
-                    .to_string(),
+                url: format!("https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_{PLATFORM}.tar.gz"),
                 driver: Driver::MySql.as_str().to_string(),
                 cause: "connection closed before message completed".to_string(),
             },

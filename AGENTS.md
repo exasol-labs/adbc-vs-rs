@@ -14,6 +14,8 @@
 ## Build
 
 - `make cross-udf-build` is the only way to build the UDF `.so`. Never run host `cargo build --release`: the glibc fingerprint must match the SLC or the `.so` is rejected at load time.
+- `make cross-udf-build` builds for the host's architecture. Build the aarch64 `.so` on an aarch64 host, never cross-compiled: `cargo exasol-udf validate` loads the `.so`.
+- `make release-tarball` names the tarball after the host architecture (`adbc-vs.tar.gz` on x86_64, `adbc-vs-linux-arm64.tar.gz` on aarch64). CI packs each tarball on a runner of its architecture.
 - `SLC_VERSION` in the `Makefile` must equal the `exasol-udf-sdk` version.
 - Every check goes through a `make` target. CI calls `make <target>`, never inline shell, except runner preparation and `release` glue.
 - When you change `Makefile`, `ci.yml`, or `deny.toml`, keep `tests/make_targets_test.rs`, `tests/workflow_test.rs`, and `tests/policy_test.rs` passing.
@@ -21,6 +23,11 @@
 ## Testing
 
 - `make test` runs host unit tests and needs no Docker. Other tiers sit behind default-off cargo features and `make` targets: `test-it`, `test-it-postgres`, `test-it-trino`, `test-artifact`, `test-e2e`, `test-e2e-postgres`, `test-e2e-trino`, `deny`.
+- `make test` and the `test-it*` tiers pass on x86_64 and aarch64. Test code takes the platform the running binary requests from `adbc_vs_scan::driver::PLATFORM` and never spells it as a literal. The exception is `self_install_downloads_the_package_of_the_compile_targets_platform`, which spells `linux_amd64` and `linux_arm64` per `#[cfg(target_arch)]`, so that the mapping itself is under test. The other Linux platform, fixture indexes, and URLs that only label an error are data and may spell either platform.
+- `EXASOL_TARGET` selects the E2E Exasol: `docker` (the Compose `exasol` service, tag from `EXASOL_IMAGE`) or `personal` (an Exasol Personal local deployment named `adbc-vs`, which needs Podman, `jq`, and the `exasol` launcher). No arm64 Docker Exasol image exists, so aarch64 E2E runs only against Exasol Personal. `make stack-down` under `personal` destroys only the `adbc-vs` deployment.
+- Switching `EXASOL_IMAGE` reuses the `exasol-data` volume, so run `docker compose down -v` first.
+- Exasol Personal local has no BucketFS HTTP endpoint. Under `personal`, the harness writes BucketFS objects as files in the deployment directory and loads drivers from the `supplied` location. Tests that need self-install are compiled out with `#[cfg(not(feature = "exasol-personal"))]`, which is not a run-time skip.
+- The harness reads Exasol Personal's address and password from `exasol info --json` and the deployment's `secrets.json`. No Exasol credential goes into an env var, a make variable, a CI file, or a log.
 - Integration tiers (`test-it*`) cover the ADBC path only and must not need Exasol or `cross-udf-build`.
 - E2E tiers need `cross-udf-build` plus `stack-up-exasol` and only the sources their binary queries. Start containers yourself via `make stack-up-*`, do not ask the user. Run with `--test-threads=1`: one shared setup installs the SLC and creates the virtual schemas.
 - Tests fail, never skip, when a container is unavailable. Bounded waits panic and name the subject and deadline. Never use a fixed `sleep`.
@@ -34,6 +41,7 @@
 ## Code quality
 
 - `make fmt-check` and `make lint` pass with zero warnings before committing.
+- `make lint` runs clippy twice, because `exasol-personal` compiles out the Docker backend. The first run enables every feature except `exasol-personal`. The second enables `exasol-e2e` and `exasol-personal`. CI runs `make lint` on both architectures. A new cargo feature goes into the first run's list.
 - A comment states a non-obvious why: an invariant, an external-system quirk, or a spec constraint. Keep it to 1 or 2 lines. Never restate the code, narrate history, or add banners.
 
 ## Security and policy
@@ -45,3 +53,4 @@
 ## Release
 
 - Bump the version in the root `Cargo.toml` in every PR that should release. The CI `release` job tags and publishes only when the version is new.
+- The release publishes both architecture tarballs. Each `package` row needs every build, lint, and test job, and `release` needs both rows.

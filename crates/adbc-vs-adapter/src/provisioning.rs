@@ -767,7 +767,8 @@ pub fn default_driver_path(mount: &Path, driver: Driver) -> PathBuf {
 }
 
 /// Resolves the driver's declared version range against a registry index
-/// document to one published version and its `linux_amd64` package.
+/// document to one published version and its package for the compile target's
+/// [`PLATFORM`].
 fn select_package(index: &str, registry: &Registry) -> Result<ResolvedPackage, ProvisioningError> {
     let url = registry.index_url();
     let registry_path = registry.driver.package().registry_path;
