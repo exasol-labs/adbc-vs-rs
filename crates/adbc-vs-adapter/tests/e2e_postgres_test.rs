@@ -1080,31 +1080,42 @@ fn views_are_exposed_alongside_base_tables() {
 }
 
 /// `refresh_target` (`docker/postgres/init.sql`) is dedicated to this test's
-/// `ALTER TABLE`, so no other test's fixture is disturbed by it. Columns are
-/// read before the `ADD COLUMN` and asserted only after the `DROP COLUMN` has
-/// restored the source, so a panic between the two leaves no other test
-/// reading a virtual schema that still declares a column the source no
-/// longer has.
+/// `ALTER TABLE`, so no other test's fixture is disturbed by it. The refresh
+/// runs against a schema of its own that supplies the shared schema's driver
+/// library, so it never reaches the live registry. Columns are asserted only
+/// after the `DROP COLUMN` has restored the source.
 #[test]
 fn refresh_picks_up_a_new_postgresql_column() {
+    const REFRESH_SCHEMA: &str = "PGREFRESHVS";
     let stack = stack::shared();
-    let before = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    schema::create_virtual_schema_through(
+        &stack.exasol,
+        schema::supplied_driver_spec(
+            REFRESH_SCHEMA,
+            Driver::Postgres,
+            stack::POSTGRES_CONNECTION,
+            &library,
+        ),
+    );
+    let before = declared_columns(REFRESH_SCHEMA, "refresh_target");
 
     stack
         .postgres
         .execute("ALTER TABLE refresh_target ADD COLUMN extra NUMERIC(9,3)");
     stack
         .exasol
-        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
-    let after_add = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+        .execute(&format!("ALTER VIRTUAL SCHEMA {REFRESH_SCHEMA} REFRESH"));
+    let after_add = declared_columns(REFRESH_SCHEMA, "refresh_target");
 
     stack
         .postgres
         .execute("ALTER TABLE refresh_target DROP COLUMN extra");
     stack
         .exasol
-        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
-    let after_drop = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+        .execute(&format!("ALTER VIRTUAL SCHEMA {REFRESH_SCHEMA} REFRESH"));
+    let after_drop = declared_columns(REFRESH_SCHEMA, "refresh_target");
+    schema::drop_virtual_schema(&stack.exasol, REFRESH_SCHEMA);
 
     assert!(
         !before.iter().any(|(name, _)| name == "extra"),
@@ -1118,8 +1129,8 @@ fn refresh_picks_up_a_new_postgresql_column() {
     );
     assert_eq!(
         after_drop, before,
-        "the second refresh must leave the shared virtual schema declaring exactly the columns \
-         the source still has"
+        "the second refresh must leave the virtual schema declaring exactly the columns the \
+         source still has"
     );
 }
 
@@ -1137,6 +1148,7 @@ fn refresh_picks_up_a_new_postgresql_column() {
 /// been exercised over it, so neither call disturbs the other's fixture.
 fn credential_failures(scenario: &str, address: &str, password: &str) -> [String; 3] {
     let stack = stack::shared();
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
 
     let bad_connection = format!("ADBC_VS_PG_{scenario}_BAD");
     stack.exasol.execute(&format!(
@@ -1147,21 +1159,27 @@ fn credential_failures(scenario: &str, address: &str, password: &str) -> [String
     ));
 
     let create_schema_name = format!("PGFAIL_{scenario}_CREATE");
-    let create_error = schema::create_virtual_schema_expecting_failure(
+    let create_error = schema::create_virtual_schema_through_expecting_failure(
         &stack.exasol,
-        Driver::Postgres,
-        &create_schema_name,
-        &bad_connection,
+        schema::supplied_driver_spec(
+            &create_schema_name,
+            Driver::Postgres,
+            &bad_connection,
+            &library,
+        ),
     );
 
     let working_connection = format!("ADBC_VS_PG_{scenario}_WORK");
     schema::create_postgres_connection(&stack.exasol, &working_connection, postgres::DATABASE);
     let working_schema = format!("PGFAIL_{scenario}_WORK");
-    schema::create_virtual_schema(
+    schema::create_virtual_schema_through(
         &stack.exasol,
-        Driver::Postgres,
-        &working_schema,
-        &working_connection,
+        schema::supplied_driver_spec(
+            &working_schema,
+            Driver::Postgres,
+            &working_connection,
+            &library,
+        ),
     );
 
     let set_properties_error = stack.exasol.execute_expecting_failure(&format!(

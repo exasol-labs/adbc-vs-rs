@@ -164,6 +164,40 @@ fn provided_driver_spec<'a>(
     }
 }
 
+/// A statement that loads `library`, a driver the operator already placed, so
+/// the adapter reaches neither the registry nor BucketFS for it. A failure
+/// test uses it to keep the live registry out of the error it asserts on.
+pub fn supplied_driver_spec<'a>(
+    schema: &'a str,
+    driver: Driver,
+    connection: &'a str,
+    library: &'a str,
+) -> VirtualSchemaSpec<'a> {
+    VirtualSchemaSpec {
+        schema,
+        driver,
+        connection,
+        bucketfs_connection: None,
+        driver_path: Some(library),
+    }
+}
+
+/// The driver library path `schema` recorded in its `adapterNotes`, which a
+/// later schema can supply as its own `DRIVER_PATH`.
+pub fn recorded_driver_path(exasol: &Exasol, schema: &str) -> String {
+    let notes = exasol
+        .query_scalar(&format!(
+            "SELECT ADAPTER_NOTES FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS WHERE SCHEMA_NAME = '{schema}'"
+        ))
+        .unwrap_or_else(|| panic!("virtual schema {schema} records adapter notes"));
+    let notes: serde_json::Value =
+        serde_json::from_str(&notes).expect("adapter notes are a JSON object");
+    notes["driverPath"]
+        .as_str()
+        .unwrap_or_else(|| panic!("virtual schema {schema} records no driver path: {notes}"))
+        .to_owned()
+}
+
 /// Creates a virtual schema that provisions its driver through
 /// `spec.bucketfs_connection`, which a test that means to observe whether
 /// provisioning ran at all points somewhere unreachable.

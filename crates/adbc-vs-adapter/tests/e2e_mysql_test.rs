@@ -674,7 +674,11 @@ fn all_request_types_return_matching_type() {
         mysql::EMPTY_DATABASE,
     );
 
-    schema::create_virtual_schema(&stack.exasol, Driver::MySql, "DISPATCHVS", MYSQL_CONNECTION);
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    schema::create_virtual_schema_through(
+        &stack.exasol,
+        schema::supplied_driver_spec("DISPATCHVS", Driver::MySql, MYSQL_CONNECTION, &library),
+    );
     stack
         .exasol
         .execute("ALTER VIRTUAL SCHEMA DISPATCHVS REFRESH");
@@ -685,6 +689,7 @@ fn all_request_types_return_matching_type() {
         .exasol
         .execute("ALTER VIRTUAL SCHEMA DISPATCHVS SET CONNECTION_NAME = 'ADBC_VS_DISPATCH_EMPTY'");
     let tables_after_set = table_names("DISPATCHVS");
+    let notes_after_set = adapter_notes("DISPATCHVS");
     stack
         .exasol
         .execute("DROP VIRTUAL SCHEMA DISPATCHVS CASCADE");
@@ -700,34 +705,50 @@ fn all_request_types_return_matching_type() {
         "setProperties must re-discover against the CONNECTION_NAME the statement changed, \
          which addresses a database holding no table: {tables_after_set:?}"
     );
+    assert!(
+        notes_after_set["driverPath"] == library && notes_after_set.get("driverVersion").is_none(),
+        "Exasol must resend DRIVER_PATH on refresh and setProperties, so neither resolves a \
+         registry version: {notes_after_set}"
+    );
 }
 
-/// The refresh under test runs against the virtual schema every other test in
-/// this file reads, so this one takes the column back out of both sides
-/// before it asserts: dropping the MySQL column without a second refresh
-/// would leave the shared schema permanently declaring a column the source no
-/// longer has, which is a defect for whichever test reads it next rather than
-/// for this one.
+/// The refresh runs against a schema of its own that supplies the shared
+/// schema's driver library, so it never reaches the live registry. It still
+/// takes the column back out of the source before it asserts, so a panic
+/// leaves no later test a source with a stray column.
 #[test]
 fn refresh_picks_up_new_column() {
+    const REFRESH_SCHEMA: &str = "REFRESHVS";
     let stack = stack::shared();
-    let before = column_names("refresh_target");
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    schema::create_virtual_schema_through(
+        &stack.exasol,
+        schema::supplied_driver_spec(REFRESH_SCHEMA, Driver::MySql, MYSQL_CONNECTION, &library),
+    );
+    let refresh_columns = || {
+        columns(REFRESH_SCHEMA, "refresh_target")
+            .iter()
+            .filter_map(|row| cell(row, "COLUMN_NAME"))
+            .collect::<Vec<_>>()
+    };
+    let before = refresh_columns();
 
     stack
         .mysql
         .execute("ALTER TABLE refresh_target ADD COLUMN extra VARCHAR(20) NULL");
     stack
         .exasol
-        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
-    let after_add = column_names("refresh_target");
+        .execute(&format!("ALTER VIRTUAL SCHEMA {REFRESH_SCHEMA} REFRESH"));
+    let after_add = refresh_columns();
 
     stack
         .mysql
         .execute("ALTER TABLE refresh_target DROP COLUMN extra");
     stack
         .exasol
-        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
-    let after_drop = column_names("refresh_target");
+        .execute(&format!("ALTER VIRTUAL SCHEMA {REFRESH_SCHEMA} REFRESH"));
+    let after_drop = refresh_columns();
+    schema::drop_virtual_schema(&stack.exasol, REFRESH_SCHEMA);
 
     assert!(
         !before.contains(&"extra".to_string()),
@@ -739,8 +760,8 @@ fn refresh_picks_up_new_column() {
     );
     assert_eq!(
         after_drop, before,
-        "the second refresh must leave the shared virtual schema declaring exactly the columns \
-         the source still has"
+        "the second refresh must leave the virtual schema declaring exactly the columns the \
+         source still has"
     );
 }
 
@@ -953,11 +974,10 @@ fn unreachable_source_fails_create() {
     let stack = stack::shared();
     schema::create_connection_to(&stack.exasol, "ADBC_VS_CLOSED", &mysql::unreachable_uri());
 
-    let error = schema::create_virtual_schema_expecting_failure(
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    let error = schema::create_virtual_schema_through_expecting_failure(
         &stack.exasol,
-        Driver::MySql,
-        "CLOSEDVS",
-        "ADBC_VS_CLOSED",
+        schema::supplied_driver_spec("CLOSEDVS", Driver::MySql, "ADBC_VS_CLOSED", &library),
     );
 
     let left_behind = virtual_schema_exists("CLOSEDVS");
