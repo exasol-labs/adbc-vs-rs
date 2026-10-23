@@ -15,30 +15,23 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  # Every job that builds or tests the library runs on both architectures, so the
-  # `#[cfg(target_arch)]` branches are compiled and exercised, not only written.
-  # Each job's `.so` is built on a runner of its own architecture, never cross-
-  # compiled, because `cargo exasol-udf validate` loads it.
-  build-so:
-    name: build-so (${{ matrix.runner }})
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
+  # Stage 1, the cheap gates: they run at once and nothing else starts until
+  # they pass. Stage 2 builds the `.so` once per architecture, and stage 3 (the
+  # integration and E2E tiers) consumes it. Every job that compiles or tests the
+  # library runs on both architectures, so the `#[cfg(target_arch)]` branches
+  # are compiled and exercised, not only written. Each `.so` is built on a
+  # runner of its own architecture, never cross-compiled, because
+  # `cargo exasol-udf validate` loads it.
+  fmt-check:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
-      - name: Build the SLC-compatible shared object
-        run: make cross-udf-build
-      - name: Assert the artifact
-        run: make test-artifact
-      - name: Upload UDF .so artifact
-        uses: actions/upload-artifact@v4
         with:
-          name: adbc-vs-so-${{ runner.arch }}
-          path: target/release/libadbc_vs_adapter.so
+          components: rustfmt
+      - name: Check formatting
+        run: make fmt-check
 
   lint:
     name: lint (${{ matrix.runner }})
@@ -52,9 +45,11 @@ jobs:
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
         with:
-          components: rustfmt, clippy
-      - name: Check formatting
-        run: make fmt-check
+          components: clippy
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: lint-${{ runner.arch }}
       - name: Lint
         run: make lint
 
@@ -69,6 +64,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: unit-${{ runner.arch }}
       - name: Run unit tests
         run: make test
 
@@ -76,17 +75,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: deny-${{ runner.arch }}
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - name: Check dependency policy
         run: make deny
 
-  # Each source's tier is its own job. Sharing one would run the second only
-  # while the first passed, so a red MySQL tier would leave PostgreSQL with no
-  # signal at the moment it is most needed — and `package`'s `needs` could not
-  # tell "passed" from "never ran".
-  integration-tests:
-    name: integration-tests (${{ matrix.runner }})
+  # Stage 2. `target/` is on the host, because the build container mounts the
+  # workspace, so caching it makes a rebuild incremental. The key holds only the
+  # inputs that change the dependency set, so a source edit still hits the cache.
+  build-so:
+    name: build-so (${{ matrix.runner }})
+    needs: [fmt-check, deny, lint, unit-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -96,11 +103,50 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the build output
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: so-target-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'crates/adbc-vs-scan/build.rs', 'crates/adbc-vs-scan/drivers/**') }}
+          restore-keys: |
+            so-target-${{ runner.arch }}-
+      - name: Build the SLC-compatible shared object
+        run: make cross-udf-build
+      - name: Assert the artifact
+        run: make test-artifact
+      - name: Upload UDF .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: adbc-vs-so-${{ runner.arch }}
+          path: target/release/libadbc_vs_adapter.so
+
+  # Stage 3. Each source's tier is its own job. Sharing one would run the second
+  # only while the first passed, so a red MySQL tier would leave PostgreSQL with
+  # no signal at the moment it is most needed, and `package`'s `needs` could not
+  # tell "passed" from "never ran". The integration tiers take the ADBC path
+  # only, so they need no `.so` and wait for the gates alone.
+  integration-tests:
+    name: integration-tests (${{ matrix.runner }})
+    needs: [fmt-check, deny, lint, unit-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: it-${{ runner.arch }}
       - name: Run the MySQL-only integration tier
         run: make test-it
 
   integration-tests-postgres:
     name: integration-tests-postgres (${{ matrix.runner }})
+    needs: [fmt-check, deny, lint, unit-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -110,11 +156,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: it-${{ runner.arch }}
       - name: Run the PostgreSQL-only integration tier
         run: make test-it-postgres
 
   integration-tests-trino:
     name: integration-tests-trino (${{ matrix.runner }})
+    needs: [fmt-check, deny, lint, unit-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -124,11 +175,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: it-${{ runner.arch }}
       - name: Run the Trino-only integration tier
         run: make test-it-trino
 
+  # The E2E tiers run on the `.so` that build-so validated, never on a rebuild.
+  # A matrix job can only `needs` a whole job, so each E2E row waits for build-so
+  # on both architectures.
   e2e:
     name: e2e (${{ matrix.name }})
+    needs: [fmt-check, deny, lint, unit-tests, build-so]
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +217,21 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: e2e-${{ runner.arch }}
+      - name: Download the shared UDF .so
+        uses: actions/download-artifact@v4
+        with:
+          name: adbc-vs-so-${{ runner.arch }}
+          path: target/release
+      # Newer than every source, so make treats cross-udf-build as up to date and
+      # never rebuilds the .so inside this job; -q fails the job if it would.
+      - name: Mark the shared .so as up to date
+        run: |
+          touch target/release/libadbc_vs_adapter.so
+          make -q cross-udf-build
       - name: Install exapump
         run: |
           curl -fsSL https://raw.githubusercontent.com/exasol-labs/exapump/main/install.sh | sh
@@ -196,6 +270,7 @@ jobs:
 
   e2e-postgres:
     name: e2e-postgres (${{ matrix.name }})
+    needs: [fmt-check, deny, lint, unit-tests, build-so]
     strategy:
       fail-fast: false
       matrix:
@@ -225,6 +300,21 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: e2e-${{ runner.arch }}
+      - name: Download the shared UDF .so
+        uses: actions/download-artifact@v4
+        with:
+          name: adbc-vs-so-${{ runner.arch }}
+          path: target/release
+      # Newer than every source, so make treats cross-udf-build as up to date and
+      # never rebuilds the .so inside this job; -q fails the job if it would.
+      - name: Mark the shared .so as up to date
+        run: |
+          touch target/release/libadbc_vs_adapter.so
+          make -q cross-udf-build
       - name: Install exapump
         run: |
           curl -fsSL https://raw.githubusercontent.com/exasol-labs/exapump/main/install.sh | sh
@@ -263,6 +353,7 @@ jobs:
 
   e2e-trino:
     name: e2e-trino (${{ matrix.name }})
+    needs: [fmt-check, deny, lint, unit-tests, build-so]
     strategy:
       fail-fast: false
       matrix:
@@ -292,6 +383,21 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
+      - name: Cache the Rust build output
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: e2e-${{ runner.arch }}
+      - name: Download the shared UDF .so
+        uses: actions/download-artifact@v4
+        with:
+          name: adbc-vs-so-${{ runner.arch }}
+          path: target/release
+      # Newer than every source, so make treats cross-udf-build as up to date and
+      # never rebuilds the .so inside this job; -q fails the job if it would.
+      - name: Mark the shared .so as up to date
+        run: |
+          touch target/release/libadbc_vs_adapter.so
+          make -q cross-udf-build
       - name: Install exapump
         run: |
           curl -fsSL https://raw.githubusercontent.com/exasol-labs/exapump/main/install.sh | sh
@@ -339,6 +445,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs:
       [
+        fmt-check,
         build-so,
         lint,
         unit-tests,

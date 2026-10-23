@@ -17,7 +17,8 @@
 - `make cross-udf-build` builds for the host's architecture. Build the aarch64 `.so` on an aarch64 host, never cross-compiled: `cargo exasol-udf validate` loads the `.so`.
 - `make release-tarball` names the tarball after the host architecture (`adbc-vs.tar.gz` on x86_64, `adbc-vs-linux-arm64.tar.gz` on aarch64). CI packs each tarball on a runner of its architecture.
 - `SLC_VERSION` in the `Makefile` must equal the `exasol-udf-sdk` version.
-- Every check goes through a `make` target. CI calls `make <target>`, never inline shell, except runner preparation and `release` glue.
+- Every check goes through a `make` target. CI calls `make <target>`, never inline shell, except runner preparation, artifact upload and download glue, and `release` glue.
+- CI builds the `.so` once per architecture in `build-so`. Every E2E job downloads that artifact and touches it, so `make` treats `cross-udf-build` as up to date. A job that rebuilds the `.so` is a defect.
 - When you change `Makefile`, `ci.yml`, or `deny.toml`, keep `tests/make_targets_test.rs` and `tests/policy_test.rs` passing.
 
 ## Testing
