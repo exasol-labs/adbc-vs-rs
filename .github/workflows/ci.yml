@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["specs/**", "docs/**"]
   pull_request:
     branches: [main]
+    paths-ignore: ["specs/**", "docs/**"]
   merge_group:
   workflow_dispatch:
 
@@ -329,7 +331,7 @@ jobs:
   # Packs each architecture's tarball on a runner of that architecture, because
   # `release-tarball` names it after the host and packs the host's `.so`.
   package:
-    name: package (${{ matrix.runner }})
+    name: package
     strategy:
       fail-fast: false
       matrix:

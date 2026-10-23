@@ -18,7 +18,7 @@
 - `make release-tarball` names the tarball after the host architecture (`adbc-vs.tar.gz` on x86_64, `adbc-vs-linux-arm64.tar.gz` on aarch64). CI packs each tarball on a runner of its architecture.
 - `SLC_VERSION` in the `Makefile` must equal the `exasol-udf-sdk` version.
 - Every check goes through a `make` target. CI calls `make <target>`, never inline shell, except runner preparation and `release` glue.
-- When you change `Makefile`, `ci.yml`, or `deny.toml`, keep `tests/make_targets_test.rs`, `tests/workflow_test.rs`, and `tests/policy_test.rs` passing.
+- When you change `Makefile`, `ci.yml`, or `deny.toml`, keep `tests/make_targets_test.rs` and `tests/policy_test.rs` passing.
 
 ## Testing
 
