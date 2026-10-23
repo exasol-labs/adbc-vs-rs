@@ -41,7 +41,7 @@ Scan UDF (scan_entry + adbc-vs-scan)
 - pushdown (crates/adbc-vs-adapter/src/pushdown.rs): builds the `pushdown` response that calls the scan UDF with a dynamic `EMITS` clause over the rendered statement | owns: the scan script name `ADBC_VS.ADBC_SCAN` | depends on: pushdown_query, sql_dialect, scan_spec, adapter_notes, exa_type
 - scan_spec (crates/adbc-vs-adapter/src/scan_spec.rs): defines the JSON contract between the pushdown response and the scan UDF | owns: the scan specification shape, which carries no credential | depends on: exa_type, driver identity
 - scan_entry (crates/adbc-vs-adapter/src/scan_entry.rs): runs the scan UDF body, resolves the source CONNECTION, opens the driver, and emits each batch to Exasol | owns: none | depends on: scan_spec, connection, scan
-- driver identity (crates/adbc-vs-scan/src/driver.rs, build.rs, drivers/*.toml): defines the supported technologies and generates each one's package row, capability list, and qualifier segment count at build time | owns: the compiled-in driver tables, the registry base URL, the platform `linux_amd64` | depends on: none
+- driver identity (crates/adbc-vs-scan/src/driver.rs, build.rs, drivers/*.toml): defines the supported technologies and generates each one's package row, capability list, and qualifier segment count at build time | owns: the compiled-in driver tables, the registry base URL, the registry platform of the compile target (`linux_amd64` for x86_64, `linux_arm64` for aarch64) | depends on: none
 - connection (crates/adbc-vs-scan/src/connection.rs): loads a driver library by its entry point, opens the ADBC database and connection, and redacts credentials from errors | owns: none, credentials live only for one open | depends on: driver identity
 - scan (crates/adbc-vs-scan/src/scan.rs, coerce.rs, error.rs): executes a statement and streams one coerced Arrow batch at a time | owns: none | depends on: connection
 
@@ -67,15 +67,16 @@ Scan UDF (scan_entry + adbc-vs-scan)
 - Scan specification: JSON with `driver`, `driver_path`, `connection`, `sql`, and `columns`, with no credential
 - BucketFS layout: the self-installed library is at `<mount>/adbc-drivers/<driver>/<version>/<library>`, the operator-supplied default is at `<mount>/adbc-drivers/<driver>/supplied/<library>`, and the mount is `/buckets/bfsdefault/default`
 - Driver declaration: `crates/adbc-vs-scan/drivers/<technology>.toml` with a `[package]` table, a `[qualifier]` segment count, and a capability list, read at build time only
-- Release artifact: `dist/adbc-vs.tar.gz` holding `udf/libadbc_vs_adapter.so`
+- Release artifacts: one per architecture, `dist/adbc-vs.tar.gz` for x86_64 and `dist/adbc-vs-linux-arm64.tar.gz` for aarch64, each holding `udf/libadbc_vs_adapter.so` built for that architecture
 
 ## Constraints
 
-- The UDF `.so` is built only inside `rust:1.94-trixie` by `make cross-udf-build`, so its glibc fingerprint matches the `language-container-rs` SLC
+- The UDF `.so` is built only inside `rust:1.94-trixie` by `make cross-udf-build`, on a host of the `.so`'s own architecture, so its glibc fingerprint matches the `language-container-rs` SLC and `cargo exasol-udf validate` can load it
 - The Rust toolchain is pinned to 1.94, and `SLC_VERSION` tracks `exasol-udf-sdk` 0.23.1
 - The minimum supported Exasol version is 2025.1
+- The supported cluster architectures are Linux x86_64 and Linux aarch64, and each runs the `language-container-rs` SLC of its own architecture
 - The supported source technologies are MySQL, PostgreSQL, and Trino
-- Drivers are fetched only for the `linux_amd64` platform
+- Drivers are fetched only for the registry platform of the architecture the `.so` was compiled for, which is the cluster's architecture because the `.so` loads nowhere else
 - Outbound HTTPS egress from the UDF enables registry self-install only, and `DRIVER_PATH` or the `supplied` default location works without egress
 - No numeric throughput or latency target exists
 - The adapter holds no state between calls, and all persisted state is in `adapterNotes`
@@ -93,14 +94,14 @@ Scan UDF (scan_entry + adbc-vs-scan)
 - Each driver's source precondition is checked on every request that resolves the source CONNECTION, before any table is discovered
 - Data moves as Arrow record batches from the driver to Exasol, and the scan holds one batch at a time
 - Adding a technology is a reviewed code change: a TOML declaration and dialect code compiled into a release, never a file loaded at run time
-- The release artifact bundles no ADBC driver binary
+- No release artifact bundles an ADBC driver binary
 - The dependency tree accepts only the permissive licenses listed in `deny.toml`
 
 ## External Dependencies
 
 - dbc driver registry (`https://dbc-cdn.columnar.tech/index.yaml`): source of driver versions and platform tarballs for self-install | failure impact: self-install is unavailable, and an operator supplies the driver through `DRIVER_PATH` or the `supplied` default location, which need no egress; an unreachable index host makes the reserved-connection route fall back to the `supplied` library, and every other registry failure fails the statement
-- BucketFS HTTPS write endpoint (address of the BucketFS CONNECTION): destination of the self-installed driver | failure impact: self-install fails and the statement fails, except that an unresolved reserved connection falls back to the `supplied` default library
+- BucketFS HTTPS write endpoint (address of the BucketFS CONNECTION): destination of the self-installed driver, absent on Exasol Personal local deployments | failure impact: self-install fails and the statement fails, except that an unresolved reserved connection falls back to the `supplied` default library
 - Source database over ADBC (MySQL, PostgreSQL, Trino): the database a virtual schema queries for metadata and data | failure impact: the driver returns a connection error, which the adapter or the scan UDF surfaces to the querying session with credentials redacted
 - ADBC driver libraries (`libadbc_driver_mysql.so`, `libadbc_driver_postgresql.so`, `libadbc_driver_trino.so`): the driver each technology loads through `adbc_driver_manager` by its declared entry point | failure impact: no virtual schema can be created or queried for that technology
-- Exasol UDF runtime (`exasol-udf-sdk`, `exasol-udf-macros`, `language-container-rs` SLC): the UDF ABI, CONNECTION resolution, and Arrow batch emission | failure impact: a `.so` that does not match the SLC is rejected at load time
-- Docker image `rust:1.94-trixie`: build environment for the release `.so` | failure impact: no release `.so` can be built, with no effect at run time
+- Exasol UDF runtime (`exasol-udf-sdk`, `exasol-udf-macros`, `language-container-rs` SLC, published as one asset per architecture): the UDF ABI, CONNECTION resolution, and Arrow batch emission | failure impact: a `.so` that does not match the SLC's version or architecture is rejected at load time
+- Docker image `rust:1.94-trixie` (amd64 and arm64 variants): build environment for each release `.so` | failure impact: no release `.so` can be built for that architecture, with no effect at run time
