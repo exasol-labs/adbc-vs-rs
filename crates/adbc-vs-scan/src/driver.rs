@@ -172,6 +172,23 @@ impl std::error::Error for UnsupportedDriver {}
 /// The host the driver registry serves its index and its packages from.
 pub const REGISTRY_BASE_URL: &str = "https://dbc-cdn.columnar.tech";
 
-/// The only platform the Exasol script language container runs on, and so the
-/// only package variant either side ever asks the registry for.
+/// The registry platform of the architecture this library was compiled for, and
+/// so the only package variant either side asks the registry for.
+///
+/// A `.so` loads only on the architecture it was built for, so the compile
+/// target is already the cluster's architecture and no second source can
+/// disagree with it.
+#[cfg(target_arch = "x86_64")]
 pub const PLATFORM: &str = "linux_amd64";
+
+/// The registry platform of the architecture this library was compiled for, and
+/// so the only package variant either side asks the registry for.
+///
+/// A `.so` loads only on the architecture it was built for, so the compile
+/// target is already the cluster's architecture and no second source can
+/// disagree with it.
+#[cfg(target_arch = "aarch64")]
+pub const PLATFORM: &str = "linux_arm64";
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("adbc-vs supports only x86_64 and aarch64 targets");

@@ -20,6 +20,11 @@
 //!
 //! Takes a [`Driver`] rather than naming MySQL, so a PostgreSQL integration
 //! tier calls the same function this one does.
+//!
+//! The adapter's E2E harness is the second caller: it includes this file
+//! through `#[path]` rather than keeping a copy, and on Exasol Personal, which
+//! has no BucketFS endpoint for self-install to write through, it places the
+//! library returned here at each driver's `supplied` location.
 
 use std::fs;
 use std::io::Read;

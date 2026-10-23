@@ -119,9 +119,28 @@ fn text_pair() -> Vec<DeclaredColumn> {
     ]
 }
 
-/// The page size `/proc/self/statm` reports its counts in on x86-64 Linux,
-/// the only platform this tier runs on.
-const PAGE_BYTES: usize = 4096;
+/// The page size `/proc/self/statm` reports its counts in, which is 4 KiB on
+/// x86-64 but 16 KiB or 64 KiB on some aarch64 kernels.
+fn page_bytes() -> usize {
+    static PAGE_BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *PAGE_BYTES.get_or_init(|| {
+        let output = std::process::Command::new("getconf")
+            .arg("PAGESIZE")
+            .output()
+            .expect("`getconf PAGESIZE` must run");
+        assert!(
+            output.status.success(),
+            "`getconf PAGESIZE` exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("`getconf PAGESIZE` prints text")
+            .trim()
+            .parse()
+            .expect("`getconf PAGESIZE` prints a number")
+    })
+}
 
 fn resident_bytes() -> usize {
     let statm = fs::read_to_string("/proc/self/statm").expect("this tier runs on Linux");
@@ -131,7 +150,7 @@ fn resident_bytes() -> usize {
         .expect("/proc/self/statm reports a resident page count")
         .parse()
         .expect("the resident page count is a number");
-    resident_pages * PAGE_BYTES
+    resident_pages * page_bytes()
 }
 
 fn count_of(connection: &mut ManagedConnection, statement: &str) -> i128 {

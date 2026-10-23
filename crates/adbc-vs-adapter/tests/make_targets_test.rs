@@ -33,17 +33,44 @@ fn so_path() -> PathBuf {
     workspace_root().join("target/release/libadbc_vs_adapter.so")
 }
 
+/// Runs `make` without the target selection of whoever runs this test: a
+/// `make test EXASOL_TARGET=personal` hands its variables to every child
+/// `make` through `MAKEFLAGS`, which would turn each default-target assertion
+/// below into an assertion about the Personal recipes.
 fn run_make(args: &[&str]) -> Output {
     Command::new("make")
         .args(args)
+        .env_remove("MAKEFLAGS")
+        .env_remove("EXASOL_TARGET")
         .current_dir(workspace_root())
         .output()
         .expect("`make` must be on PATH")
 }
 
 fn dry_run_stdout(target: &str) -> String {
-    let output = run_make(&["-n", target]);
+    dry_run_stdout_with(target, &[])
+}
+
+/// The dry run of `target` with `variables` (`NAME=value`) on the make
+/// command line, failing the test when make itself refuses the invocation.
+fn dry_run_stdout_with(target: &str, variables: &[&str]) -> String {
+    let mut args = vec!["-n", target];
+    args.extend_from_slice(variables);
+    let output = run_make(&args);
+    assert!(
+        output.status.success(),
+        "`make {}` must succeed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+const PERSONAL: &str = "EXASOL_TARGET=personal";
+
+/// The `cargo test` line an E2E target runs for `test_binary` with `features`.
+fn e2e_command(features: &str, test_binary: &str) -> String {
+    format!("cargo test -p adbc-vs-adapter --features {features} --test {test_binary} -- --test-threads=1")
 }
 
 fn id_output(flag: &str) -> String {
@@ -305,7 +332,25 @@ fn lint_fmt_test_targets_use_expected_flags() {
     assert!(fmt_check.contains("cargo fmt --all -- --check"));
 
     let lint = dry_run_stdout("lint");
-    assert!(lint.contains("cargo clippy --workspace --all-targets --all-features -- -D warnings"));
+    assert!(
+        lint.lines().any(|line| {
+            line.starts_with("cargo clippy --workspace --all-targets --features ")
+                && line.ends_with(" -- -D warnings")
+        }),
+        "the first clippy run must lint the whole workspace with an explicit feature list: {lint}"
+    );
+    assert!(
+        lint.contains(
+            "cargo clippy -p adbc-vs-adapter --all-targets --features exasol-e2e,exasol-personal \
+             -- -D warnings"
+        ),
+        "the second clippy run must lint the Exasol Personal backend: {lint}"
+    );
+    assert!(
+        !lint.contains("--all-features"),
+        "`--all-features` enables `exasol-personal`, which compiles out the Docker backend and \
+         every self-install test: {lint}"
+    );
 
     let test = dry_run_stdout("test");
     assert!(test.contains("cargo test --workspace"));
@@ -316,6 +361,66 @@ fn lint_fmt_test_targets_use_expected_flags() {
     assert!(
         !test.contains("docker"),
         "`make test` must not require Docker: {test}"
+    );
+}
+
+/// Every `crate/feature` either crate's `[features]` table declares.
+fn declared_features() -> Vec<String> {
+    ["adbc-vs-adapter", "adbc-vs-scan"]
+        .iter()
+        .flat_map(|crate_name| {
+            let manifest_path = workspace_root()
+                .join("crates")
+                .join(crate_name)
+                .join("Cargo.toml");
+            let manifest: toml::Table = fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", manifest_path.display()))
+                .parse()
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", manifest_path.display()));
+            let features = manifest
+                .get("features")
+                .and_then(toml::Value::as_table)
+                .cloned()
+                .unwrap_or_default();
+            features
+                .keys()
+                .map(|feature| format!("{crate_name}/{feature}"))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A feature added to either crate must reach the first clippy run, or its
+/// code goes unlinted. `exasol-personal` alone stays out: it compiles out the
+/// Docker backend and every self-install test, and the second run covers it.
+#[test]
+fn the_first_lint_run_enables_every_feature_but_exasol_personal() {
+    let lint = dry_run_stdout("lint");
+    let first_run = lint
+        .lines()
+        .find(|line| line.contains("cargo clippy --workspace"))
+        .unwrap_or_else(|| panic!("`make lint` must run clippy over the workspace: {lint}"));
+    let enabled: std::collections::BTreeSet<String> = first_run
+        .split_whitespace()
+        .skip_while(|word| *word != "--features")
+        .nth(1)
+        .unwrap_or_else(|| panic!("the first clippy run must name its features: {first_run}"))
+        .split(',')
+        .map(str::to_string)
+        .collect();
+
+    let expected: std::collections::BTreeSet<String> = declared_features()
+        .into_iter()
+        .filter(|feature| feature != "adbc-vs-adapter/exasol-personal")
+        .collect();
+
+    assert!(
+        declared_features().contains(&"adbc-vs-adapter/exasol-personal".to_string()),
+        "adbc-vs-adapter must declare the `exasol-personal` feature the second run enables"
+    );
+    assert_eq!(
+        enabled, expected,
+        "the first clippy run must enable exactly every declared feature but exasol-personal"
     );
 }
 
@@ -373,6 +478,92 @@ fn stack_targets_start_expected_services() {
 
     let down = dry_run_stdout("stack-down");
     assert!(down.contains("docker compose down"));
+    assert!(
+        !down.contains("exasol destroy"),
+        "the Docker target must leave any Exasol Personal deployment alone: {down}"
+    );
+}
+
+/// With `EXASOL_TARGET=personal`, Exasol comes from an Exasol Personal
+/// deployment of the Makefile's own name rather than from Compose, and it is
+/// installed only when the launcher reports none.
+#[test]
+fn personal_stack_targets_drive_the_exasol_launcher() {
+    let exasol_only = dry_run_stdout_with("stack-up-exasol", &[PERSONAL]);
+    assert!(
+        exasol_only.contains("exasol info --json --deployment adbc-vs"),
+        "stack-up-exasol must ask the launcher whether the deployment exists: {exasol_only}"
+    );
+    assert!(
+        exasol_only.contains("exasol install local --auto-approve --deployment adbc-vs"),
+        "stack-up-exasol must install a missing deployment unattended: {exasol_only}"
+    );
+    assert!(
+        exasol_only.contains("until exasol status --json --deployment adbc-vs"),
+        "stack-up-exasol must poll the deployment until it reports readiness: {exasol_only}"
+    );
+    assert!(
+        exasol_only.contains("-ge \"300\""),
+        "the readiness poll must give up at EXASOL_WAIT_TIMEOUT: {exasol_only}"
+    );
+    assert!(
+        !exasol_only.contains("docker compose"),
+        "the Personal target must start no Compose service for Exasol: {exasol_only}"
+    );
+    assert!(
+        !exasol_only.contains("secrets.json") && !exasol_only.contains("exapump"),
+        "the readiness poll must read no credential: {exasol_only}"
+    );
+
+    let down = dry_run_stdout_with("stack-down", &[PERSONAL]);
+    assert!(down.contains("docker compose down"));
+    assert!(
+        down.contains("exasol destroy --remove --auto-approve --deployment adbc-vs"),
+        "stack-down must destroy the Personal deployment it named: {down}"
+    );
+
+    let sources = dry_run_stdout_with("stack-up-mysql", &[PERSONAL]);
+    assert!(
+        sources.contains("docker compose up -d --wait mysql"),
+        "the sources stay Compose services under either target: {sources}"
+    );
+}
+
+/// An `EXASOL_TARGET` that names neither target fails every invocation,
+/// naming the value it read and both values it accepts.
+#[test]
+fn an_unknown_exasol_target_fails_naming_both_targets() {
+    let output = run_make(&["-n", "test", "EXASOL_TARGET=podman"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "an unknown EXASOL_TARGET must fail make itself: {stderr}"
+    );
+    for named in ["podman", "docker", "personal"] {
+        assert!(
+            stderr.contains(named),
+            "the refusal must name `{named}`: {stderr}"
+        );
+    }
+}
+
+/// A blank value and two known words both fail: only exactly one known word is a target.
+#[test]
+fn an_empty_or_two_word_exasol_target_fails() {
+    for value in ["EXASOL_TARGET=", "EXASOL_TARGET=docker personal"] {
+        let output = run_make(&["-n", "test", value]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            !output.status.success(),
+            "`{value}` must fail make itself: {stderr}"
+        );
+        assert!(
+            stderr.contains("EXASOL_TARGET must be"),
+            "`{value}` must be refused by the EXASOL_TARGET guard: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -465,6 +656,98 @@ fn release_tarball_depends_on_cross_udf_build() {
     assert!(dist_rule.recipe.contains("tar -czf"));
 }
 
+/// The tarball path `make release-tarball` packs for a host architecture,
+/// read from a forced dry run so the answer never depends on a `.so` on disk.
+fn release_tarball_for(host_arch: &str) -> String {
+    let variable = format!("HOST_ARCH={host_arch}");
+    let plan = dry_run_stdout_with("release-tarball", &["-B", &variable]);
+    plan.lines()
+        .find_map(|line| {
+            line.split_whitespace()
+                .skip_while(|word| *word != "tar")
+                .skip_while(|word| *word != "-czf")
+                .nth(1)
+        })
+        .unwrap_or_else(|| panic!("the dry run for {host_arch} must pack a tarball: {plan}"))
+        .to_string()
+}
+
+#[test]
+fn release_tarball_keeps_the_x86_64_name() {
+    assert_eq!(release_tarball_for("x86_64"), "dist/adbc-vs.tar.gz");
+}
+
+#[test]
+fn release_tarball_names_the_arm64_asset_for_aarch64_and_arm64_hosts() {
+    assert_eq!(
+        release_tarball_for("aarch64"),
+        "dist/adbc-vs-linux-arm64.tar.gz"
+    );
+    assert_eq!(
+        release_tarball_for("arm64"),
+        "dist/adbc-vs-linux-arm64.tar.gz"
+    );
+}
+
+#[test]
+fn release_tarball_defaults_to_the_name_of_the_running_host() {
+    let host = Command::new("uname")
+        .arg("-m")
+        .output()
+        .expect("`uname` must be on PATH");
+    let host = String::from_utf8(host.stdout).expect("uname -m prints UTF-8");
+    let plan = dry_run_stdout_with("release-tarball", &["-B"]);
+    let expected = release_tarball_for(host.trim());
+    assert!(
+        plan.contains(&format!("tar -czf {expected}")),
+        "the default HOST_ARCH must be the host's `uname -m` ({host}): {plan}"
+    );
+}
+
+#[test]
+fn release_tarball_ignores_a_host_arch_from_the_environment() {
+    let host = Command::new("uname")
+        .arg("-m")
+        .output()
+        .expect("`uname` must be on PATH");
+    let host = String::from_utf8(host.stdout).expect("uname -m prints UTF-8");
+    let expected = release_tarball_for(host.trim());
+
+    let output = Command::new("make")
+        .args(["-n", "-B", "release-tarball"])
+        .env_remove("MAKEFLAGS")
+        .env_remove("EXASOL_TARGET")
+        .env("HOST_ARCH", "amd64")
+        .current_dir(workspace_root())
+        .output()
+        .expect("`make` must be on PATH");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "an exported HOST_ARCH must not break make: {stderr}"
+    );
+    let plan = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        plan.contains(&format!("tar -czf {expected}")),
+        "the tarball must follow the host's `uname -m`, not the environment: {plan}"
+    );
+}
+
+#[test]
+fn release_tarball_rejects_an_architecture_it_has_no_asset_for() {
+    let output = run_make(&["-n", "release-tarball", "HOST_ARCH=riscv64"]);
+    assert!(
+        !output.status.success(),
+        "an unsupported HOST_ARCH must fail the make invocation"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("riscv64"),
+        "the failure must name the architecture it read: {stderr}"
+    );
+}
+
 #[test]
 fn test_it_target_needs_no_exasol() {
     let text = makefile_text();
@@ -515,9 +798,35 @@ fn test_e2e_depends_on_cross_udf_build() {
         "test-e2e must depend on exactly the sources e2e_mysql_test queries: {:?}",
         e2e.prerequisites
     );
-    assert!(e2e.recipe.contains("--features exasol-e2e"));
-    assert!(e2e.recipe.contains("--test-threads=1"));
-    assert!(e2e.recipe.contains("--test e2e_mysql_test"));
+    assert_e2e_runs_against_either_target("test-e2e", "e2e_mysql_test");
+}
+
+/// `target` runs `test_binary` against Docker Exasol by default and against
+/// Exasol Personal under `EXASOL_TARGET=personal`, where the `exasol-personal`
+/// feature selects the harness backend that matches the stack it started.
+fn assert_e2e_runs_against_either_target(target: &str, test_binary: &str) {
+    let docker = dry_run_stdout(target);
+    assert!(
+        docker.contains(&e2e_command("exasol-e2e", test_binary)),
+        "{target} must run {test_binary} against the Docker backend by default: {docker}"
+    );
+    assert!(
+        docker.contains("docker compose up -d exasol") && !docker.contains("exasol-personal"),
+        "{target} must start the Compose Exasol by default: {docker}"
+    );
+
+    let personal = dry_run_stdout_with(target, &[PERSONAL]);
+    assert!(
+        personal.contains(&e2e_command("exasol-e2e,exasol-personal", test_binary)),
+        "{target} must run {test_binary} against the Personal backend under {PERSONAL}: \
+         {personal}"
+    );
+    assert!(
+        personal.contains("exasol install local --auto-approve")
+            && !personal.contains("docker compose up -d exasol"),
+        "{target} must start Exasol Personal rather than the Compose Exasol under {PERSONAL}: \
+         {personal}"
+    );
 }
 
 #[test]
@@ -545,9 +854,7 @@ fn test_e2e_postgres_depends_on_cross_udf_build_and_stack_up() {
          everything-up alias: {:?}",
         e2e_postgres.prerequisites
     );
-    assert!(e2e_postgres.recipe.contains("--features exasol-e2e"));
-    assert!(e2e_postgres.recipe.contains("--test-threads=1"));
-    assert!(e2e_postgres.recipe.contains("--test e2e_postgres_test"));
+    assert_e2e_runs_against_either_target("test-e2e-postgres", "e2e_postgres_test");
     assert!(
         !e2e_postgres.recipe.contains("e2e_mysql_test"),
         "test-e2e-postgres must run its own binary, not the MySQL one: {}",
@@ -746,9 +1053,7 @@ fn test_e2e_trino_depends_on_expected_targets() {
             "stack-up-mysql".to_string(),
         ]
     );
-    assert!(e2e_trino.recipe.contains("--features exasol-e2e"));
-    assert!(e2e_trino.recipe.contains("--test-threads=1"));
-    assert!(e2e_trino.recipe.contains("--test e2e_trino_test"));
+    assert_e2e_runs_against_either_target("test-e2e-trino", "e2e_trino_test");
     assert!(
         !e2e_trino.recipe.contains("e2e_mysql_test")
             && !e2e_trino.recipe.contains("e2e_postgres_test"),

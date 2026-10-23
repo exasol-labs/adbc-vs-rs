@@ -22,6 +22,7 @@ ADBC gives every backend a uniform C API and an Arrow-native result format. adbc
 3. **SQL pushdown**: projection, filters, aggregation (single group and `GROUP BY`), and equi and outer joins, including nested joins, are rewritten into the source dialect and executed at the source. `ORDER BY` and `LIMIT`/`OFFSET` stay in Exasol. No dialect renders a collation, so string comparison follows the source's collation.
 4. **Arrow-native scan path**: the scan UDF runs the pushed-down statement through the ADBC driver and returns the Arrow record batches to Exasol without row-by-row marshaling.
 5. **Supported sources**: MySQL, PostgreSQL, and Trino. Adding a source technology requires a dialect and a metadata source in the adapter code.
+6. **Supported platforms**: Linux x86_64 and aarch64 Exasol clusters. The release has one library per architecture, and self-install requests the driver package of the library's architecture.
 
 ## Out of Scope
 
@@ -56,8 +57,8 @@ Architecture: see specs/architecture.md.
 | Language | Rust | Adapter script and scan UDF |
 | Data access | `arrow-adbc` | Uniform driver interface |
 | UDF runtime | `exasol-udf-sdk`, `exasol-udf-macros`, `language-container-rs` | UDF ABI and Script Language Container |
-| Build | `rust:1.94-trixie` in Docker | Builds the `.so` that matches the container |
-| Testing | `cargo test`, E2E against a local Exasol Docker container | Unit and Virtual Schema behavior tests |
+| Build | Rust image in Docker | Builds the `.so` that matches the container |
+| Testing | `cargo test`, E2E against a local Exasol Docker container or Exasol Personal | Unit and Virtual Schema behavior tests |
 | Air-gapped upload | `exapump` | BucketFS upload of a driver tarball |
 
 ## Commands
@@ -69,7 +70,7 @@ make cross-udf-build
 # Test (host unit tests)
 cargo test
 
-# Test (E2E against a local Exasol Docker container)
+# Test (E2E against a local Exasol Docker container or Exasol Personal)
 make test-e2e
 
 # Lint & Format
@@ -90,4 +91,4 @@ adbc-vs/
 
 ## Constraints
 
-- **Business**: adbc-vs MUST NOT bundle any ADBC driver binary in its release artifact.
+- **Business**: adbc-vs MUST NOT bundle any ADBC driver binary in its release artifacts.

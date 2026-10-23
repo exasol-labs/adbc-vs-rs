@@ -575,6 +575,7 @@ fn select_list_predicate_over_the_grouped_character_column_delegates_and_matches
 /// been exercised over it, so neither call disturbs the other's fixture.
 fn credential_failures(scenario: &str, address: &str, password: &str) -> [String; 3] {
     let stack = stack::shared();
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
 
     let bad_connection = format!("ADBC_VS_TR_{scenario}_BAD");
     create_connection(
@@ -587,11 +588,14 @@ fn credential_failures(scenario: &str, address: &str, password: &str) -> [String
     );
 
     let create_schema_name = format!("TRFAIL_{scenario}_CREATE");
-    let create_error = schema::create_virtual_schema_expecting_failure(
+    let create_error = schema::create_virtual_schema_through_expecting_failure(
         &stack.exasol,
-        Driver::Trino,
-        &create_schema_name,
-        &bad_connection,
+        schema::supplied_driver_spec(
+            &create_schema_name,
+            Driver::Trino,
+            &bad_connection,
+            &library,
+        ),
     );
 
     let working_connection = format!("ADBC_VS_TR_{scenario}_WORK");
@@ -604,11 +608,14 @@ fn credential_failures(scenario: &str, address: &str, password: &str) -> [String
         },
     );
     let working_schema = format!("TRFAIL_{scenario}_WORK");
-    schema::create_virtual_schema(
+    schema::create_virtual_schema_through(
         &stack.exasol,
-        Driver::Trino,
-        &working_schema,
-        &working_connection,
+        schema::supplied_driver_spec(
+            &working_schema,
+            Driver::Trino,
+            &working_connection,
+            &library,
+        ),
     );
 
     let set_properties_error = stack.exasol.execute_expecting_failure(&format!(
@@ -719,11 +726,10 @@ fn a_password_over_an_unencrypted_transport_is_refused_by_the_trino_server() {
             password: trino::HOSTILE_PASSWORD,
         },
     );
-    let error = schema::create_virtual_schema_expecting_failure(
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    let error = schema::create_virtual_schema_through_expecting_failure(
         &stack.exasol,
-        Driver::Trino,
-        SCHEMA_NAME,
-        CONNECTION,
+        schema::supplied_driver_spec(SCHEMA_NAME, Driver::Trino, CONNECTION, &library),
     );
 
     assert!(
@@ -766,11 +772,10 @@ fn an_address_on_the_plain_http_port_without_ssl_false_fails_inside_the_driver()
             password: trino::HOSTILE_PASSWORD,
         },
     );
-    let error = schema::create_virtual_schema_expecting_failure(
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    let error = schema::create_virtual_schema_through_expecting_failure(
         &stack.exasol,
-        Driver::Trino,
-        SCHEMA_NAME,
-        CONNECTION,
+        schema::supplied_driver_spec(SCHEMA_NAME, Driver::Trino, CONNECTION, &library),
     );
 
     assert!(
@@ -898,23 +903,36 @@ fn views_are_exposed_alongside_base_tables() {
 }
 
 /// `refresh_target` (`docker/trino/init.sql`) is dedicated to this test's
-/// `ALTER TABLE`, so no other test's fixture is disturbed by it. Only the
-/// gain-a-column direction is exercised here: Trino's `memory` connector has
+/// `ALTER TABLE`, so no other test's fixture is disturbed by it. The refresh
+/// runs against a schema of its own that supplies the shared schema's driver
+/// library, so it never reaches the live registry. Only the gain-a-column direction is exercised here: Trino's `memory` connector has
 /// no `DROP COLUMN` support at all, so a drop-then-refresh assertion can
 /// never pass against this source. Do not re-add one without first checking
 /// whether that connector limit still holds.
 #[test]
 fn refresh_picks_up_a_new_trino_column() {
+    const REFRESH_SCHEMA: &str = "TRREFRESHVS";
     let stack = stack::shared();
-    let before = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+    let library = schema::recorded_driver_path(&stack.exasol, VIRTUAL_SCHEMA);
+    schema::create_virtual_schema_through(
+        &stack.exasol,
+        schema::supplied_driver_spec(
+            REFRESH_SCHEMA,
+            Driver::Trino,
+            stack::TRINO_CONNECTION,
+            &library,
+        ),
+    );
+    let before = declared_columns(REFRESH_SCHEMA, "refresh_target");
 
     stack
         .trino
         .execute("ALTER TABLE memory.adbc_vs.refresh_target ADD COLUMN extra DECIMAL(9,3)");
     stack
         .exasol
-        .execute(&format!("ALTER VIRTUAL SCHEMA {VIRTUAL_SCHEMA} REFRESH"));
-    let after_add = declared_columns(VIRTUAL_SCHEMA, "refresh_target");
+        .execute(&format!("ALTER VIRTUAL SCHEMA {REFRESH_SCHEMA} REFRESH"));
+    let after_add = declared_columns(REFRESH_SCHEMA, "refresh_target");
+    schema::drop_virtual_schema(&stack.exasol, REFRESH_SCHEMA);
 
     assert!(
         !before.iter().any(|(name, _)| name == "extra"),
@@ -1108,6 +1126,7 @@ fn two_virtual_schemas_advertise_their_own_capability_sets() {
 /// defaulted to one driver: each technology's library lands under its own
 /// BucketFS path, and a query against each virtual schema returns the row
 /// its own source holds rather than the other source's.
+#[cfg(not(feature = "exasol-personal"))]
 #[test]
 fn two_drivers_install_distinct_libraries_and_each_query_reaches_its_own_source() {
     let stack = stack::shared();
@@ -1165,6 +1184,7 @@ fn two_drivers_install_distinct_libraries_and_each_query_reaches_its_own_source(
 /// The bucket-relative path of one technology's installed driver library,
 /// whatever version resolution selected for it, or nothing when no version
 /// is installed for that driver.
+#[cfg(not(feature = "exasol-personal"))]
 fn installed_driver(stack: &stack::Stack, driver: Driver) -> Option<String> {
     let prefix = format!("adbc-drivers/{}/", driver.as_str());
     let library = driver.package().library;

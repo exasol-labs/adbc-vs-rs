@@ -78,7 +78,7 @@ fn bring_up() -> Stack {
 
     slc::install(&exasol);
     udf::deploy(&exasol);
-    schema::create_bucketfs_connection(&exasol);
+    schema::provide_drivers(&exasol, &[Driver::Postgres, Driver::MySql]);
 
     schema::create_postgres_connection(&exasol, POSTGRES_CONNECTION, postgres::DATABASE);
     schema::create_virtual_schema(

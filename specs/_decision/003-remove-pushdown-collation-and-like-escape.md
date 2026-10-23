@@ -48,7 +48,6 @@ The MySQL dialect renders a select-list predicate that reads its own query's cha
 **ID:** trino-withholds-like-escape
 **Plan:** remove-pushdown-collation-and-like-escape
 **Status:** Accepted
-**Supersedes:** trino-like-explicit-escape-clause
 
 ### Context
 
@@ -74,7 +73,6 @@ The Trino dialect does not advertise `FN_PRED_LIKE_ESCAPE` and renders `predicat
 **ID:** trino-set-is-postgresql-without-like-escape-plus-group-by-tuple
 **Plan:** remove-pushdown-collation-and-like-escape
 **Status:** Accepted
-**Supersedes:** trino-exceeds-parity-with-group-by-tuple
 
 ### Context
 

@@ -73,10 +73,10 @@ Installs the ADBC driver a virtual schema names into BucketFS by downloading it 
 
 ### Scenario: Release artifact bundles no driver binary
 
-* *GIVEN* the adbc-vs repository and its build output
-* *WHEN* the tracked files and the release artifact are inspected
-* *THEN* neither MUST contain an ADBC driver shared library, for any supported driver
-* *AND* the only shared library the build produces MUST be adbc-vs's own UDF object
+* *GIVEN* the adbc-vs repository and its build output for each supported architecture, x86_64 and aarch64
+* *WHEN* the tracked files and the UDF object that each architecture's release artifact packs are inspected
+* *THEN* none of them MUST contain an ADBC driver shared library, for any supported driver
+* *AND* the only shared library each architecture's build produces MUST be adbc-vs's own UDF object
 
 ### Scenario: Missing driver is fetched and installed
 

@@ -10,12 +10,13 @@ crate-type = ["cdylib", "rlib"]
 [features]
 built-artifact = []
 exasol-e2e = []
+exasol-personal = []
 policy-check = []
 bench = []
 registry-live = []
 
 [dependencies]
-adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.6.0" }
+adbc-vs-scan = { path = "../adbc-vs-scan", version = "0.7.0" }
 adbc_core.workspace = true
 adbc_driver_manager.workspace = true
 arrow = { workspace = true, features = ["csv", "ipc", "json"] }

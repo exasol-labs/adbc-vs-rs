@@ -30,7 +30,7 @@ The adapter keeps no state between calls. The scan UDF is the only part that rea
 
 - `adbc-vs-rs` is read-only. `INSERT`, `UPDATE`, and `DELETE` are not supported on a virtual schema.
 - `adbc-vs-rs` does not cache. Every query runs against the source.
-- `adbc-vs-rs` supports Linux x86_64 only. The release library is x86_64, and the automatic install requests only the `linux_amd64` driver. The registry also has `linux_arm64` drivers. On ARM, `adbc-vs-rs` does not run.
+- `adbc-vs-rs` supports Linux x86_64 and aarch64. The release has one library for each architecture, and the automatic install requests the driver package of the library's architecture. The aarch64 library is tested against Exasol Personal only, because no other aarch64 Exasol is available to the tests.
 - Columns and tables with a type that has no Exasol match are left out.
 - `adbc-vs-rs` does not bundle ADBC drivers. The drivers come from the registry or from you.
 

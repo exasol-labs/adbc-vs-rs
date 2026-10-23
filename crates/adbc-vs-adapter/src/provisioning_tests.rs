@@ -73,7 +73,7 @@ fn selects_the_highest_in_range_versions_platform_package() {
 
     assert_eq!(
         resolved.url,
-        "https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_linux_amd64_0.6.1.tar.gz"
+        format!("https://dbc-cdn.columnar.tech/mysql/0.6.1/mysql_{PLATFORM}_0.6.1.tar.gz")
     );
 }
 
@@ -178,22 +178,22 @@ fn an_index_publishing_no_version_at_all_still_reports_the_range() {
 
 #[test]
 fn version_without_the_platform_package_names_platform_and_version() {
-    let index = concat!(
-        "drivers:\n",
-        "  - path: mysql\n",
-        "    pkginfo:\n",
-        "      - version: v0.6.0\n",
-        "        packages:\n",
-        "          - platform: darwin_arm64\n",
-        "            url: mysql/v0.6.0/mysql_darwin_arm64_v0.6.0.tar.gz\n",
+    #[cfg(target_arch = "x86_64")]
+    const OTHER_LINUX_PLATFORM: &str = "linux_arm64";
+    #[cfg(target_arch = "aarch64")]
+    const OTHER_LINUX_PLATFORM: &str = "linux_amd64";
+    let index = format!(
+        "drivers:\n  - path: mysql\n    pkginfo:\n      - version: v0.6.0\n        packages:\n\
+         \x20         - platform: darwin_arm64\n            url: mysql/v0.6.0/mysql_darwin_arm64_v0.6.0.tar.gz\n\
+         \x20         - platform: {OTHER_LINUX_PLATFORM}\n            url: mysql/v0.6.0/mysql_other_v0.6.0.tar.gz\n"
     );
 
-    let error = select_package(index, &Registry::public(Driver::MySql))
-        .expect_err("a version without a linux_amd64 package must fail");
+    let error = select_package(&index, &Registry::public(Driver::MySql))
+        .expect_err("a version without the compile target's package must fail");
 
     let message = error.to_string();
     assert!(
-        message.contains("linux_amd64"),
+        message.contains(PLATFORM),
         "the error must name the platform it looked for: {message}"
     );
     assert!(

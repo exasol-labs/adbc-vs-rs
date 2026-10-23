@@ -1,9 +1,12 @@
-//! Shared harness for the tests that drive the Docker Compose stack.
+//! Shared harness for the tests that drive the E2E stack: the Compose
+//! sources and one Exasol.
 //!
-//! The stack is fixed by `docker-compose.yml` at the workspace root, so the
-//! harness auto-detects everything it needs from it rather than taking
-//! configuration: a test that reaches a different Exasol is a test that is
-//! silently not testing this stack.
+//! Which Exasol is a compile-time choice of backend, never configuration: the
+//! Compose `exasol` service by default, or the Exasol Personal deployment the
+//! Makefile installs under the `exasol-personal` feature. Each backend
+//! discovers its own instance from what started it, because a test that
+//! reaches a different Exasol is a test that is silently not testing this
+//! stack.
 //!
 //! Cargo builds a `tests/` subdirectory only through a test target that
 //! declares it, so `tests/harness_test.rs` exists to keep this module
@@ -11,10 +14,18 @@
 
 #![allow(dead_code)]
 
+// The benchmarks measure the Docker stack only, and their reports name its Compose image.
+#[cfg(all(feature = "bench", feature = "exasol-personal"))]
+compile_error!(
+    "the `bench` feature measures Docker Exasol only; build it without `exasol-personal`"
+);
+
 pub mod bench;
 pub mod bench_data;
 pub mod bench_stack;
 pub mod driver;
+#[path = "../../../adbc-vs-scan/tests/common/driver_fetch.rs"]
+pub mod driver_fetch;
 pub mod exasol;
 pub mod items;
 pub mod jdbc_vs;
