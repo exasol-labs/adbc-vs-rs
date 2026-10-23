@@ -17,9 +17,9 @@ Resolves each driver's declared version range against the registry index to one 
 * *WHEN* the adapter resolves that driver's version range
 * *THEN* it MUST select the highest published version satisfying the range
 * *AND* it MUST NOT select a version outside the range, whether higher or lower
-* *AND* a published `version` scalar carrying a leading `v` MUST resolve identically to the same version spelled without one, because the index spells MySQL's and Trino's versions `v0.6.1` and `v0.5.3` and PostgreSQL's `1.12.0`
+* *AND* a published `version` scalar carrying a leading `v` MUST resolve identically to the same version spelled without one, because the index spells MySQL's and Trino's versions with a leading `v` and PostgreSQL's without one
 * *AND* a published scalar that cannot be parsed as a version MUST be skipped rather than failing the resolution
-* *AND* each supported driver's range MUST be stated per technology rather than derived from a shared rule, because MySQL's stops below `0.7.0` and Trino's below `0.6.0` while PostgreSQL's admits every `1.x`
+* *AND* each supported driver's range MUST be stated per technology rather than derived from a shared rule, because MySQL's and Trino's stop below the next breaking minor version while PostgreSQL's admits every release of its current major version
 
 ### Scenario: Range satisfied by no published version fails with a named error
 

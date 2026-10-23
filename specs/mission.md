@@ -57,7 +57,7 @@ Architecture: see specs/architecture.md.
 | Language | Rust | Adapter script and scan UDF |
 | Data access | `arrow-adbc` | Uniform driver interface |
 | UDF runtime | `exasol-udf-sdk`, `exasol-udf-macros`, `language-container-rs` | UDF ABI and Script Language Container |
-| Build | `rust:1.94-trixie` in Docker | Builds the `.so` that matches the container |
+| Build | Rust image in Docker | Builds the `.so` that matches the container |
 | Testing | `cargo test`, E2E against a local Exasol Docker container or Exasol Personal | Unit and Virtual Schema behavior tests |
 | Air-gapped upload | `exapump` | BucketFS upload of a driver tarball |
 

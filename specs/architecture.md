@@ -71,8 +71,8 @@ Scan UDF (scan_entry + adbc-vs-scan)
 
 ## Constraints
 
-- The UDF `.so` is built only inside `rust:1.94-trixie` by `make cross-udf-build`, on a host of the `.so`'s own architecture, so its glibc fingerprint matches the `language-container-rs` SLC and `cargo exasol-udf validate` can load it
-- The Rust toolchain is pinned to 1.94, and `SLC_VERSION` tracks `exasol-udf-sdk` 0.23.1
+- The UDF `.so` is built only inside the Rust build image that the `Makefile` names by `make cross-udf-build`, on a host of the `.so`'s own architecture, so its glibc fingerprint matches the `language-container-rs` SLC and `cargo exasol-udf validate` can load it
+- The Rust toolchain version lives in `rust-toolchain.toml`, and `SLC_VERSION` in the `Makefile` tracks the `exasol-udf-sdk` version
 - The minimum supported Exasol version is 2025.1
 - The supported cluster architectures are Linux x86_64 and Linux aarch64, and each runs the `language-container-rs` SLC of its own architecture
 - The supported source technologies are MySQL, PostgreSQL, and Trino
@@ -104,4 +104,4 @@ Scan UDF (scan_entry + adbc-vs-scan)
 - Source database over ADBC (MySQL, PostgreSQL, Trino): the database a virtual schema queries for metadata and data | failure impact: the driver returns a connection error, which the adapter or the scan UDF surfaces to the querying session with credentials redacted
 - ADBC driver libraries (`libadbc_driver_mysql.so`, `libadbc_driver_postgresql.so`, `libadbc_driver_trino.so`): the driver each technology loads through `adbc_driver_manager` by its declared entry point | failure impact: no virtual schema can be created or queried for that technology
 - Exasol UDF runtime (`exasol-udf-sdk`, `exasol-udf-macros`, `language-container-rs` SLC, published as one asset per architecture): the UDF ABI, CONNECTION resolution, and Arrow batch emission | failure impact: a `.so` that does not match the SLC's version or architecture is rejected at load time
-- Docker image `rust:1.94-trixie` (amd64 and arm64 variants): build environment for each release `.so` | failure impact: no release `.so` can be built for that architecture, with no effect at run time
+- Docker Rust build image that the `Makefile` names (amd64 and arm64 variants): build environment for each release `.so` | failure impact: no release `.so` can be built for that architecture, with no effect at run time
