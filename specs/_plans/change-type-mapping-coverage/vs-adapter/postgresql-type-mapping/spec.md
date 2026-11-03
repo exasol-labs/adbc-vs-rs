@@ -5,13 +5,23 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 <!-- DELTA:CHANGED -->
 ## Background
 
-- The omission contract is framework and owned by `vs-adapter/type-mapping`. The mapping reads `information_schema.columns`, names each source type by its `data_type` spelling, and performs no I/O. It starts from the Exasol PostgreSQL JDBC Virtual Schema's mapping, and this feature states every departure.
-- A column the mapping reads through a conversion renders as that read expression in every position, per `vs-adapter/pushdown-dialect`, and every other column renders bare.
-- A database must use the `UTF8` encoding, because the mapping declares every character column `UTF8` and PostgreSQL declares an encoding per database rather than per column. A column's collation governs a delegated character comparison, per `vs-adapter/postgresql-collation`.
-- The exposed source namespace is the `public` schema, which is both PostgreSQL's SQL qualifier and its `information_schema` filter value and is the one namespace string recorded in `adapterNotes`.
+- `vs-adapter/type-mapping` owns the omission contract and the closed type set this mapping obeys.
+- This feature states PostgreSQL's mapping table, each departure from the Exasol PostgreSQL JDBC Virtual Schema's mapping, the `UTF8` encoding precondition, and the exposed source namespace.
+- A column's read expression, where a scenario names one, renders per `vs-adapter/pushdown-dialect`.
+- `vs-adapter/postgresql-collation` owns how a character column compares.
 <!-- /DELTA:CHANGED -->
 
 ## Scenarios
+
+<!-- DELTA:NEW -->
+### Scenario: The mapping is a pure function of the PostgreSQL catalog row
+
+* *GIVEN* a row of PostgreSQL's `information_schema.columns`
+* *WHEN* the column is mapped
+* *THEN* the result MUST depend only on that row
+* *AND* the mapping MUST name each source type by the row's `data_type` spelling
+* *AND* the mapping MUST perform no I/O
+<!-- /DELTA:NEW -->
 
 <!-- DELTA:CHANGED -->
 ### Scenario: Integer types map to DECIMAL with the matching digit count
@@ -82,8 +92,8 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 
 * *GIVEN* PostgreSQL columns whose `data_type` is `character` with declared lengths 5 and 3000, each holding `ab`, and a `character varying` column holding `ab`
 * *WHEN* each column is mapped and queried
-* *THEN* the length-5 column MUST map to Exasol `CHAR` with size 5 and character set `UTF8`, and render bare
-* *AND* the length-3000 column MUST map to `VARCHAR` with size 3000 and character set `UTF8`, because Exasol's `CHAR` holds at most 2000 characters, and render as `CAST(<column> AS TEXT)`, which drops the trailing blanks, so the scan emits `ab` without padding and a delegated equality with the literal `'ab'` selects the row, as Exasol's comparison of the emitted `VARCHAR` value does; a declared length above 2000000 MUST map to `VARCHAR` with size 2000000
+* *THEN* the length-5 column MUST map to Exasol `CHAR` with size 5 and character set `UTF8` and render bare, and a declared length above 2000000 MUST map to `VARCHAR` with size 2000000
+* *AND* the length-3000 column MUST map to `VARCHAR` with size 3000 and character set `UTF8` and render as `CAST(<column> AS TEXT)`, because Exasol's `CHAR` holds at most 2000 characters, so the scan emits `ab` without the trailing blanks and a delegated equality with the literal `'ab'` selects the row, as Exasol's comparison of the emitted `VARCHAR` value does
 * *AND* the scan MUST emit the length-5 value as `ab` padded to five characters, and a delegated equality of the length-5 column with the literal `'ab'` MUST select the row, as Exasol's comparison of a `CHAR` value with a string literal does
 * *AND* a delegated equality of the length-5 column with the `character varying` column MUST pair the row, because PostgreSQL ignores the trailing blanks of a `character` value, although Exasol's own comparison of `CHAR(5)` `ab` with `VARCHAR` `ab` finds them unequal
 <!-- /DELTA:NEW -->
@@ -104,7 +114,7 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 
 * *GIVEN* PostgreSQL columns whose `data_type` is `boolean` and `bit` with a declared length of 1, each holding true, false, and null, and a `bit` column with a declared length of 8 holding `00000101`, `00001001`, and `00000000`
 * *WHEN* each column is mapped and queried
-* *THEN* each MUST map to Exasol `BOOLEAN`, as the JDBC Virtual Schema maps every `bit` width, the `boolean` column MUST render bare, and each `bit` column MUST render as `(position(B'1' IN <column>) > 0)`, which is true when any bit is set
+* *THEN* each MUST map to Exasol `BOOLEAN`, as the JDBC Virtual Schema maps every `bit` width, with the `boolean` column rendered bare and each `bit` column rendered as `(position(B'1' IN <column>) > 0)`, which is true when any bit is set
 * *AND* the length-8 column MUST emit true, true, and false, so two different source values read as one `true`
 * *AND* a delegated filter on each column alone, on its negation, and on its equality with the other columns MUST select the rows Exasol selects over the emitted values
 * *AND* a delegated `MIN`, `MAX`, `COUNT(DISTINCT)`, and `GROUP BY` over each column MUST return Exasol's values, with `false` ordered before `true`, so a `GROUP BY` over the length-8 column puts `00000101` and `00001001` in one group
@@ -160,4 +170,15 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 * *WHEN* each column is mapped
 * *THEN* each result MUST be unmapped, as the JDBC Virtual Schema leaves arrays out
 * *AND* each stated reason MUST name `ARRAY` as the PostgreSQL type that was rejected
+<!-- /DELTA:CHANGED -->
+
+<!-- DELTA:CHANGED -->
+### Scenario: Virtual schema exposes the public schema only
+
+* *GIVEN* a PostgreSQL database holding one table in `public` and one table in a second schema
+* *WHEN* the virtual schema is created
+* *THEN* the returned `schemaMetadata` MUST list the `public` table
+* *AND* it MUST NOT list the table of the second schema, because exposing `public` alone is this release's boundary, and a virtual schema per source schema is the shape that needs no new property
+* *AND* `adapterNotes` MUST record `public` as the source namespace, which is both PostgreSQL's SQL qualifier and its `information_schema` filter value, so one namespace string serves both
+* *AND* the generated pushdown statement MUST qualify a table with that namespace rather than with the database the connection address names
 <!-- /DELTA:CHANGED -->

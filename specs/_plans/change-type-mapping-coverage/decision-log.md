@@ -49,7 +49,7 @@
 
 ### [6] A column records its source type, and the technology's type mapping names its read expression
 
-- **Decision:** Each mapped column's own `adapterNotes` record its source type. Each technology's type mapping names, for a source type and a declared type, the read expression that yields the value the scan emits, and the dialect renders every reference to the column through it: in the select list, a filter, a grouping key, an aggregate operand, and a join condition. A column without a recorded source type renders bare.
+- **Decision:** A column that needs a conversion is converted in every position the query references it, keyed on its recorded source type, rather than in the select list only or keyed on its declared Exasol type. The technology's type mapping owns the conversion.
 - **Rationale:** PostgreSQL `money`, `bit`, `uuid`, `json`, `xml`, and unconstrained `numeric`, and MySQL `TIME`, `YEAR`, `BIT`, `JSON`, and `DECIMAL` beyond precision 36, need a conversion to yield their declared Exasol value, and each shares its declared type with a source type that needs none. Only the source type tells them apart, and the JDBC Virtual Schemas record it in the same place (`{"jdbcDataType", "typeName"}` in column `adapterNotes`). One module per technology owns how a source type becomes its Exasol value, both as the declared type and as the read expression, so the two cannot disagree. The dialect depends on its own technology's type mapping, and no cycle results. Criterion 1 applies: `create_schema`, `adapter_notes`, `pushdown_query`, `type_mapping`, and `sql_dialect` change. Criterion 2 applies: every future mapping states its read expression here. Criterion 4 applies: it rejects the alternatives below. ADR digest: `character-comparisons-follow-source-collation` still holds, because no read expression renders a `COLLATE`, and `vs-adapter/postgresql-collation` states that a value read as text compares under the database default collation.
 - **Alternatives:** Keying the conversion on the declared type ([2]) cannot tell `money` from `real`, `bit` from `boolean`, `TIME` from `DATETIME`, or `YEAR` from `DATE`. The JDBC PostgreSQL dialect casts in the select list only, so a delegated equality over `json` or `xml` fails for a missing operator, and `numeric` and `interval` compare by source semantics rather than as the emitted text. Omitting these types loses the coverage the PR feedback asks for.
 - **Consequences:**
@@ -62,13 +62,13 @@
 ### [7] adbc-vs sets no source session time zone
 
 - **Decision:** The adapter and the scan set no session time zone on a PostgreSQL or MySQL connection, and a time-zone-aware source timestamp renders bare. A delegated comparison of a PostgreSQL `timestamp with time zone` with a timestamp or a date follows the source session's `TimeZone`, and a MySQL `TIMESTAMP` is emitted and compared in the session `time_zone`.
-- **Rationale:** The JDBC PostgreSQL and MySQL Virtual Schemas set no session time zone and no JDBC time-zone property (`BaseColumnMetadataReader`, the dialects, and both user guides). A session pin changes every session-dependent expression a source view holds, such as PostgreSQL `current_date`, for every query and not only for the mapped column. Criterion 2 applies: the absence binds every future connection setting. Criterion 4 applies: it rejects the alternatives below. ADR digest: no accepted ADR covers source session settings or time zones.
+- **Rationale:** The JDBC PostgreSQL and MySQL Virtual Schemas set no session time zone and no JDBC time-zone property (`BaseColumnMetadataReader`, the dialects, and both user guides). A session pin changes every session-dependent expression a source view holds, such as PostgreSQL `current_date`, for every query and not only for the mapped column.
 - **Alternatives:** Pinning the session to UTC at connect time is the pin this entry rejects. Rendering every `timestamp with time zone` reference as `"<column>" AT TIME ZONE 'UTC'` makes comparisons independent of the session zone, but costs index use on the timestamp columns that range filters use most.
 - **Consequences:**
   - Under a PostgreSQL session `TimeZone` other than UTC, a delegated comparison of a `timestamp with time zone` column with a `TIMESTAMP` literal selects rows offset by the zone's UTC offset from the emitted UTC values. Setting the role's or the database's `TimeZone` to `UTC` removes the offset. `docs/type-mapping.md` states both.
   - In a MySQL session zone with daylight saving time, two instants in the hour the clocks repeat share one emitted wall-clock value, and a delegated comparison with that value selects one of the two instants.
 - **Architecture:** § Constraints
-- **Promotes to ADR:** yes
+- **Promotes to ADR:** no
 
 ### [8] Every bit width maps to BOOLEAN
 

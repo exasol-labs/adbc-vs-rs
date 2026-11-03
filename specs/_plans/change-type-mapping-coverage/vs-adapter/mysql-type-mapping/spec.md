@@ -5,14 +5,22 @@ States which MySQL column types map to which Exasol types, and which are omitted
 <!-- DELTA:CHANGED -->
 ## Background
 
-- The omission contract is framework and owned by `vs-adapter/type-mapping`. The mapping is a pure function of the MySQL catalog row: data type name, character length, numeric precision and scale, datetime precision, and the unsigned flag. It performs no I/O. It starts from the Exasol MySQL JDBC Virtual Schema's mapping, and this feature states every departure.
-- A column the mapping reads through a conversion renders as that read expression in every position, per `vs-adapter/pushdown-dialect`, and every other column renders bare.
-- The mapping declares every character column `UTF8` whatever its MySQL character set, as the JDBC Virtual Schema does. A character column follows its collation, per `vs-adapter/mysql-collation`. MySQL returns a `CHAR`, `ENUM`, or `SET` value without trailing spaces, and Exasol pads a value it reads into a `CHAR` column to the declared size.
-- MySQL compares a `FLOAT` operand as a double-precision value, so a `FLOAT` value compares as Exasol compares its widening to `DOUBLE`.
-- The adapter checks no MySQL server collation and no server version.
+- `vs-adapter/type-mapping` owns the omission contract and the closed type set this mapping obeys.
+- This feature states MySQL's mapping table and each departure from the Exasol MySQL JDBC Virtual Schema's mapping.
+- A column's read expression, where a scenario names one, renders per `vs-adapter/pushdown-dialect`.
+- `vs-adapter/mysql-collation` owns how a character column compares.
 <!-- /DELTA:CHANGED -->
 
 ## Scenarios
+
+<!-- DELTA:NEW -->
+### Scenario: The mapping is a pure function of the MySQL catalog row
+
+* *GIVEN* a MySQL column catalog row
+* *WHEN* the column is mapped
+* *THEN* the result MUST depend only on the row's data type name, character length, numeric precision and scale, datetime precision, and unsigned flag
+* *AND* the mapping MUST perform no I/O
+<!-- /DELTA:NEW -->
 
 <!-- DELTA:CHANGED -->
 ### Scenario: Signed integer types map to DECIMAL with the matching digit count
@@ -37,13 +45,22 @@ States which MySQL column types map to which Exasol types, and which are omitted
 <!-- DELTA:CHANGED -->
 ### Scenario: Character types preserve the declared length and use UTF8
 
-* *GIVEN* a MySQL column of type `VARCHAR` with a declared character length of 100
-* *WHEN* the column is mapped
-* *THEN* the result MUST be the Exasol type `VARCHAR` with size 100 and character set `UTF8`, the column MUST render bare, and a declared length of 0 MUST map to size 1, because Exasol's minimum character-type size is 1
-* *AND* a `CHAR` column with declared length 10 MUST map to Exasol `CHAR` with size 10 and character set `UTF8`, as the JDBC Virtual Schema maps it, and render bare
-* *AND* the scan MUST emit a `CHAR(10)` value `ab` padded to ten characters, and a delegated equality of the column with the literal `'ab'` MUST select the row, as Exasol's comparison of a `CHAR` value with a string literal does
-* *AND* a delegated `LIKE 'ab'` over the `CHAR` column MUST select the row, because MySQL matches the unpadded value, although Exasol's own `LIKE 'ab'` over `CHAR(10)` `ab` matches no row
+* *GIVEN* MySQL columns of type `VARCHAR` with declared character lengths 100 and 0, and of type `CHAR` with declared lengths 10 and 0
+* *WHEN* each column is mapped
+* *THEN* the length-100 `VARCHAR` column MUST map to Exasol `VARCHAR` with size 100 and character set `UTF8`, and render bare
+* *AND* the length-10 `CHAR` column MUST map to Exasol `CHAR` with size 10 and character set `UTF8`, as the JDBC Virtual Schema maps it, and render bare
+* *AND* the length-0 `VARCHAR` column MUST map to `VARCHAR` with size 1, and the length-0 `CHAR` column to `CHAR` with size 1, because Exasol's minimum character-type size is 1 and Exasol rejects a `CHAR(0)` declaration
 <!-- /DELTA:CHANGED -->
+
+<!-- DELTA:NEW -->
+### Scenario: A CHAR value emits padded and compares as MySQL compares it
+
+* *GIVEN* a MySQL `CHAR(10)` column holding `ab`, mapped to Exasol `CHAR(10)`
+* *WHEN* the column is scanned and filtered by delegated predicates
+* *THEN* the scan MUST emit `ab` padded to ten characters, because, measured on the test MySQL, MySQL returns a `CHAR` value without trailing spaces, and Exasol pads a value it reads into a `CHAR` column to the declared size
+* *AND* a delegated equality of the column with the literal `'ab'` MUST select the row, as Exasol's comparison of a `CHAR` value with a string literal does
+* *AND* a delegated `LIKE 'ab'` over the column MUST select the row, because MySQL matches the unpadded value, although Exasol's own `LIKE 'ab'` over `CHAR(10)` `ab` matches no row
+<!-- /DELTA:NEW -->
 
 <!-- DELTA:REMOVED -->
 ### Scenario: Character column of a non-utf8mb4 character set is unmapped
@@ -60,7 +77,7 @@ States which MySQL column types map to which Exasol types, and which are omitted
 
 * *GIVEN* MySQL `VARCHAR`, `CHAR`, and `TEXT` columns whose character set is `latin1`, each holding `café`
 * *WHEN* each column is mapped and queried
-* *THEN* each MUST map as a `utf8mb4` column of the same type and length maps, with character set `UTF8`
+* *THEN* each MUST map as a `utf8mb4` column of the same type and length maps, with character set `UTF8`, as the JDBC Virtual Schema declares every character column whatever its MySQL character set
 * *AND* the scan MUST emit `café` with its accented character intact
 * *AND* a delegated equality of each column with the literal `'café'` MUST select the row
 * *AND* a delegated equality of each column with a literal holding a character `latin1` cannot hold, such as `'ł'`, MUST fail with MySQL's illegal-mix-of-collations error rather than select or drop rows, because the column's collation takes precedence over the `utf8mb4` literal and MySQL cannot convert the literal to `latin1`
@@ -74,7 +91,7 @@ States which MySQL column types map to which Exasol types, and which are omitted
 * *THEN* `DATE` MUST map to Exasol `DATE`
 * *AND* the `DATETIME` columns MUST map to `TIMESTAMP(0)` and `TIMESTAMP(6)`, their own fractional-second precision
 * *AND* `DOUBLE` and `FLOAT` MUST map to Exasol `DOUBLE`, and every listed column MUST render bare
-* *AND* a `FLOAT` value MUST be emitted as its single-precision value widened to double precision, so a stored `0.1` is emitted as `0.100000001490116119384765625` and a delegated equality with the literal `0.1` selects no row, as Exasol's comparison of the emitted value does
+* *AND* a `FLOAT` value MUST be emitted as its single-precision value widened to double precision, so a stored `0.1` is emitted as `0.100000001490116119384765625` and a delegated equality with the literal `0.1` selects no row, as Exasol's comparison of the emitted value does, because MySQL compares a `FLOAT` operand as a double-precision value
 <!-- /DELTA:CHANGED -->
 
 <!-- DELTA:REMOVED -->
@@ -136,7 +153,7 @@ States which MySQL column types map to which Exasol types, and which are omitted
 * *WHEN* each column is mapped and queried
 * *THEN* the `ENUM` column MUST map to Exasol `CHAR` with size 5 and the `SET` column to `CHAR` with size 4, each with character set `UTF8`, and each MUST render bare
 * *AND* a column whose catalog length exceeds 2000 MUST map to `VARCHAR` of that length, because Exasol's `CHAR` holds at most 2000 characters
-* *AND* the scan MUST emit the `ENUM` value `ab` padded to five characters, and a delegated equality of the `ENUM` column with the literal `'ab'` MUST select the row, as Exasol's comparison of a `CHAR` value with a string literal does
+* *AND* the scan MUST emit the `ENUM` value `ab` padded to five characters, because MySQL returns an `ENUM` or `SET` value without trailing spaces and Exasol pads a value it reads into a `CHAR` column to the declared size, and a delegated equality of the `ENUM` column with the literal `'ab'` MUST select the row, as Exasol's comparison of a `CHAR` value with a string literal does
 * *AND* a delegated `LIKE 'ab'` over the `ENUM` column MUST select the row, because MySQL matches the unpadded member, although Exasol's own `LIKE 'ab'` over `CHAR(5)` `ab` matches no row
 <!-- /DELTA:NEW -->
 
@@ -178,4 +195,14 @@ States which MySQL column types map to which Exasol types, and which are omitted
 * *WHEN* each column is mapped
 * *THEN* each result MUST be unmapped, as the JDBC Virtual Schema leaves binary and spatial columns out
 * *AND* each stated reason MUST name the MySQL type that was rejected
+<!-- /DELTA:CHANGED -->
+
+<!-- DELTA:CHANGED -->
+### Scenario: No server collation or version is checked for MySQL
+
+* *GIVEN* a reachable MySQL server whose `information_schema.COLLATIONS` lists neither `utf8mb4_0900_bin` nor `utf8mb4_0900_as_cs`, as MariaDB and MySQL before 8.0.1 do
+* *WHEN* the adapter runs the source check for `DRIVER = 'mysql'`
+* *THEN* the check MUST NOT query `information_schema.COLLATIONS` or the server version, because the MySQL dialect renders no collation
+* *AND* the check MUST NOT refuse the server for a missing collation or for its version
+* *AND* the check MUST still run at the point `vs-adapter/create-virtual-schema` states, on `refresh` and `setProperties` as well as `createVirtualSchema`
 <!-- /DELTA:CHANGED -->
