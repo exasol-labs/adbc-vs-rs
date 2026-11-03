@@ -16,5 +16,5 @@ Turns a `CREATE VIRTUAL SCHEMA` statement into a browsable set of Exasol virtual
 * *THEN* the returned table MUST list only the two core-type columns
 * *AND* `adapterNotes` MUST record the omitted column's table name, column name, source type, and the reason it was omitted
 * *AND* the adapter MUST NOT fail the request
-* *AND* the same MUST hold for a PostgreSQL `bytea` column, a MySQL `JSON` column, and a Trino `json` column, so one omission path serves every driver
+* *AND* the same MUST hold for a PostgreSQL `ARRAY` column, a MySQL `BLOB` column, and a Trino `json` column, so one omission path serves every driver
 <!-- /DELTA:CHANGED -->
