@@ -40,7 +40,7 @@ Delegates pattern matching and character comparison to the source, with every ch
 
 * *GIVEN* a column mapped to Exasol `CHAR(5)` holding `ab`, which on the test Exasol reports `LENGTH` 5, equals `'ab'`, `'ab '`, and `'ab   '`, is unequal to a `VARCHAR` holding `ab`, and does not match `LIKE 'ab'`, while PostgreSQL and MySQL ignore the trailing blanks of a fixed-width value, as each `<technology>-type-mapping` feature states
 * *WHEN* a filter over the column is delegated to the source
-* *THEN* a comparison with a string literal MUST select the rows Exasol's own evaluation selects
+* *THEN* a comparison with a string literal MUST select the rows the source selects under its collation and padding rules, which can include rows Exasol's own evaluation would not, such as a MySQL `CHAR` value `ab` under `utf8mb4_0900_ai_ci` matched by the literal `'AB'`
 * *AND* a comparison with a `VARCHAR` operand MUST select the rows the source selects, which can include rows Exasol's own evaluation would not
 * *AND* a `LIKE` without a trailing wildcard MUST select the rows the source selects, which can include rows Exasol's own evaluation would not
 
