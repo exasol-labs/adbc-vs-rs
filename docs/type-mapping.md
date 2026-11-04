@@ -137,16 +137,6 @@ A Trino `timestamp(p)` column is declared as `TIMESTAMP(3)`, but Trino evaluates
 - Exasol reads an empty `VARCHAR` value as null. A source column that holds `''` returns null, and `= ''` selects no row.
 - Exasol reads a `NaN` in a `double precision`, `real`, `DOUBLE`, or `FLOAT` column as null, as it does for a JDBC import. It holds no infinity. A PostgreSQL `numeric` `NaN` is not affected, because that column arrives as text.
 
-### The cost of a read expression
-
-A delegated filter, join key, grouping key, or `MIN` or `MAX` operand on a column with a read expression cannot use a source index on the bare column. The main case is a PostgreSQL `uuid` key. An index on the expression restores it:
-
-```sql
-CREATE INDEX ON <table> ((CAST(<column> AS text)));
-```
-
-Confirmed on PostgreSQL 18: `EXPLAIN` of a delegated `uuid` equality reports an index scan on this index. The bare comparison `"uid" = '...'` cannot use it.
-
 ### Text longer than 2000000 characters
 
 A query that reads a text longer than 2000000 characters from a mapped column fails. It does not return a truncated value.
@@ -169,4 +159,4 @@ These limits of Exasol decide the bounds of the mapping.
 | `VARCHAR(n)` | 1 to 2000000 characters | Not padded. An empty string is null |
 | `TIMESTAMP(p)` | 0 to 9 fractional-second digits, default 3 | No time zone |
 
-The full reference, with aliases, defaults, and Exasol's comparison rules, is in `specs/exasol-types.md` of the repository.
+The full reference, with aliases, defaults, and Exasol's comparison rules, is in [specs/exasol-types.md](../specs/exasol-types.md).
