@@ -4,14 +4,9 @@ States how the scan reaches a PostgreSQL source, passes its credentials, and coe
 
 ## Background
 
-- The ADBC PostgreSQL driver's `SetOption` accepts exactly `uri` and rejects `username` and `password` as unknown options, handing `uri`'s value verbatim to libpq's connect call. The separate-credential-option shape `scan-udf/arrow-scan` describes, and `scan-udf/mysql-scan` uses, is therefore impossible here: the credential has to travel inside that one option's value. It travels as a libpq keyword/value connection string built in memory at connect time from the freshly resolved `CONNECTION` object.
-- Conninfo form was chosen over URI form because its escaping is total. Single-quoting a value and backslash-escaping an embedded quote or backslash escapes any byte a password can hold, where percent-encoding would let a password containing `&`, `#`, `@`, or `/` change the parse rather than the value. Every parameter the address's query string carries crosses over as a keyword of the same name, so a `sslmode` or `connect_timeout` the operator set is not silently dropped.
-- Every invariant about persistence and disclosure still holds, and each is asserted rather than assumed. The connection string is built at the moment of connecting and discarded with the connection attempt; it reaches no scan specification, no `adapterNotes`, no SQL text, no `EXPLAIN VIRTUAL` output, and no log line or error message.
-- Redaction is applied by the adapter at the boundary it controls rather than trusted from the driver. The driver's error text quotes libpq, which can echo connection parameters, so the resolved password is stripped from every surfaced message — and from the subject the adapter names as well as from the driver text it wraps, because that subject can be the connection string itself.
-- The connection-open path is shared, so the redaction binds every caller rather than the scan alone. The adapter opens the source connection through the same path for `createVirtualSchema`, `refresh`, and `setProperties`.
-- This is the plan's one deliberate narrowing of a security property, forced by the driver's API rather than chosen between designs; decision `[6]` records it. What is narrowed is that a credential now passes through a connection string for this driver; what is unchanged is that it is never persisted and never disclosed.
-- The driver returns every `numeric` — constrained or not — as a UTF-8 string, documented as the only lossless representation. A column declared `DECIMAL(p,s)` therefore arrives as text and is parsed rather than cast from a decimal, which makes the string form the ordinary case for this driver rather than a fallback the coercion falls back to.
-- PostgreSQL `numeric` legitimately holds `NaN`, `Infinity`, and `-Infinity`, none of which any Exasol `DECIMAL` can represent — but the driver spells them on the wire as the lowercase strings `nan`, `inf`, and `-inf`, never PostgreSQL's own `NaN`/`Infinity`/`-Infinity`, so the coercion must match the driver's spellings rather than the source's. A constrained `numeric(p,s)` column — the only shape this release maps — can hold `nan` but not `inf` or `-inf`: PostgreSQL itself rejects an infinite value into a bounded `numeric` with a numeric field overflow error, so `inf`/`-inf` are reachable only through an unconstrained `numeric`, which this release leaves unmapped regardless. Whichever spelling does reach the scan, it is a failure the coercion names rather than a cast that silently yields a zero, a null, or a saturated value.
+- This feature states how the scan reaches a PostgreSQL source through the ADBC PostgreSQL driver, how it passes the credential, and how it coerces the values that driver returns as text.
+- A conninfo string is libpq's keyword/value connection string, a list of `keyword='value'` pairs.
+- `scan-udf/arrow-scan` owns the coercion contract every driver is held to, and `vs-adapter/postgresql-type-mapping` owns which `numeric` columns map to `DECIMAL` and which are read as text.
 
 ## Scenarios
 
@@ -19,8 +14,8 @@ States how the scan reaches a PostgreSQL source, passes its credentials, and coe
 
 * *GIVEN* an Exasol `CONNECTION` whose address is `postgresql://host:5432/appdb?sslmode=require` and whose password contains a single quote, a backslash, a space, and an ampersand
 * *WHEN* the scan builds the PostgreSQL connection value
-* *THEN* the value MUST be a libpq keyword/value connection string rather than a URI carrying the credential
-* *AND* the host, port, and database MUST be taken from the address, and every parameter its query string carries MUST appear as a keyword of the same name, so `sslmode` is not dropped
+* *THEN* the value MUST be a libpq keyword/value connection string rather than a URI carrying the credential, because conninfo escaping is total: a single-quoted value with an escaped quote or backslash holds any byte a password can hold, where percent-encoding would let a password containing `&`, `#`, `@`, or `/` change the parse rather than the value
+* *AND* the host, port, and database MUST be taken from the address, and every parameter its query string carries MUST appear as a keyword of the same name, so an `sslmode` or `connect_timeout` the operator set is not silently dropped
 * *AND* each value MUST be enclosed in single quotes with an embedded quote or backslash escaped, so the password reaches libpq as the exact bytes the `CONNECTION` object holds
 * *AND* the connection MUST succeed against a source whose password contains each of those characters
 
@@ -47,13 +42,22 @@ States how the scan reaches a PostgreSQL source, passes its credentials, and coe
 * *GIVEN* a PostgreSQL `numeric(12,4)` column declared in Exasol as `DECIMAL(12,4)`, which the driver returns as a UTF-8 string
 * *WHEN* the scan coerces that batch
 * *THEN* every value MUST be emitted as the declared `DECIMAL(12,4)` with the source precision and scale intact
-* *AND* the string form MUST be parsed as a first-class case rather than reached through a fallback, because this driver returns every `numeric` that way
+* *AND* the string form MUST be parsed as a first-class case rather than reached through a fallback, because this driver returns every `numeric` that way, documented as its only lossless representation
 * *AND* a value whose digits do not fit the declared precision MUST fail with a named error rather than be truncated or rounded
 
 ### Scenario: Non-finite numeric fails with a named error
 
-* *GIVEN* a PostgreSQL `numeric(12,4)` column declared in Exasol as `DECIMAL(12,4)`, and a batch arriving with the driver's own spellings `nan`, `inf`, and `-inf` — `nan` reachable from a value the column actually stores, `inf`/`-inf` only from strings built for the test, since PostgreSQL itself refuses to store an infinite value in a constrained `numeric`
+* *GIVEN* a PostgreSQL `numeric(12,4)` column declared in Exasol as `DECIMAL(12,4)`, and a batch arriving with the driver's own spellings `nan`, `inf`, and `-inf` of PostgreSQL's `NaN`, `Infinity`, and `-Infinity`: `nan` reachable from a value the column actually stores, `inf` and `-inf` only from strings built for the test, since PostgreSQL itself rejects an infinite value into a constrained `numeric` with a numeric field overflow error
 * *WHEN* the scan coerces that batch
-* *THEN* each value MUST fail with an error naming the value it received and the declared Exasol type
+* *THEN* each value MUST fail with an error naming the value it received and the declared Exasol type, because no Exasol `DECIMAL` can represent it, and the coercion MUST recognize the driver's spellings rather than PostgreSQL's own
 * *AND* the scan MUST NOT emit a zero, a null, or a saturated value in its place
 * *AND* a finite value in the same column MUST still coerce, so the failure is per value rather than per column
+* *AND* a non-finite value of an unconstrained `numeric` column MUST be emitted as PostgreSQL's text for it, because that column maps to `VARCHAR` and is read as `CAST(<column> AS TEXT)`, per `vs-adapter/postgresql-type-mapping`
+
+### Scenario: The credential travels only inside the driver's uri option for one connection attempt
+
+* *GIVEN* an Exasol `CONNECTION` addressing a PostgreSQL database
+* *WHEN* the scan opens the source connection
+* *THEN* the scan MUST pass the connection string as the driver's one `uri` option and pass no `username` or `password` option, because the ADBC PostgreSQL driver's `SetOption` accepts exactly `uri`, rejects `username` and `password` as unknown options, and hands `uri`'s value verbatim to libpq, so the separate credential options `scan-udf/mysql-scan` uses are impossible for this driver
+* *AND* the string MUST be built in memory at connect time from the freshly resolved `CONNECTION` object and discarded with the connection attempt
+* *AND* the string MUST NOT reach `EXPLAIN VIRTUAL` output or any log line, because passing the credential inside a connection string is the one deliberate narrowing of a security property, which the driver's API forces rather than a choice between designs, and the credential is still never persisted and never disclosed

@@ -94,3 +94,11 @@ States the capability set the PostgreSQL dialect advertises and the PostgreSQL S
 * *AND* the returned values MUST equal what Exasol returns for the same aggregation executed locally over the same data, for `COUNT`, `MIN`, and `MAX` over every mapped non-character operand type and over a character column declaring `COLLATE "C"`, grouped by such a column
 * *AND* a query averaging or summing a mapped numeric column MUST produce a generated statement carrying no `AVG` and no `SUM`, and MUST return the value Exasol's own aggregate returns
 * *AND* the same query grouping by two columns MUST produce a generated statement carrying no `GROUP BY` clause and MUST still return the correct rows, because Exasol withdraws that aggregation and groups it itself
+
+### Scenario: MIN and MAX over a BOOLEAN column render as bool_and and bool_or
+
+* *GIVEN* a `pushdown` request carrying `MIN` and `MAX` over a PostgreSQL `boolean` column and over a `bit` column, each declared `BOOLEAN`, each with and without `DISTINCT`
+* *WHEN* the PostgreSQL dialect renders the request
+* *THEN* `MIN` MUST render as `bool_and` and `MAX` as `bool_or` over the column's read expression, the bare column for `boolean` and `(position(B'1' IN <column>) > 0)` for `bit`, keeping `DISTINCT` where the request carries it
+* *AND* the dialect MUST NOT render `MIN` or `MAX` over a `BOOLEAN` operand, because PostgreSQL defines neither for `boolean` while Exasol, which orders `false` before `true`, delegates both
+* *AND* `MIN` and `MAX` over a column of any other declared type MUST render as `MIN` and `MAX`
