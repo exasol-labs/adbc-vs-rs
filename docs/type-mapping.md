@@ -151,19 +151,6 @@ Confirmed on PostgreSQL 18: `EXPLAIN` of a delegated `uuid` equality reports an 
 
 A query that reads a text longer than 2000000 characters from a mapped column fails. It does not return a truncated value.
 
-## Differences from the Exasol JDBC Virtual Schemas
-
-The mapping follows the Exasol PostgreSQL and MySQL JDBC Virtual Schemas, except for these points:
-
-- A PostgreSQL `numeric(p,s)` with p at most 36 maps to `DECIMAL(p,s)`. JDBC maps every `numeric` to `VARCHAR(2000000)`.
-- A MySQL `TINYINT(1)` maps to `DECIMAL(3,0)`. JDBC maps it to `BOOLEAN`.
-- A PostgreSQL `bytea` column maps to its hex text. JDBC returns a constant text.
-- A PostgreSQL `character(n)` with n above 2000 is read without its trailing blanks.
-- A column with a read expression reads through it in every position. The JDBC PostgreSQL dialect converts in the select list only.
-- A MySQL unsigned integer keeps the digits of its unsigned range, a MySQL `DECIMAL` of at most 36 digits keeps its own precision, and a PostgreSQL or MySQL timestamp keeps its own fractional-second precision.
-
-PostgreSQL arrays and MySQL binary, blob, and spatial columns stay omitted, as in the JDBC Virtual Schemas.
-
 ## After an upgrade
 
 - An existing virtual schema keeps its tables, columns, and generated statements until you run `ALTER VIRTUAL SCHEMA ... REFRESH`. Until then, its MySQL `CHAR` columns stay `VARCHAR(n)`.
