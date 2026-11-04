@@ -35,26 +35,26 @@ const ADAPTER_SCRIPT: &str = "PROBE.PROBE_ADAPTER";
 
 /// The virtual schema a measured query runs against. Its one table, `t`,
 /// carries columns `d DECIMAL(12,4)`, `e DECIMAL(30,2)`, `f DOUBLE`,
-/// `g VARCHAR(100)`, and `h TIMESTAMP`.
+/// `g VARCHAR(100)`, `h TIMESTAMP`, `b BOOLEAN`, and `p TIMESTAMP(6)`.
 pub const VIRTUAL_SCHEMA: &str = "PROBEVS";
 
 const BEGIN_MARKER: &str = "PUSHDOWN_JSON_BEGIN";
 const END_MARKER: &str = "PUSHDOWN_JSON_END";
 
-/// The measurement's own minimum capability set — exactly what the two
-/// queries [`measured_select_list_data_types`] runs need to reach the
-/// probe's `pushdown` handler at all, not a mirror of any shipped set:
-/// `SELECTLIST_PROJECTION` for a bare column, `SELECTLIST_EXPRESSIONS`
-/// because decision-log `[implement-gate] Gate 3.0 falsified the assumption
+/// The capability set the probe advertises: what the select-list measurements
+/// of [`measured_select_list_data_types`] need, plus the filter and literal
+/// capabilities of the PostgreSQL dialect, so a `WHERE` clause reaches the
+/// probe's `pushdown` handler as a `filter` for [`measured_pushdown_request`].
+///
+/// The first group is the select-list minimum. `SELECTLIST_EXPRESSIONS` is in
+/// it because decision-log `[implement-gate] Gate 3.0 falsified the assumption
 /// that an aggregate reaches the adapter without SELECTLIST_EXPRESSIONS`
-/// measured that Exasol delegates no aggregate without it,
-/// `AGGREGATE_GROUP_BY_COLUMN` since both queries group by one column,
-/// `FN_PRED_LESS` and `LITERAL_TIMESTAMP` for the one predicate the second
-/// query carries, and the seven `FN_AGG_*` capabilities both queries'
-/// aggregate calls need. It carries no `AGGREGATE_GROUP_BY_TUPLE`: measured
-/// live against this stack, a `GROUP BY` naming more than one column is
-/// withdrawn entirely without it.
-const CAPABILITIES: &str = r#""SELECTLIST_PROJECTION","SELECTLIST_EXPRESSIONS","AGGREGATE_GROUP_BY_COLUMN","FN_AGG_SUM","FN_AGG_SUM_DISTINCT","FN_AGG_COUNT","FN_AGG_COUNT_STAR","FN_AGG_COUNT_DISTINCT","FN_AGG_AVG","FN_AGG_MIN","FN_AGG_MAX","FN_PRED_LESS","LITERAL_TIMESTAMP""#;
+/// measured that Exasol delegates no aggregate without it, and it carries no
+/// `AGGREGATE_GROUP_BY_TUPLE`: measured live against this stack, a `GROUP BY`
+/// naming more than one column is withdrawn entirely without it. The filter
+/// group copies `drivers/postgresql.toml`, leaving `LITERAL_BOOL` out as the
+/// dialect does, so a comparison with a boolean literal is never delegated.
+const CAPABILITIES: &str = r#""SELECTLIST_PROJECTION","SELECTLIST_EXPRESSIONS","AGGREGATE_GROUP_BY_COLUMN","FN_AGG_SUM","FN_AGG_SUM_DISTINCT","FN_AGG_COUNT","FN_AGG_COUNT_STAR","FN_AGG_COUNT_DISTINCT","FN_AGG_AVG","FN_AGG_MIN","FN_AGG_MAX","FILTER_EXPRESSIONS","FN_PRED_AND","FN_PRED_OR","FN_PRED_NOT","FN_PRED_EQUAL","FN_PRED_NOTEQUAL","FN_PRED_LESS","FN_PRED_LESSEQUAL","FN_PRED_IS_NULL","FN_PRED_IS_NOT_NULL","FN_PRED_LIKE","FN_PRED_LIKE_ESCAPE","FN_PRED_BETWEEN","FN_PRED_IN_CONSTLIST","LITERAL_NULL","LITERAL_EXACTNUMERIC","LITERAL_DOUBLE","LITERAL_STRING","LITERAL_DATE","LITERAL_TIMESTAMP""#;
 
 /// The Lua adapter's entry point. `createVirtualSchema`, `refresh`, and
 /// `setProperties` all answer with the same fixed table; `pushdown` never
@@ -81,6 +81,8 @@ function adapter_call(request_json)
                         {{name = "f", dataType = {{type="DOUBLE"}}, isNullable=true}},
                         {{name = "g", dataType = {{type="VARCHAR", size=100, characterSet="UTF8"}}, isNullable=true}},
                         {{name = "h", dataType = {{type="TIMESTAMP"}}, isNullable=true}},
+                        {{name = "b", dataType = {{type="BOOLEAN"}}, isNullable=true}},
+                        {{name = "p", dataType = {{type="TIMESTAMP", fractionalSecondsPrecision=6}}, isNullable=true}},
                     }}
                 }}}},
                 adapterNotes = "{{}}"
@@ -125,8 +127,7 @@ pub fn drop_virtual_schema(exasol: &Exasol) {
 /// handler always fails — and returns the `pushdownRequest.selectListDataTypes`
 /// array Exasol sent, exactly as received.
 pub fn measured_select_list_data_types(exasol: &Exasol, query: &str) -> Vec<Value> {
-    let error = exasol.execute_expecting_failure(query);
-    let request = extract_pushdown_request(&error);
+    let request = measured_pushdown_request(exasol, query);
     request
         .pointer("/pushdownRequest/selectListDataTypes")
         .unwrap_or_else(|| {
@@ -135,6 +136,14 @@ pub fn measured_select_list_data_types(exasol: &Exasol, query: &str) -> Vec<Valu
         .as_array()
         .unwrap_or_else(|| panic!("selectListDataTypes is not an array: {request}"))
         .clone()
+}
+
+/// Runs `query` against [`VIRTUAL_SCHEMA`] and returns the whole `pushdown`
+/// request Exasol sent, exactly as received: the `pushdownRequest` with its
+/// `filter`, `selectList`, and `selectListDataTypes`, beside `involvedTables`.
+pub fn measured_pushdown_request(exasol: &Exasol, query: &str) -> Value {
+    let error = exasol.execute_expecting_failure(query);
+    extract_pushdown_request(&error)
 }
 
 /// Pulls the `pushdownRequest` JSON out of the SQL error the probe's

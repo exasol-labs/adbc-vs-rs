@@ -1,6 +1,6 @@
 use super::*;
+use crate::exa_type::ExasolType;
 use crate::metadata::DiscoveredTable;
-use crate::type_mapping::MappedType;
 
 /// One `information_schema.columns` row, with the fields a test does not care
 /// about set to what an integer column reports.
@@ -12,7 +12,7 @@ fn column_row(column: &str, data_type: &str, column_type: &str) -> ColumnRow {
         data_type: data_type.to_string(),
         column_type: column_type.to_string(),
         character_maximum_length: None,
-        character_set: None,
+        datetime_precision: None,
         numeric_precision: Some(10),
         numeric_scale: Some(0),
         is_nullable: true,
@@ -54,22 +54,27 @@ pub(crate) fn one_mapped_and_one_unmapped_column() -> Vec<DiscoveredTable> {
             ColumnRow {
                 table: "orders".to_string(),
                 ordinal_position: 2,
-                ..column_row("payload", "json", "json")
+                ..column_row("photo", "blob", "blob")
             },
         ],
     )
 }
 
 /// `UNSIGNED` is spelled only in `COLUMN_TYPE`'s free text, and an unsigned
-/// integer is unmapped, so reading it wrongly would expose a column whose
-/// range the declared `DECIMAL` cannot hold.
+/// `BIGINT` declares more digits than a signed one, so reading it wrongly would
+/// declare a `DECIMAL` the column's values overflow.
 #[test]
 fn unsigned_is_read_from_the_column_type_text() {
-    let table = assembled(vec![column_row("c", "int", "int(10) unsigned")]);
+    let table = assembled(vec![column_row("c", "bigint", "bigint(20) unsigned")]);
 
-    assert!(table.columns.is_empty(), "an unsigned INT does not map");
-    assert_eq!(table.omissions.len(), 1);
-    assert_eq!(table.omissions[0].column.as_deref(), Some("c"));
+    assert!(table.omissions.is_empty(), "an unsigned BIGINT maps");
+    assert_eq!(
+        table.columns[0].mapped.exasol_type,
+        ExasolType::Decimal {
+            precision: 20,
+            scale: 0
+        }
+    );
 }
 
 #[test]
@@ -79,18 +84,46 @@ fn signed_column_type_is_not_reported_unsigned() {
     assert!(table.omissions.is_empty(), "a signed INT maps");
     assert_eq!(
         table.columns[0].mapped.exasol_type,
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 10,
             scale: 0
         }
     );
 }
 
+/// The columns query is the only place a catalog field reaches the mapping, so
+/// a field it does not select is a field the mapping reads as absent.
 #[test]
-fn character_set_is_read_from_the_row_the_column_maps_from() {
-    let mut row = column_row("name", "varchar", "varchar(100)");
-    row.character_maximum_length = Some(100);
-    row.character_set = Some("utf8mb4".to_string());
+fn the_columns_query_selects_every_field_the_mapping_reads() {
+    let columns = columns_query("shop");
+
+    for field in [
+        "DATA_TYPE",
+        "COLUMN_TYPE",
+        "CHARACTER_MAXIMUM_LENGTH",
+        "NUMERIC_PRECISION",
+        "NUMERIC_SCALE",
+        "DATETIME_PRECISION",
+        "IS_NULLABLE",
+    ] {
+        assert!(
+            columns.contains(field),
+            "the query must select `{field}`: {columns}"
+        );
+    }
+    assert!(
+        !columns.contains("CHARACTER_SET_NAME"),
+        "every character column maps to UTF8 whatever its character set, so the query must not \
+         read it: {columns}"
+    );
+}
+
+/// The declared fractional-second digits reach the mapping, so a `DATETIME(6)`
+/// is declared `TIMESTAMP(6)` rather than the precision of a default `DATETIME`.
+#[test]
+fn a_datetime_columns_precision_reaches_the_mapping() {
+    let mut row = column_row("at", "datetime", "datetime(6)");
+    row.datetime_precision = Some(6);
     row.numeric_precision = None;
     row.numeric_scale = None;
 
@@ -98,24 +131,20 @@ fn character_set_is_read_from_the_row_the_column_maps_from() {
 
     assert_eq!(
         table.columns[0].mapped.exasol_type,
-        MappedType::Varchar { size: 100 }
+        ExasolType::Timestamp { precision: 6 }
     );
 }
 
 /// An omission records `DATA_TYPE`, the name an operator reads in their own
 /// catalog, rather than `COLUMN_TYPE`'s declaration text.
 #[test]
-fn a_character_column_of_another_character_set_is_omitted_naming_its_type() {
-    let mut row = column_row("name", "varchar", "varchar(100)");
-    row.character_maximum_length = Some(100);
-    row.character_set = Some("latin1".to_string());
-
-    let table = assembled(vec![row]);
+fn an_unmapped_column_is_omitted_naming_its_data_type() {
+    let table = assembled(vec![column_row("photo", "blob", "blob")]);
 
     assert!(table.columns.is_empty());
-    assert_eq!(table.omissions[0].source_type.as_deref(), Some("varchar"));
+    assert_eq!(table.omissions[0].source_type.as_deref(), Some("blob"));
     assert!(
-        table.omissions[0].reason.contains("latin1"),
+        table.omissions[0].reason.contains("BLOB"),
         "the recorded reason must name what disqualified the column: {}",
         table.omissions[0].reason
     );

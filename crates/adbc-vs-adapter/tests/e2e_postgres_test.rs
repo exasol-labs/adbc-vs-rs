@@ -29,16 +29,22 @@
 
 mod common;
 
+use adbc_vs_adapter::exa_type::ExasolType;
 use adbc_vs_adapter::pushdown::SCAN_SCRIPT_NAME;
 use adbc_vs_adapter::scan_spec;
 use adbc_vs_scan::driver::Driver;
 use common::exasol::cell;
 use common::postgres_mirror;
 use common::postgres_stack::{self as stack, POSTGRES_VIRTUAL_SCHEMA as VIRTUAL_SCHEMA};
-use common::{postgres, schema};
+use common::{postgres, probe, schema};
 
-/// How many rows `docker/postgres/init.sql` seeds into `items`.
+/// How many rows `docker/postgres/init.sql` seeds into `items`, and into
+/// `items_c`, which holds the same six rows and two more.
 const ITEM_ROWS: usize = 6;
+const ITEM_C_ROWS: usize = 8;
+
+/// The table every type-conversion test reads, one column per mapped type.
+const TYPE_COVERAGE: &str = "type_coverage";
 
 /// How many distinct `category` values those rows hold under Exasol's
 /// comparison rules: `widget`, `Widget`, `cafe`, and `café`. PostgreSQL's own
@@ -119,7 +125,7 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
 /// a pushdown defect.
 #[test]
 fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
-    for table in ["items", "item_notes"] {
+    for table in ["items", "items_c", "item_notes", TYPE_COVERAGE] {
         let mirrored = declared_columns(postgres_mirror::SCHEMA, table);
         let virtual_table = declared_columns(VIRTUAL_SCHEMA, table);
 
@@ -134,13 +140,6 @@ fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
              different things"
         );
     }
-
-    assert_eq!(
-        declared_columns(postgres_mirror::SCHEMA, ITEMS),
-        declared_columns(VIRTUAL_SCHEMA, ITEMS_C),
-        "`items_c` is compared with the mirror's `items`, so the two must declare the same column \
-         names in the same order with the same Exasol types"
-    );
 }
 
 // --- projection, filter, aggregation, join ----------------------------------
@@ -217,8 +216,8 @@ fn filter_reaches_postgresql_and_matches_the_mirror() {
     let ordering_rows = assert_matches_mirror(ITEMS_C, ordering_query);
     assert_eq!(
         column_values(&ordering_rows, "id"),
-        vec!["1".to_string(), "4".to_string()],
-        "only the two 'B' rows precede 'C' in code-point order, which `items_c`'s own collation \
+        strings(&["1", "4", "7", "8"]),
+        "only the four 'B' rows precede 'C' in code-point order, which `items_c`'s own collation \
          supplies: {ordering_rows:?}"
     );
 
@@ -246,6 +245,27 @@ fn filter_reaches_postgresql_and_matches_the_mirror() {
             "6".to_string()
         ],
         "'C' and 'a' bound the range in code-point order: {between_rows:?}"
+    );
+
+    let like_query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"tag\" LIKE '5\\%x' ORDER BY \"id\""
+        )
+    };
+
+    let like_statement = generated_statement(&like_query(VIRTUAL_SCHEMA, ITEMS_C));
+    assert!(
+        like_statement.contains("LIKE") && !like_statement.contains("ESCAPE"),
+        "a pattern the query gave no ESCAPE clause for must reach PostgreSQL with none, so \
+         PostgreSQL's own backslash rule reads it: {like_statement}"
+    );
+
+    let like_rows = assert_matches_mirror(ITEMS_C, like_query);
+    assert_eq!(
+        column_values(&like_rows, "id"),
+        strings(&["7"]),
+        "the backslash escapes the `%`, so only the row holding `5%x` matches, and the row \
+         holding `5\\yx` does not: {like_rows:?}"
     );
 }
 
@@ -276,7 +296,7 @@ fn aggregation_reaches_postgresql_and_matches_the_mirror() {
 
     let rows = assert_matches_mirror(ITEMS_C, single_group_query);
     let answers = &rows[0];
-    assert_eq!(cell(answers, "N"), Some(ITEM_ROWS.to_string()));
+    assert_eq!(cell(answers, "N"), Some(ITEM_C_ROWS.to_string()));
     assert_eq!(
         cell(answers, "MINKEY"),
         Some("B".to_string()),
@@ -286,8 +306,9 @@ fn aggregation_reaches_postgresql_and_matches_the_mirror() {
     assert_eq!(cell(answers, "MAXKEY"), Some("a".to_string()));
     assert_eq!(
         cell(answers, "MINTAG"),
-        Some("ab".to_string()),
-        "the delegated MIN must not pad the trailing-space value: {answers:?}"
+        Some("5%x".to_string()),
+        "the delegated MIN must return the code-point minimum, which no padding of the \
+         trailing-space value `ab ` changes: {answers:?}"
     );
     assert_eq!(cell(answers, "MAXTAG"), Some("ab!".to_string()));
 
@@ -445,6 +466,23 @@ fn ordering_and_min_max_follow_the_columns_own_collation() {
     let rows = stack::shared().exasol.query_rows(&aggregates);
     assert_eq!(cell(&rows[0], "LO"), Some("a".to_string()), "{rows:?}");
     assert_eq!(cell(&rows[0], "HI"), Some("C".to_string()), "{rows:?}");
+
+    let between = format!(
+        "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{ITEMS}\" WHERE \"sort_key\" BETWEEN 'C' AND 'a' \
+         ORDER BY \"id\""
+    );
+    let between_statement = generated_statement(&between);
+    assert!(
+        between_statement.contains("BETWEEN E'C' AND E'a'")
+            && !between_statement.contains("COLLATE"),
+        "the BETWEEN must reach PostgreSQL bare: {between_statement}"
+    );
+    let rows = stack::shared().exasol.query_rows(&between);
+    assert!(
+        rows.is_empty(),
+        "the en_US.utf8 locale orders 'a' before 'C', so the range 'C' to 'a' is empty, where \
+         Exasol's code-point order selects four rows: {rows:?}"
+    );
 }
 
 /// The whole rule, read off the statements the deployed adapter actually
@@ -454,6 +492,38 @@ fn ordering_and_min_max_follow_the_columns_own_collation() {
 /// collation of a column must not change what the dialect renders.
 #[test]
 fn no_generated_statement_carries_a_collation_keyword() {
+    for query in [
+        format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" WHERE \"uid\" < 'b'"),
+        format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" WHERE \"uid\" = 'a'"),
+        format!(
+            "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" WHERE \"doc_json\" LIKE 'x%'"
+        ),
+        format!(
+            "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" \
+             WHERE \"unbounded_amount\" IN ('1.0', 'NaN')"
+        ),
+        format!(
+            "SELECT \"uid\", COUNT(*) FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" GROUP BY \"uid\""
+        ),
+        format!("SELECT COUNT(DISTINCT \"uid\") FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\""),
+        format!(
+            "SELECT MIN(\"uid\"), MAX(\"unbounded_amount\") FROM \
+             {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\""
+        ),
+        format!(
+            "SELECT a.\"id\" FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" a INNER JOIN \
+             {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" b ON a.\"uid\" = b.\"uid\""
+        ),
+    ] {
+        for statement in generated_statements(&query) {
+            assert!(
+                !statement.contains("COLLATE"),
+                "a column read as text keeps the collation PostgreSQL applies to it: `{query}` \
+                 generated: {statement}"
+            );
+        }
+    }
+
     for table in [ITEMS, ITEMS_C] {
         for query in [
             format!("SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{table}\" WHERE \"sort_key\" < 'C'"),
@@ -532,6 +602,17 @@ fn an_ordering_comparison_over_a_wrapped_operand_is_evaluated_by_exasol() {
     );
     let rows = assert_matches_mirror(ITEMS, minimum);
     assert_eq!(cell(&rows[0], "LO"), Some("B".to_string()), "{rows:?}");
+
+    let maximum = |schema: &str, table: &str| {
+        format!("SELECT MAX(\"sort_key\" || '') AS HI FROM {schema}.\"{table}\"")
+    };
+    let maximum_statement = generated_statement(&maximum(VIRTUAL_SCHEMA, ITEMS));
+    assert!(
+        !maximum_statement.contains("MAX("),
+        "the MAX over the wrapped operand must not reach PostgreSQL: {maximum_statement}"
+    );
+    let rows = assert_matches_mirror(ITEMS, maximum);
+    assert_eq!(cell(&rows[0], "HI"), Some("a".to_string()), "{rows:?}");
 }
 
 /// The answer the bare grouping key and the bare `DISTINCT` operand have to
@@ -599,6 +680,32 @@ fn uncollated_grouping_and_distinct_return_the_mirrors_group_count() {
         cell(&distinct_rows[0], "N"),
         Some(CATEGORY_GROUPS.to_string())
     );
+
+    for (predicate, expected_ids) in [
+        ("\"category\" = 'Widget'", ["2", "4"].as_slice()),
+        ("\"category\" LIKE 'Wid%'", ["2", "4"].as_slice()),
+        (
+            "\"category\" IN ('cafe', 'Widget')",
+            ["2", "4", "5"].as_slice(),
+        ),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA, ITEMS));
+        assert!(
+            statement.contains("WHERE") && !statement.contains("COLLATE"),
+            "`{predicate}` must reach PostgreSQL bare, or the rows below measure Exasol: \
+             {statement}"
+        );
+        let rows = assert_matches_mirror(ITEMS, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`{predicate}` must keep case and accent variants apart, as Exasol does: {rows:?}"
+        );
+    }
 }
 
 /// A select-list predicate reading the grouped character column is delegated
@@ -925,13 +1032,14 @@ fn driver_path_is_accepted_and_bypasses_provisioning() {
 
 // --- omission recording and credential redaction ----------------------------
 
-/// `items` mixes mapped and unmapped columns on purpose (`docker/postgres/
-/// init.sql`), so every one of its unmapped columns must be left out of the
-/// virtual table and recorded under its own PostgreSQL type and reason, while
-/// the wholly unmapped `all_unmapped` table must be absent from
-/// `schemaMetadata` entirely rather than exposed thin — and the shared
-/// `PGVS` schema already having been created over both is this test's proof
-/// that creation still succeeds despite the omissions.
+/// `items` mixes mapped columns with one array column (`docker/postgres/
+/// init.sql`), so the array must be left out of the virtual table and recorded
+/// under its own PostgreSQL type and reason while every other column of the
+/// table maps, and the wholly unmapped `all_unmapped` table must be absent from
+/// `schemaMetadata` entirely rather than exposed thin, with each of its array
+/// columns recorded. The shared `PGVS` schema already having been created over
+/// both is this test's proof that creation still succeeds despite the
+/// omissions.
 #[test]
 fn unmapped_items_columns_are_recorded_and_all_unmapped_table_is_absent() {
     let columns = column_names(VIRTUAL_SCHEMA, "items");
@@ -940,34 +1048,48 @@ fn unmapped_items_columns_are_recorded_and_all_unmapped_table_is_absent() {
         .as_array()
         .expect("adapter notes carry an omitted array");
 
-    for (column, source_type) in [
-        ("code", "character"),
-        ("description", "text"),
-        ("details", "jsonb"),
-        ("photo", "bytea"),
-        ("uid", "uuid"),
-        ("seen_at", "timestamp with time zone"),
-    ] {
+    for column in ["code", "description", "details", "photo", "uid", "seen_at"] {
         assert!(
-            !columns.contains(&column.to_string()),
-            "unmapped column {column} must not appear in the virtual table: {columns:?}"
+            columns.contains(&column.to_string()),
+            "{column} is mapped and must appear in the virtual table: {columns:?}"
         );
+    }
+    assert!(
+        !columns.contains(&"labels".to_string()),
+        "the array column must not appear in the virtual table: {columns:?}"
+    );
+
+    for (table, column) in [
+        ("items", "labels"),
+        ("all_unmapped", "tags"),
+        ("all_unmapped", "numbers"),
+    ] {
         let entry = omitted
             .iter()
-            .find(|entry| entry["table"] == "items" && entry["column"] == column)
-            .unwrap_or_else(|| panic!("the omitted {column} column must be recorded: {omitted:?}"));
+            .find(|entry| entry["table"] == table && entry["column"] == column)
+            .unwrap_or_else(|| {
+                panic!("the omitted {table}.{column} column must be recorded: {omitted:?}")
+            });
         assert_eq!(
-            entry["sourceType"], source_type,
+            entry["sourceType"], "ARRAY",
             "the recorded sourceType must be PostgreSQL's own name for the column's type: \
              {entry}"
         );
         assert!(
             entry["reason"]
                 .as_str()
-                .is_some_and(|reason| !reason.is_empty()),
-            "the omission must carry a non-empty reason: {entry}"
+                .is_some_and(|reason| reason.contains("ARRAY")),
+            "the omission must carry a reason naming ARRAY: {entry}"
         );
     }
+    assert_eq!(
+        omitted
+            .iter()
+            .filter(|entry| entry["column"].is_string())
+            .count(),
+        3,
+        "no column but the three arrays is omitted: {omitted:?}"
+    );
 
     let tables = table_names(VIRTUAL_SCHEMA);
     assert!(
@@ -1302,6 +1424,950 @@ fn two_virtual_schemas_advertise_their_own_capability_sets() {
     );
 }
 
+/// `type_coverage` (`docker/postgres/init.sql`) holds one column of every
+/// mapped type, and the mirror holds the values Exasol reads for each. A test
+/// below compares a delegated query over it with the same query over the
+/// mirror, and checks each column the declared Exasol type the mirror declares
+/// for it, so a conversion that read the wrong value or declared the wrong type
+/// shows as a difference.
+fn assert_declares(table: &str, column: &str, exasol_type: &str) {
+    let declared = declared_columns(VIRTUAL_SCHEMA, table);
+    assert!(
+        declared.contains(&(column.to_string(), exasol_type.to_string())),
+        "{table}.{column} must be declared {exasol_type}: {declared:?}"
+    );
+}
+
+/// Narrow integers map to `DECIMAL` of their own width's digits and read bare.
+#[test]
+fn smallint_column_matches_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "small_id", "DECIMAL(5,0)");
+
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"small_id\" FROM {schema}.\"{table}\" WHERE \"small_id\" >= 2 \
+             ORDER BY \"id\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("WHERE")
+            && statement.contains("\"small_id\"")
+            && !statement.contains("CAST"),
+        "the filter must reach PostgreSQL over the bare column: {statement}"
+    );
+
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(
+        column_values(&rows, "small_id"),
+        strings(&["2", "3", "4", "5"])
+    );
+}
+
+/// A `numeric` beyond Exasol's 36 digits, and one with no declared precision,
+/// map to `VARCHAR` read as PostgreSQL's text, which keeps every digit, the
+/// trailing zeros, and the values no `DECIMAL` holds.
+#[test]
+fn wide_and_unconstrained_numeric_read_as_text_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "unbounded_amount", "VARCHAR(2000000) UTF8");
+    assert_declares(TYPE_COVERAGE, "wide_amount", "VARCHAR(2000000) UTF8");
+
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"unbounded_amount\", \"wide_amount\" FROM {schema}.\"{table}\" \
+             ORDER BY \"id\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("CAST(\"unbounded_amount\" AS TEXT)")
+            && statement.contains("CAST(\"wide_amount\" AS TEXT)"),
+        "both columns must read as text in the select list: {statement}"
+    );
+
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(
+        column_values(&rows, "unbounded_amount")[..4],
+        strings(&["1.0", "1.00", "NaN", "Infinity"]),
+        "1.0 and 1.00 are two distinct values, and NaN and Infinity come back as text rather \
+         than failing the query: {rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[4], "unbounded_amount").map(|text| text.len()),
+        Some(401),
+        "1e400 comes back as its 401 digits: {rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[0], "wide_amount"),
+        Some("12345678901234567890123456789012345678.90".to_string())
+    );
+
+    let equality = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"unbounded_amount\" = '1.0' \
+             ORDER BY \"id\""
+        )
+    };
+    let equality_statement = generated_statement(&equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        equality_statement.contains("(CAST(\"unbounded_amount\" AS TEXT) = E'1.0')"),
+        "the equality must reach PostgreSQL over the text: {equality_statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+    assert_eq!(
+        column_values(&rows, "id"),
+        strings(&["1"]),
+        "an equality with '1.0' selects the row holding 1.0 and not the one holding 1.00: \
+         {rows:?}"
+    );
+
+    let specials = stack::shared().exasol.query_rows(&format!(
+        "SELECT \"unbounded_amount\" FROM {VIRTUAL_SCHEMA}.\"numeric_specials\" ORDER BY \"id\""
+    ));
+    assert_eq!(
+        specials
+            .iter()
+            .map(|row| cell(row, "unbounded_amount"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("100".to_string()),
+            None,
+            Some("Infinity".to_string()),
+            Some("-Infinity".to_string()),
+        ],
+        "the infinite values of an unconstrained numeric come back as PostgreSQL's text"
+    );
+}
+
+/// `SELECT *` reads every column through its own read expression, and the whole
+/// row is what the mirror holds.
+#[test]
+fn select_star_over_type_coverage_matches_the_mirror() {
+    let query =
+        |schema: &str, table: &str| format!("SELECT * FROM {schema}.\"{table}\" ORDER BY \"id\"");
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    for fragment in [
+        "CAST(\"uid\" AS TEXT)",
+        "(position(B'1' IN \"bits\") > 0)",
+        "CAST(CAST(\"price\" AS NUMERIC) AS DOUBLE PRECISION)",
+        "CAST(\"wide_code\" AS TEXT)",
+    ] {
+        assert!(
+            statement.contains(fragment),
+            "the select list must carry {fragment}: {statement}"
+        );
+    }
+
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(
+        rows[0].len(),
+        28,
+        "every mapped column comes back: {:?}",
+        rows[0]
+    );
+}
+
+/// A value read as text compares as the text the scan emits, so a comparison
+/// PostgreSQL's own type would answer differently follows the text instead.
+#[test]
+fn values_read_as_text_compare_as_the_emitted_text() {
+    const JSON_TEXT: &str = r#"{"a":   1,  "b": [1,2]}"#;
+    const JSON_NORMALIZED: &str = r#"{"a": 1, "b": [1,2]}"#;
+    const JSONB_SORTED: &str = r#"{"a": 2, "b": 1}"#;
+    const JSONB_UNSORTED: &str = r#"{"b": 1, "a": 2}"#;
+    const UUID_UPPER: &str = "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11";
+    const UUID_LOWER: &str = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
+
+    for (column, literal, expected_ids) in [
+        ("uid", UUID_UPPER, &[][..]),
+        ("uid", UUID_LOWER, &["1"][..]),
+        ("doc_json", JSON_TEXT, &["1"][..]),
+        ("doc_json", JSON_NORMALIZED, &[][..]),
+        ("doc_xml", "<a>1</a>", &["1"][..]),
+        ("doc_jsonb", JSONB_SORTED, &["1", "2"][..]),
+        ("doc_jsonb", JSONB_UNSORTED, &[][..]),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"{column}\" = '{literal}' \
+                 ORDER BY \"id\""
+            )
+        };
+
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains(&format!("(CAST(\"{column}\" AS TEXT) = E'")),
+            "the equality over {column} must compare the text: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "{column} = '{literal}' compares the emitted text: {rows:?}"
+        );
+    }
+}
+
+/// A `timestamp(6)` keeps all six fractional digits through the scan and
+/// through a delegated comparison with a timestamp literal.
+#[test]
+fn microsecond_timestamp_keeps_six_digits_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "precise_at", "TIMESTAMP(6)");
+    assert_declares(TYPE_COVERAGE, "whole_at", "TIMESTAMP(0)");
+
+    let digits = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", TO_CHAR(\"precise_at\", 'YYYY-MM-DD HH24:MI:SS.FF6') AS TEXT_AT \
+             FROM {schema}.\"{table}\" WHERE \"precise_at\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, digits);
+    assert_eq!(
+        column_values(&rows, "TEXT_AT"),
+        strings(&[
+            "2024-01-01 12:00:00.123456",
+            "2024-01-01 12:00:00.123457",
+            "2024-01-01 12:00:00.123456",
+        ])
+    );
+
+    let equality = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" \
+             WHERE \"precise_at\" = TIMESTAMP '2024-01-01 12:00:00.123456' ORDER BY \"id\""
+        )
+    };
+    let statement = generated_statement(&equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains(".123456"),
+        "the literal must reach PostgreSQL with its six fractional digits: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+    assert_eq!(
+        column_values(&rows, "id"),
+        strings(&["1", "4"]),
+        "the equality selects the two rows holding .123456 and not the one holding .123457: \
+         {rows:?}"
+    );
+}
+
+/// A `real` is emitted as its single-precision value widened to double, so a
+/// stored `0.1` equals no decimal literal `0.1`, and `0.5`, which a
+/// single-precision value holds exactly, still equals its literal.
+#[test]
+fn real_column_holds_the_widened_single_precision_value() {
+    assert_declares(TYPE_COVERAGE, "approx", "DOUBLE");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"approx\" FROM {schema}.\"{table}\" WHERE \"approx\" IS NOT NULL \
+             ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    let widened: f64 = cell(&rows[0], "approx")
+        .expect("row 1 holds a real")
+        .parse()
+        .expect("Exasol returns a DOUBLE as a number");
+    assert_eq!(widened, f64::from(0.1_f32), "{rows:?}");
+
+    for (literal, expected_ids) in [("0.1", &[][..]), ("0.5", &["2"][..])] {
+        let equality = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"approx\" = {literal} \
+                 ORDER BY \"id\""
+            )
+        };
+        let statement = generated_statement(&equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains(&format!("(\"approx\" = {literal})")),
+            "the equality must reach PostgreSQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "{rows:?}"
+        );
+    }
+}
+
+/// `boolean` reads bare and `bit` of every width reads as whether any bit is
+/// set: a delegated filter, grouping, `MIN`, `MAX`, and `COUNT(DISTINCT)` over
+/// each column return what Exasol returns over the emitted `BOOLEAN` values.
+#[test]
+fn boolean_and_bit_columns_filter_group_and_aggregate_like_the_mirror() {
+    for column in ["flag", "other_flag", "bit_flag", "bits"] {
+        assert_declares(TYPE_COVERAGE, column, "BOOLEAN");
+    }
+
+    for (predicate, fragment, expected_ids) in [
+        ("\"flag\"", "WHERE \"flag\"", &["1", "4"][..]),
+        ("NOT \"flag\"", "(NOT \"flag\")", &["2", "5"][..]),
+        (
+            "\"bit_flag\"",
+            "WHERE (position(B'1' IN \"bit_flag\") > 0)",
+            &["1", "4"][..],
+        ),
+        (
+            "\"bits\"",
+            "WHERE (position(B'1' IN \"bits\") > 0)",
+            &["1", "2", "4"][..],
+        ),
+        (
+            "NOT \"bits\"",
+            "(NOT (position(B'1' IN \"bits\") > 0))",
+            &["3"][..],
+        ),
+        (
+            "\"flag\" = \"other_flag\"",
+            "(\"flag\" = \"other_flag\")",
+            &["1", "5"][..],
+        ),
+        (
+            "\"bits\" = \"flag\"",
+            "((position(B'1' IN \"bits\") > 0) = \"flag\")",
+            &["1", "4"][..],
+        ),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains(fragment),
+            "`WHERE {predicate}` must reach PostgreSQL as {fragment}: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`WHERE {predicate}`: {rows:?}"
+        );
+    }
+
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT MIN(\"flag\") AS MIN_FLAG, MAX(\"flag\") AS MAX_FLAG, \
+             MIN(\"bit_flag\") AS MIN_BIT, MAX(\"bit_flag\") AS MAX_BIT, \
+             MIN(\"bits\") AS MIN_BITS, MAX(\"bits\") AS MAX_BITS, \
+             COUNT(DISTINCT \"bits\") AS DISTINCT_BITS \
+             FROM {schema}.\"{table}\""
+        )
+    };
+    let statement = generated_statement(&aggregates(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    for fragment in [
+        "bool_and(\"flag\")",
+        "bool_or(\"flag\")",
+        "bool_and((position(B'1' IN \"bit_flag\") > 0))",
+        "bool_or((position(B'1' IN \"bits\") > 0))",
+        "COUNT(DISTINCT (position(B'1' IN \"bits\") > 0))",
+    ] {
+        assert!(
+            statement.contains(fragment),
+            "the aggregates must reach PostgreSQL as {fragment}: {statement}"
+        );
+    }
+    for forbidden in ["MIN(", "MAX("] {
+        assert!(
+            !statement.contains(forbidden),
+            "PostgreSQL defines no {forbidden}boolean): {statement}"
+        );
+    }
+    let rows = assert_matches_mirror(TYPE_COVERAGE, aggregates);
+    let answers = &rows[0];
+    for (name, expected) in [
+        ("MIN_FLAG", "false"),
+        ("MAX_FLAG", "true"),
+        ("MIN_BIT", "false"),
+        ("MAX_BIT", "true"),
+        ("MIN_BITS", "false"),
+        ("MAX_BITS", "true"),
+        ("DISTINCT_BITS", "2"),
+    ] {
+        assert_eq!(
+            cell(answers, name),
+            Some(expected.to_string()),
+            "{name}: {answers:?}"
+        );
+    }
+
+    for column in ["flag", "bits"] {
+        let grouped = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"{column}\" AS GROUP_KEY, COUNT(*) AS N FROM {schema}.\"{table}\" \
+                 GROUP BY \"{column}\" ORDER BY \"{column}\""
+            )
+        };
+        let statement = generated_statement(&grouped(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("GROUP BY"),
+            "the grouping over {column} must reach PostgreSQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, grouped);
+        assert_eq!(
+            rows.len(),
+            3,
+            "false, true, and null are three groups: {rows:?}"
+        );
+    }
+    let bits_groups = stack::shared().exasol.query_rows(&format!(
+        "SELECT \"bits\" AS GROUP_KEY, COUNT(*) AS N FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" \
+         GROUP BY \"bits\""
+    ));
+    let true_group = bits_groups
+        .iter()
+        .find(|row| cell(row, "GROUP_KEY") == Some("true".to_string()))
+        .expect("a group of the set-bit values");
+    assert_eq!(
+        cell(true_group, "N"),
+        Some("3".to_string()),
+        "00000101 and 00001001 are one group: {bits_groups:?}"
+    );
+}
+
+/// Exasol delegates a comparison of a `BOOLEAN` column with a predicate, with
+/// the predicate's operands swapped, and the dialect renders it parenthesized.
+#[test]
+fn boolean_column_compared_with_a_predicate_matches_the_mirror() {
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"flag\" = (\"small_id\" > 2) \
+             ORDER BY \"id\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("(\"flag\" = (2 < \"small_id\"))"),
+        "the comparison must reach PostgreSQL with its predicate operand parenthesized: \
+         {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(column_values(&rows, "id"), strings(&["2", "4"]), "{rows:?}");
+}
+
+/// `money` is read through `numeric` as a `DOUBLE`, so a comparison with a
+/// decimal literal selects the row Exasol selects.
+#[test]
+fn money_column_compares_as_double_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "price", "DOUBLE");
+
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"price\" FROM {schema}.\"{table}\" WHERE \"price\" = 12.34 \
+             ORDER BY \"id\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("(CAST(CAST(\"price\" AS NUMERIC) AS DOUBLE PRECISION) = 12.34)"),
+        "the comparison must reach PostgreSQL over the read expression: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(column_values(&rows, "id"), strings(&["1"]), "{rows:?}");
+    assert_eq!(
+        cell(&rows[0], "price"),
+        Some("12.34".to_string()),
+        "{rows:?}"
+    );
+}
+
+/// Every type without an Exasol counterpart comes back as PostgreSQL's text for
+/// the value, at the size its mapping declares.
+#[test]
+fn text_read_types_match_the_mirror() {
+    for (column, exasol_type) in [
+        ("uid", "VARCHAR(2000000) UTF8"),
+        ("doc_json", "VARCHAR(2000000) UTF8"),
+        ("doc_jsonb", "VARCHAR(2000000) UTF8"),
+        ("doc_xml", "VARCHAR(2000000) UTF8"),
+        ("raw", "VARCHAR(2000000) UTF8"),
+        ("span", "VARCHAR(2000000) UTF8"),
+        ("host", "VARCHAR(2000000) UTF8"),
+        ("varbits", "VARCHAR(16) UTF8"),
+        ("feeling", "VARCHAR(2000000) UTF8"),
+        ("clock", "VARCHAR(100) UTF8"),
+        ("clock_tz", "VARCHAR(100) UTF8"),
+    ] {
+        assert_declares(TYPE_COVERAGE, column, exasol_type);
+    }
+
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"uid\", \"doc_json\", \"doc_jsonb\", \"doc_xml\", \"raw\", \"span\", \
+             \"host\", \"varbits\", \"feeling\", \"clock\", \"clock_tz\" \
+             FROM {schema}.\"{table}\" WHERE \"id\" <= 2 ORDER BY \"id\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    for column in ["raw", "feeling", "span", "host", "varbits", "clock_tz"] {
+        assert!(
+            statement.contains(&format!("CAST(\"{column}\" AS TEXT)")),
+            "{column} must read as text: {statement}"
+        );
+    }
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(
+        cell(&rows[0], "raw"),
+        Some("\\xdeadbeef".to_string()),
+        "a bytea comes back in the hex form bytea_output selects by default: {rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[0], "feeling"),
+        Some("ok".to_string()),
+        "{rows:?}"
+    );
+}
+
+/// The text a column of `character(3000)` reads as, `CAST("wide_code" AS
+/// TEXT)`, carries no trailing blanks, so it compares with `'ab'` as Exasol's
+/// `VARCHAR` does.
+#[test]
+fn character_column_emits_padded_and_compares_like_the_source() {
+    assert_declares(TYPE_COVERAGE, "fixed_code", "CHAR(5) UTF8");
+    assert_declares(TYPE_COVERAGE, "wide_code", "VARCHAR(3000) UTF8");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"fixed_code\", \"wide_code\" FROM {schema}.\"{table}\" \
+             WHERE \"fixed_code\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    assert_eq!(
+        cell(&rows[0], "fixed_code"),
+        Some("ab   ".to_string()),
+        "a CHAR(5) value comes back padded to five characters: {rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[0], "wide_code"),
+        Some("ab".to_string()),
+        "a character wider than Exasol's CHAR comes back without its blanks: {rows:?}"
+    );
+
+    for (predicate, expected_ids) in [
+        ("\"fixed_code\" = 'ab'", &["1", "4"][..]),
+        ("\"wide_code\" = 'ab'", &["1", "4"][..]),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("= E'ab')"),
+            "`{predicate}` must reach PostgreSQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "{predicate}: {rows:?}"
+        );
+    }
+
+    let with_varchar = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"fixed_code\" = \"label\" \
+             ORDER BY \"id\""
+        )
+    };
+    let statement = generated_statement(&with_varchar(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("(\"fixed_code\" = \"label\")"),
+        "the comparison must reach PostgreSQL: {statement}"
+    );
+    let query_rows = |schema: &str| {
+        stack::shared()
+            .exasol
+            .query_rows(&with_varchar(schema, TYPE_COVERAGE))
+    };
+    assert_eq!(
+        column_values(&query_rows(VIRTUAL_SCHEMA), "id"),
+        strings(&["1", "4"]),
+        "PostgreSQL ignores the trailing blanks of a character value"
+    );
+    assert!(
+        query_rows(postgres_mirror::SCHEMA).is_empty(),
+        "Exasol's own comparison of CHAR(5) with VARCHAR finds them unequal"
+    );
+
+    let like = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"fixed_code\" LIKE 'ab' \
+             ORDER BY \"id\""
+        )
+    };
+    let like_statement = generated_statement(&like(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        like_statement.contains("LIKE E'ab'"),
+        "the LIKE must reach PostgreSQL: {like_statement}"
+    );
+    let like_rows = assert_matches_mirror(TYPE_COVERAGE, like);
+    assert!(
+        like_rows.is_empty(),
+        "measured on PostgreSQL 18.6, a `character(5)` value `ab` does not match `LIKE 'ab'`, \
+         where it equals `'ab'`: the padding is significant to LIKE but not to equality: \
+         {like_rows:?}"
+    );
+}
+
+/// `MIN` and `MAX` over a `character(5)` are declared `CHAR(5)` and return the
+/// padded values, and the grouping and the distinct count over it are
+/// Exasol's.
+#[test]
+fn min_and_max_over_char_are_declared_char_like_the_mirror() {
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT MIN(\"fixed_code\") AS LO, MAX(\"fixed_code\") AS HI, \
+             COUNT(DISTINCT \"fixed_code\") AS N FROM {schema}.\"{table}\""
+        )
+    };
+
+    let call = explain_calls(&aggregates(VIRTUAL_SCHEMA, TYPE_COVERAGE)).remove(0);
+    let specification = scan_specification(&call);
+    assert_eq!(
+        specification.columns[0].exasol_type,
+        ExasolType::Char { size: 5 },
+        "MIN over a CHAR(5) must be declared CHAR(5): {call}"
+    );
+    assert!(
+        specification.sql.contains("MIN(\"fixed_code\")")
+            && specification.sql.contains("MAX(\"fixed_code\")"),
+        "both aggregates must reach PostgreSQL: {}",
+        specification.sql
+    );
+
+    let rows = assert_matches_mirror(TYPE_COVERAGE, aggregates);
+    assert_eq!(cell(&rows[0], "LO"), Some("ab   ".to_string()), "{rows:?}");
+    assert_eq!(cell(&rows[0], "HI"), Some("abc  ".to_string()), "{rows:?}");
+    assert_eq!(cell(&rows[0], "N"), Some("2".to_string()), "{rows:?}");
+
+    let grouped = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"fixed_code\" AS CODE, COUNT(*) AS N FROM {schema}.\"{table}\" \
+             GROUP BY \"fixed_code\" ORDER BY \"fixed_code\""
+        )
+    };
+    let statement = generated_statement(&grouped(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("GROUP BY \"fixed_code\""),
+        "the grouping must reach PostgreSQL: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, grouped);
+    assert_eq!(
+        rows.len(),
+        3,
+        "ab, abc, and null are three groups: {rows:?}"
+    );
+}
+
+/// A join on a `character` key pairs rows as PostgreSQL pairs them: with a
+/// `character varying` key it ignores the blanks, which Exasol's own join does
+/// not, and with another `character` key it agrees with Exasol's.
+#[test]
+fn char_key_joins_pair_rows_as_postgresql_pairs_them() {
+    let join = |left: &'static str, right: &'static str| {
+        move |schema: &str, table: &str| {
+            format!(
+                "SELECT a.\"id\" AS A_ID, b.\"id\" AS B_ID FROM {schema}.\"{table}\" a \
+                 INNER JOIN {schema}.\"{table}\" b ON a.\"{left}\" = b.\"{right}\" \
+                 ORDER BY a.\"id\", b.\"id\""
+            )
+        }
+    };
+
+    let mixed = join("fixed_code", "label");
+    let statement = generated_statement(&mixed(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("INNER JOIN")
+            && statement.contains("(\"t1\".\"fixed_code\" = \"t2\".\"label\")"),
+        "the join must be delegated whole: {statement}"
+    );
+    let virtual_pairs = stack::shared()
+        .exasol
+        .query_rows(&mixed(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert_eq!(
+        virtual_pairs.len(),
+        6,
+        "rows 1 and 4 hold `ab` in both columns, and each pairs with rows 1, 2, and 4 of the \
+         `character varying` column: {virtual_pairs:?}"
+    );
+    assert!(
+        stack::shared()
+            .exasol
+            .query_rows(&mixed(postgres_mirror::SCHEMA, TYPE_COVERAGE))
+            .is_empty(),
+        "Exasol's own join of CHAR(5) with VARCHAR(5) pairs nothing"
+    );
+
+    let same = join("fixed_code", "fixed_code");
+    let pairs = assert_matches_mirror(TYPE_COVERAGE, same);
+    assert_eq!(
+        pairs.len(),
+        5,
+        "rows 1 and 4 pair with each other and themselves, and row 2 with itself: {pairs:?}"
+    );
+}
+
+/// A `timestamp with time zone` is a `TIMESTAMP` holding the UTC wall-clock
+/// value, and under a session `TimeZone` of UTC every delegated comparison,
+/// join, and aggregate over it answers as Exasol does over the emitted values.
+#[test]
+fn timestamptz_column_compares_groups_and_joins_like_the_mirror_under_a_utc_session() {
+    let zone = stack::shared().postgres.query_scalar("SHOW TimeZone");
+    assert!(
+        ["UTC", "Etc/UTC"].contains(&zone.as_str()),
+        "the PostgreSQL session must run in UTC for this test to compare with the mirror, but \
+         `SHOW TimeZone` reports {zone}"
+    );
+    assert_declares(TYPE_COVERAGE, "happened_at", "TIMESTAMP(6)");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", TO_CHAR(\"happened_at\", 'YYYY-MM-DD HH24:MI:SS.FF6') AS TEXT_AT \
+             FROM {schema}.\"{table}\" WHERE \"happened_at\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    assert_eq!(
+        cell(&rows[0], "TEXT_AT"),
+        Some("2024-01-01 12:00:00.123456".to_string()),
+        "each value is emitted as its UTC wall-clock time: {rows:?}"
+    );
+
+    for (predicate, expected_ids) in [
+        (
+            "\"happened_at\" = TIMESTAMP '2024-01-01 12:00:00.123456'",
+            &["1"][..],
+        ),
+        ("\"happened_at\" < DATE '2024-01-03'", &["1", "2"][..]),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("WHERE (\"happened_at\""),
+            "`{predicate}` must reach PostgreSQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "{predicate}: {rows:?}"
+        );
+    }
+
+    let join = |schema: &str, table: &str| {
+        format!(
+            "SELECT a.\"id\" AS A_ID, b.\"id\" AS B_ID FROM {schema}.\"{table}\" a \
+             INNER JOIN {schema}.\"{table}\" b ON a.\"happened_at\" = b.\"local_at\" \
+             ORDER BY a.\"id\", b.\"id\""
+        )
+    };
+    let join_statement = generated_statement(&join(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        join_statement.contains("INNER JOIN"),
+        "the join with a timestamp without time zone column must be delegated: {join_statement}"
+    );
+    let pairs = assert_matches_mirror(TYPE_COVERAGE, join);
+    assert_eq!(
+        pairs
+            .iter()
+            .map(|row| (cell(row, "A_ID"), cell(row, "B_ID")))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("1".to_string()), Some("1".to_string())),
+            (Some("4".to_string()), Some("4".to_string())),
+        ],
+        "only the rows whose local_at holds happened_at's UTC wall-clock value pair"
+    );
+
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT MIN(\"happened_at\") AS LO, MAX(\"happened_at\") AS HI, \
+             COUNT(DISTINCT \"happened_at\") AS N FROM {schema}.\"{table}\""
+        )
+    };
+    let statement = generated_statement(&aggregates(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("MIN(\"happened_at\")") && statement.contains("COUNT(DISTINCT"),
+        "the aggregates must reach PostgreSQL: {statement}"
+    );
+    assert_eq!(
+        cell(&assert_matches_mirror(TYPE_COVERAGE, aggregates)[0], "N"),
+        Some("4".to_string())
+    );
+
+    let grouped = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"happened_at\" AS HAPPENED, COUNT(*) AS N FROM {schema}.\"{table}\" \
+             GROUP BY \"happened_at\" ORDER BY \"happened_at\""
+        )
+    };
+    assert_eq!(assert_matches_mirror(TYPE_COVERAGE, grouped).len(), 5);
+}
+
+/// Grouping, aggregating, and joining on a converted column act on the text the
+/// scan emits, in every position, and a full outer join keeps both unmatched
+/// sides.
+#[test]
+fn converted_columns_group_join_and_aggregate_like_the_mirror() {
+    let grouped = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"uid\" AS UID, COUNT(*) AS N FROM {schema}.\"{table}\" GROUP BY \"uid\" \
+             ORDER BY \"uid\""
+        )
+    };
+    let statement = generated_statement(&grouped(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("GROUP BY CAST(\"uid\" AS TEXT)"),
+        "the grouping key must be the read expression: {statement}"
+    );
+    assert_eq!(
+        assert_matches_mirror(TYPE_COVERAGE, grouped).len(),
+        4,
+        "three uuids and the null group"
+    );
+
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT MIN(\"uid\") AS LO, MAX(\"uid\") AS HI, COUNT(DISTINCT \"uid\") AS N, \
+             COUNT(DISTINCT \"unbounded_amount\") AS AMOUNTS FROM {schema}.\"{table}\""
+        )
+    };
+    let statement = generated_statement(&aggregates(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("MIN(CAST(\"uid\" AS TEXT))")
+            && statement.contains("COUNT(DISTINCT CAST(\"unbounded_amount\" AS TEXT))"),
+        "the aggregate operands must be the read expressions: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, aggregates);
+    assert_eq!(cell(&rows[0], "N"), Some("3".to_string()), "{rows:?}");
+    assert_eq!(cell(&rows[0], "AMOUNTS"), Some("5".to_string()), "{rows:?}");
+
+    for (join_type, expected_rows) in [("INNER JOIN", 3), ("FULL OUTER JOIN", 7)] {
+        let join = |schema: &str, table: &str| {
+            format!(
+                "SELECT a.\"id\" AS A_ID, b.\"id\" AS B_ID FROM {schema}.\"{table}\" a \
+                 {join_type} {schema}.\"{table}\" b ON a.\"uid\" = b.\"uid\" \
+                 ORDER BY a.\"id\", b.\"id\""
+            )
+        };
+        let statement = generated_statement(&join(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains(join_type)
+                && statement
+                    .contains("CAST(\"t1\".\"uid\" AS TEXT) = CAST(\"t2\".\"uid\" AS TEXT)"),
+            "the {join_type} must be delegated over the read expressions: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, join);
+        assert_eq!(rows.len(), expected_rows, "{join_type}: {rows:?}");
+    }
+}
+
+/// A column under an operator-created nondeterministic collation maps like any
+/// other, and a delegated equality returns both values the collation equates,
+/// where Exasol compares them as two.
+#[test]
+fn nondeterministic_collation_column_maps_and_compares_as_postgresql_compares() {
+    assert_declares("collated_names", "name", "VARCHAR(20) UTF8");
+
+    let query = format!(
+        "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"collated_names\" WHERE \"name\" = 'Widget' \
+         ORDER BY \"id\""
+    );
+    let statement = generated_statement(&query);
+    assert!(
+        statement.contains("(\"name\" = E'Widget')") && !statement.contains("COLLATE"),
+        "the equality must reach PostgreSQL bare: {statement}"
+    );
+    let rows = stack::shared().exasol.query_rows(&query);
+    assert_eq!(
+        column_values(&rows, "id"),
+        strings(&["1", "2"]),
+        "the collation equates Widget and widget: {rows:?}"
+    );
+
+    let local = stack::shared().exasol.query_rows(
+        "SELECT \"id\" FROM (SELECT 1 AS \"id\", 'Widget' AS \"name\" FROM DUAL UNION ALL \
+         SELECT 2, 'widget' FROM DUAL) WHERE \"name\" = 'Widget' ORDER BY \"id\"",
+    );
+    assert_eq!(
+        column_values(&local, "id"),
+        strings(&["1"]),
+        "Exasol compares the same two values as two: {local:?}"
+    );
+}
+
+/// A text one character beyond Exasol's `VARCHAR` maximum fails the query
+/// rather than coming back truncated.
+#[test]
+fn text_value_beyond_the_varchar_maximum_fails_the_query() {
+    assert_declares("text_overflow", "body", "VARCHAR(2000000) UTF8");
+
+    let error = stack::shared().exasol.execute_expecting_failure(&format!(
+        "SELECT \"body\" FROM {VIRTUAL_SCHEMA}.\"text_overflow\""
+    ));
+    assert!(
+        error.contains("string data, right truncation: max length: 2000000, emitted: 2000001"),
+        "a value of 2000001 characters must fail the query naming the overflow: {error}"
+    );
+}
+
+/// What Exasol's compiler declares for a select-list entry, measured through
+/// the probe adapter that advertises the PostgreSQL dialect's predicates: a
+/// projection-only request carries `selectListDataTypes`, and every
+/// select-list predicate, whatever its form, is declared `BOOLEAN`.
+#[test]
+fn exasol_declares_the_measured_select_list_types() {
+    let stack = stack::shared();
+    probe::create(&stack.exasol);
+    let declared = |select_list: &str, suffix: &str| {
+        probe::measured_select_list_data_types(
+            &stack.exasol,
+            &format!(
+                "SELECT {select_list} FROM {}.\"t\"{suffix}",
+                probe::VIRTUAL_SCHEMA
+            ),
+        )
+    };
+
+    let projection = declared("\"d\"", "");
+    let predicates = [
+        ("\"d\" > 5", ""),
+        ("\"d\" IS NULL", ""),
+        ("\"d\" BETWEEN 1 AND 9", ""),
+        ("\"g\" LIKE 'a%'", ""),
+        ("\"d\" IN (1,2,3)", ""),
+        ("\"d\" > 1 AND \"d\" < 9", ""),
+        ("COUNT(*) > 0", " GROUP BY \"g\""),
+    ]
+    .map(|(predicate, suffix)| (predicate, declared(predicate, suffix)));
+    probe::drop_virtual_schema(&stack.exasol);
+
+    assert_eq!(
+        projection,
+        vec![serde_json::json!({"type": "DECIMAL", "precision": 12, "scale": 4})],
+        "a projection-only request must carry selectListDataTypes"
+    );
+    for (predicate, types) in predicates {
+        assert_eq!(
+            types,
+            vec![serde_json::json!({"type": "BOOLEAN"})],
+            "`{predicate}` must arrive declared BOOLEAN"
+        );
+    }
+}
+
 // --- helpers ----------------------------------------------------------------
 
 /// The bucket-relative path of one technology's installed driver library,
@@ -1364,15 +2430,15 @@ fn column_names(schema: &str, table: &str) -> Vec<String> {
 }
 
 /// Runs `query(schema, table)` against `virtual_table` of the virtual schema
-/// and against the mirror's `items`, and asserts the two answers are identical.
+/// and against the mirror's table of the same name, and asserts the two answers
+/// are identical.
 ///
 /// The two sides are independent computations — PostgreSQL evaluates one,
 /// Exasol the other — so their agreement is the differential proof this tier
 /// relies on: a semantic gap between the two engines shows up as a difference
-/// rather than having to be predicted case by case. The query closure receives
-/// the table name beside the schema, so the virtual side can read a table the
-/// mirror has no counterpart of its own for — the mirror holds `items`, and
-/// `items_c` is the same rows under a different source collation.
+/// rather than having to be predicted case by case. The mirror holds `items`,
+/// `items_c`, `item_notes`, and `type_coverage`, each under the name of its
+/// source table, so one query template serves both schemas.
 fn assert_matches_mirror(
     virtual_table: &str,
     query: impl Fn(&str, &str) -> String,
@@ -1383,7 +2449,7 @@ fn assert_matches_mirror(
         .query_rows(&query(VIRTUAL_SCHEMA, virtual_table));
     let mirror_rows = stack
         .exasol
-        .query_rows(&query(postgres_mirror::SCHEMA, ITEMS));
+        .query_rows(&query(postgres_mirror::SCHEMA, virtual_table));
     assert_eq!(
         virtual_rows, mirror_rows,
         "the delegated query must return exactly the rows the local Exasol mirror returns: \
@@ -1411,6 +2477,19 @@ fn generated_statement(query: &str) -> String {
         .into_iter()
         .next()
         .expect("exactly one statement")
+}
+
+/// Every `pushdown` response `EXPLAIN VIRTUAL` reports for `query`, as the
+/// `SELECT <scan script>(...) EMITS (...) FROM DUAL` text Exasol runs.
+fn explain_calls(query: &str) -> Vec<String> {
+    stack::shared()
+        .exasol
+        .query_rows(&format!(
+            "SELECT PUSHDOWN_SQL FROM (EXPLAIN VIRTUAL {query})"
+        ))
+        .iter()
+        .filter_map(|row| cell(row, "PUSHDOWN_SQL"))
+        .collect()
 }
 
 /// Every statement the adapter generated for `query`, read out of the scan
@@ -1442,12 +2521,17 @@ fn generated_statements(query: &str) -> Vec<String> {
 }
 
 /// The source statement embedded in one `pushdown` response.
+fn source_statement(call: &str) -> String {
+    scan_specification(call).sql
+}
+
+/// The scan specification embedded in one `pushdown` response.
 ///
 /// The response is `SELECT <scan script>('<spec>') EMITS (...) FROM DUAL`, with
 /// the specification's own single quotes doubled by Exasol literal quoting. The
 /// closing delimiter is found from the right, because the specification itself
 /// may end in a doubled quote.
-fn source_statement(call: &str) -> String {
+fn scan_specification(call: &str) -> scan_spec::ScanSpec {
     let prefix = format!("{SCAN_SCRIPT_NAME}('");
     let suffix = "') EMITS (";
     let start = call
@@ -1465,7 +2549,11 @@ fn source_statement(call: &str) -> String {
     let spec_json = call[start..end].replace("''", "'");
     scan_spec::parse(&spec_json)
         .unwrap_or_else(|error| panic!("parsing the embedded scan specification: {error}\n{call}"))
-        .sql
+}
+
+/// `values` as owned strings, for comparing against [`column_values`].
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }
 
 /// The values of `column` across `rows`, in the order the query returned them.
@@ -1487,4 +2575,136 @@ fn declared_columns(schema: &str, table: &str) -> Vec<(String, String)> {
         .iter()
         .filter_map(|row| Some((cell(row, "COLUMN_NAME")?, cell(row, "COLUMN_TYPE")?)))
         .collect()
+}
+
+/// Task 2.1 gate: the SDK carries an Arrow microsecond timestamp into an
+/// `EMITS` column declared `TIMESTAMP(6)` without cutting it to milliseconds.
+///
+/// Calls the scan UDF directly with a specification whose statement and
+/// columns this test replaced, so the measurement isolates the emit path from
+/// every mapping the adapter does.
+#[test]
+fn scan_emits_every_fractional_digit_of_a_declared_timestamp() {
+    let stack = stack::shared();
+    let call = stack
+        .exasol
+        .query_rows(&format!(
+            "SELECT PUSHDOWN_SQL FROM (EXPLAIN VIRTUAL SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"orders\")"
+        ))
+        .iter()
+        .find_map(|row| cell(row, "PUSHDOWN_SQL"))
+        .expect("EXPLAIN VIRTUAL reports one pushdown statement");
+    let mut specification = scan_specification(&call);
+    specification.sql = "SELECT CAST('2024-01-01 12:00:00.123456' AS timestamp(6)) AS ts6, \
+                         CAST('2024-01-01 12:00:01' AS timestamp(0)) AS ts0"
+        .to_owned();
+    specification.columns = vec![
+        scan_spec::ScanColumn {
+            name: "ts6".to_owned(),
+            exasol_type: ExasolType::Timestamp { precision: 6 },
+        },
+        scan_spec::ScanColumn {
+            name: "ts0".to_owned(),
+            exasol_type: ExasolType::Timestamp { precision: 0 },
+        },
+    ];
+    let literal = specification.to_json_string().replace('\'', "''");
+
+    let rows = stack.exasol.query_rows(&format!(
+        "SELECT TO_CHAR(TS6, 'YYYY-MM-DD HH24:MI:SS.FF6') AS TS6_TEXT, \
+         TO_CHAR(TS0, 'YYYY-MM-DD HH24:MI:SS') AS TS0_TEXT \
+         FROM (SELECT {SCAN_SCRIPT_NAME}('{literal}') EMITS (TS6 TIMESTAMP(6), TS0 TIMESTAMP(0)) \
+         FROM DUAL)"
+    ));
+
+    assert_eq!(rows.len(), 1, "one row was selected: {rows:?}");
+    assert_eq!(
+        cell(&rows[0], "TS6_TEXT"),
+        Some("2024-01-01 12:00:00.123456".to_owned()),
+        "a TIMESTAMP(6) emit must keep all six fractional digits: {rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[0], "TS0_TEXT"),
+        Some("2024-01-01 12:00:01".to_owned()),
+        "a TIMESTAMP(0) emit must keep the whole second: {rows:?}"
+    );
+}
+
+/// Task 2.2 gate: the request shapes `vs-adapter/pushdown-filter` and
+/// `vs-adapter/type-mapping` rely on, measured through the probe adapter that
+/// advertises the PostgreSQL dialect's filter and literal capabilities.
+///
+/// A `BOOLEAN` column alone arrives as a bare `column` entry, a comparison of
+/// a column with a predicate arrives delegated with the predicate as its right
+/// operand, and a `TIMESTAMP(6)` literal keeps all six fractional digits.
+#[test]
+fn exasol_sends_the_measured_boolean_and_timestamp_filter_shapes() {
+    let stack = stack::shared();
+    probe::create(&stack.exasol);
+    let request_of = |predicate: &str| {
+        probe::measured_pushdown_request(
+            &stack.exasol,
+            &format!(
+                "SELECT \"d\" FROM {}.\"t\" WHERE {predicate}",
+                probe::VIRTUAL_SCHEMA
+            ),
+        )
+    };
+    let filter_of = |predicate: &str| {
+        let request = request_of(predicate);
+        request
+            .pointer("/pushdownRequest/filter")
+            .unwrap_or_else(|| panic!("`WHERE {predicate}` was not delegated: {request}"))
+            .clone()
+    };
+
+    let bare_request = request_of("\"b\"");
+    let bare = bare_request
+        .pointer("/pushdownRequest/filter")
+        .unwrap_or_else(|| panic!("`WHERE b` was not delegated: {bare_request}"))
+        .clone();
+    let negated = filter_of("NOT \"b\"");
+    let compared = filter_of("\"b\" = (\"d\" > 5)");
+    let timestamp = filter_of("\"p\" = TIMESTAMP '2024-01-01 12:00:00.123456'");
+    probe::drop_virtual_schema(&stack.exasol);
+
+    let flag = serde_json::json!({"columnNr": 5, "name": "b", "tableName": "t", "type": "column"});
+    assert_eq!(bare, flag, "WHERE b must arrive as a bare column entry");
+    let declared_flag = bare_request
+        .pointer("/involvedTables/0/columns")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|columns| columns.iter().find(|column| column["name"] == "b"))
+        .unwrap_or_else(|| panic!("involvedTables must declare column b: {bare_request}"));
+    assert!(
+        declared_flag.get("adapterNotes").is_none(),
+        "a column declared without notes must arrive with no adapterNotes member: {declared_flag}"
+    );
+    assert_eq!(
+        negated,
+        serde_json::json!({"expression": flag, "type": "predicate_not"}),
+        "WHERE NOT b must arrive as predicate_not over the bare column entry"
+    );
+    assert_eq!(
+        compared,
+        serde_json::json!({
+            "type": "predicate_equal",
+            "left": flag,
+            "right": {
+                "type": "predicate_less",
+                "left": {"type": "literal_exactnumeric", "value": "5"},
+                "right": {"columnNr": 0, "name": "d", "tableName": "t", "type": "column"},
+            },
+        }),
+        "WHERE b = (d > 5) must arrive delegated, with the predicate as the right operand and \
+         its operands swapped"
+    );
+    assert_eq!(
+        timestamp,
+        serde_json::json!({
+            "type": "predicate_equal",
+            "left": {"columnNr": 6, "name": "p", "tableName": "t", "type": "column"},
+            "right": {"type": "literal_timestamp", "value": "2024-01-01 12:00:00.123456"},
+        }),
+        "a TIMESTAMP literal must carry all six fractional digits"
+    );
 }

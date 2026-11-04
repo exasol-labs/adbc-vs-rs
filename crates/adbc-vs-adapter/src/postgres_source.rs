@@ -104,6 +104,7 @@ struct ColumnRow {
     character_maximum_length: Option<i64>,
     numeric_precision: Option<i64>,
     numeric_scale: Option<i64>,
+    datetime_precision: Option<i64>,
     is_nullable: bool,
 }
 
@@ -139,6 +140,7 @@ fn postgres_column(row: ColumnRow) -> PostgresColumn {
             .and_then(|n| u32::try_from(n).ok()),
         numeric_precision: row.numeric_precision.and_then(|n| u32::try_from(n).ok()),
         numeric_scale: row.numeric_scale.and_then(|n| u32::try_from(n).ok()),
+        datetime_precision: row.datetime_precision.and_then(|n| u32::try_from(n).ok()),
         is_nullable: row.is_nullable,
     }
 }
@@ -168,6 +170,7 @@ fn columns_query() -> String {
          c.character_maximum_length::bigint AS character_maximum_length, \
          c.numeric_precision::bigint AS numeric_precision, \
          c.numeric_scale::bigint AS numeric_scale, \
+         c.datetime_precision::bigint AS datetime_precision, \
          c.is_nullable::text AS is_nullable \
          FROM information_schema.columns AS c \
          WHERE c.table_schema = '{EXPOSED_NAMESPACE}' \
@@ -242,6 +245,7 @@ fn query_columns(connection: &mut ManagedConnection) -> Result<Vec<ColumnRow>, M
         let character_maximum_length = batch_column(&batch, "character_maximum_length", &sql)?;
         let numeric_precision = batch_column(&batch, "numeric_precision", &sql)?;
         let numeric_scale = batch_column(&batch, "numeric_scale", &sql)?;
+        let datetime_precision = batch_column(&batch, "datetime_precision", &sql)?;
         let is_nullable = batch_column(&batch, "is_nullable", &sql)?;
 
         for row in 0..batch.num_rows() {
@@ -253,6 +257,7 @@ fn query_columns(connection: &mut ManagedConnection) -> Result<Vec<ColumnRow>, M
                 character_maximum_length: i64_cell(character_maximum_length, row)?,
                 numeric_precision: i64_cell(numeric_precision, row)?,
                 numeric_scale: i64_cell(numeric_scale, row)?,
+                datetime_precision: i64_cell(datetime_precision, row)?,
                 is_nullable: required_string_cell(is_nullable, row, "is_nullable")? == NULLABLE,
             });
         }

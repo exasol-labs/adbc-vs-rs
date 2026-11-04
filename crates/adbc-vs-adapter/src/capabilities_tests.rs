@@ -20,6 +20,19 @@ fn query_exercising(driver: Driver, capability: &str) -> (&'static str, Query) {
     }
 }
 
+/// A request that exercises `capability` over a `BOOLEAN` operand, and the
+/// fragment `driver`'s dialect must put in the statement for it, for a dialect
+/// that renders the capability differently for that one declared type.
+///
+/// Matched exhaustively like [`query_exercising`], so a dialect added later
+/// states whether it has such an arm.
+fn boolean_operand_exercising(driver: Driver, capability: &str) -> Option<(&'static str, Query)> {
+    match driver {
+        Driver::MySql | Driver::Trino => None,
+        Driver::Postgres => crate::postgres_dialect::tests::boolean_operand_exercising(capability),
+    }
+}
+
 /// The `getCapabilities` response for `driver`, read the way Exasol reads it.
 fn advertised_by(driver: Driver) -> Vec<String> {
     let response = capabilities_response(dialect_for(driver));
@@ -47,8 +60,12 @@ fn advertised_by(driver: Driver) -> Vec<String> {
 /// Run once per identity rather than for one named dialect: the invariant is
 /// what makes a per-dialect capability set safe at all, so every dialect owes
 /// it, and a dialect added later inherits the arm instead of needing its own.
+///
+/// A capability a dialect renders differently for a `BOOLEAN` operand has that
+/// operand exercised as its own arm.
 #[test]
 fn every_advertised_capability_renders_per_dialect() {
+    let mut boolean_arms = 0;
     for driver in Driver::ALL {
         let dialect = dialect_for(*driver);
         assert!(
@@ -58,23 +75,34 @@ fn every_advertised_capability_renders_per_dialect() {
         );
 
         for capability in dialect.capabilities() {
-            let (fragment, query) = query_exercising(*driver, capability);
+            let mut exercised = vec![query_exercising(*driver, capability)];
+            if let Some(boolean_arm) = boolean_operand_exercising(*driver, capability) {
+                boolean_arms += 1;
+                exercised.push(boolean_arm);
+            }
 
-            let sql = dialect.render(&query).unwrap_or_else(|error| {
-                panic!(
-                    "`{}` advertises `{capability}` but has no rendering path for it: {error}",
+            for (fragment, query) in exercised {
+                let sql = dialect.render(&query).unwrap_or_else(|error| {
+                    panic!(
+                        "`{}` advertises `{capability}` but has no rendering path for it: {error}",
+                        driver.as_str()
+                    )
+                });
+
+                assert!(
+                    sql.contains(fragment),
+                    "`{}` rendered `{capability}` as a statement carrying no `{fragment}`, so its \
+                     fragment reached a path that dropped it: {sql}",
                     driver.as_str()
-                )
-            });
-
-            assert!(
-                sql.contains(fragment),
-                "`{}` rendered `{capability}` as a statement carrying no `{fragment}`, so its \
-                 fragment reached a path that dropped it: {sql}",
-                driver.as_str()
-            );
+                );
+            }
         }
     }
+    assert!(
+        boolean_arms > 0,
+        "PostgreSQL renders `MIN` and `MAX` differently over a `BOOLEAN` operand, so the BOOLEAN \
+         arm must run at least once"
+    );
 }
 
 /// Every advertised capability's own fixture is re-rendered, rather than one

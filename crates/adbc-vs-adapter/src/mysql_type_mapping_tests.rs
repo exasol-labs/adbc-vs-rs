@@ -5,244 +5,391 @@ fn column(data_type: &str) -> MySqlColumn {
     MySqlColumn {
         data_type: data_type.to_string(),
         character_length: None,
-        character_set: None,
         numeric_precision: None,
         numeric_scale: None,
+        datetime_precision: None,
         is_unsigned: false,
         is_nullable: true,
     }
 }
 
-#[test]
-fn signed_integers_map_to_decimal() {
-    let int_column = column("INT");
-    let mapped = map_column(&int_column).expect("INT must map");
-    assert_eq!(
-        mapped.exasol_type,
-        MappedType::Decimal {
-            precision: 10,
-            scale: 0
-        }
-    );
+fn unsigned(data_type: &str) -> MySqlColumn {
+    MySqlColumn {
+        is_unsigned: true,
+        ..column(data_type)
+    }
+}
 
-    let bigint_column = column("BIGINT");
-    let mapped = map_column(&bigint_column).expect("BIGINT must map");
-    assert_eq!(
-        mapped.exasol_type,
-        MappedType::Decimal {
-            precision: 19,
-            scale: 0
-        }
-    );
+fn decimal_column(precision: u32, scale: u32) -> MySqlColumn {
+    MySqlColumn {
+        numeric_precision: Some(precision),
+        numeric_scale: Some(scale),
+        ..column("decimal")
+    }
+}
+
+fn character_column(data_type: &str, length: u32) -> MySqlColumn {
+    MySqlColumn {
+        character_length: Some(length),
+        ..column(data_type)
+    }
+}
+
+fn temporal_column(data_type: &str, precision: u32) -> MySqlColumn {
+    MySqlColumn {
+        datetime_precision: Some(precision),
+        ..column(data_type)
+    }
+}
+
+fn mapped(column: &MySqlColumn) -> ExasolType {
+    map_column(column)
+        .unwrap_or_else(|reason| panic!("`{}` must map: {reason}", column.data_type))
+        .exasol_type
+}
+
+fn unmapped(column: &MySqlColumn) -> String {
+    map_column(column).expect_err(&format!("`{}` must be unmapped", column.data_type))
+}
+
+fn decimal(precision: u32) -> ExasolType {
+    ExasolType::Decimal {
+        precision,
+        scale: 0,
+    }
+}
+
+/// One column of each MySQL type this mapping maps, for the rules every
+/// source's mapping obeys: every Exasol type the mapping produces appears at
+/// least once, and so does every conversion its read expressions apply.
+pub(crate) fn one_column_of_every_mapped_type() -> Vec<MySqlColumn> {
+    vec![
+        column("tinyint"),
+        column("smallint"),
+        column("mediumint"),
+        column("int"),
+        column("bigint"),
+        unsigned("bigint"),
+        decimal_column(12, 4),
+        decimal_column(40, 2),
+        column("float"),
+        column("double"),
+        column("bit"),
+        character_column("char", 10),
+        character_column("varchar", 10),
+        column("tinytext"),
+        column("text"),
+        column("mediumtext"),
+        column("longtext"),
+        character_column("enum", 5),
+        character_column("set", 4),
+        column("json"),
+        column("date"),
+        column("year"),
+        temporal_column("datetime", 6),
+        temporal_column("timestamp", 6),
+        temporal_column("time", 3),
+    ]
+}
+
+#[test]
+fn narrow_signed_integers_map_to_decimal_with_matching_digits() {
+    for (data_type, precision) in [
+        ("tinyint", 3),
+        ("smallint", 5),
+        ("mediumint", 7),
+        ("int", 10),
+        ("bigint", 19),
+    ] {
+        assert_eq!(
+            mapped(&column(data_type)),
+            decimal(precision),
+            "{data_type}"
+        );
+        assert_eq!(
+            mapped(&column(&data_type.to_ascii_uppercase())),
+            decimal(precision),
+            "{data_type} spelled in upper case"
+        );
+    }
+}
+
+#[test]
+fn unsigned_integers_map_to_decimal_with_unsigned_digits() {
+    for (data_type, precision) in [
+        ("tinyint", 3),
+        ("smallint", 5),
+        ("mediumint", 8),
+        ("int", 10),
+        ("bigint", 20),
+    ] {
+        assert_eq!(
+            mapped(&unsigned(data_type)),
+            decimal(precision),
+            "{data_type}"
+        );
+    }
 }
 
 #[test]
 fn decimal_preserves_precision_and_scale() {
-    let mut decimal_column = column("DECIMAL");
-    decimal_column.numeric_precision = Some(12);
-    decimal_column.numeric_scale = Some(4);
-
-    let mapped = map_column(&decimal_column).expect("DECIMAL(12,4) must map");
     assert_eq!(
-        mapped.exasol_type,
-        MappedType::Decimal {
+        mapped(&decimal_column(12, 4)),
+        ExasolType::Decimal {
             precision: 12,
             scale: 4
         }
     );
-}
-
-#[test]
-fn oversize_decimal_unmapped() {
-    let mut decimal_column = column("DECIMAL");
-    decimal_column.numeric_precision = Some(40);
-    decimal_column.numeric_scale = Some(2);
-
-    let reason = map_column(&decimal_column).expect_err("DECIMAL(40,2) must be unmapped");
-    assert!(
-        reason.contains("36"),
-        "reason must name Exasol's maximum DECIMAL precision of 36, got: {reason}"
-    );
-
-    let mut at_maximum = column("DECIMAL");
-    at_maximum.numeric_precision = Some(36);
-    at_maximum.numeric_scale = Some(2);
-    let mapped = map_column(&at_maximum).expect("Exasol's maximum precision itself must map");
     assert_eq!(
-        mapped.exasol_type,
-        MappedType::Decimal {
+        mapped(&decimal_column(36, 2)),
+        ExasolType::Decimal {
             precision: 36,
             scale: 2
         },
-        "the guard must reject only what exceeds the maximum, not the maximum itself"
+        "Exasol's maximum precision itself must map to DECIMAL"
     );
-}
-
-fn utf8mb4_column(data_type: &str) -> MySqlColumn {
-    let mut column = column(data_type);
-    column.character_set = Some("utf8mb4".to_string());
-    column
 }
 
 #[test]
-fn character_types_preserve_length() {
-    let mut varchar_column = utf8mb4_column("VARCHAR");
-    varchar_column.character_length = Some(100);
-    let mapped = map_column(&varchar_column).expect("VARCHAR(100) must map");
-    assert_eq!(mapped.exasol_type, MappedType::Varchar { size: 100 });
+fn decimal_beyond_precision_36_maps_to_varchar_read_as_text() {
+    let wide = decimal_column(40, 2);
 
-    let mut char_column = utf8mb4_column("CHAR");
-    char_column.character_length = Some(10);
-    let mapped = map_column(&char_column).expect("CHAR(10) must map");
+    let declared = mapped(&wide);
+
+    assert_eq!(declared, ExasolType::Varchar { size: 2_000_000 });
     assert_eq!(
-        mapped.exasol_type,
-        MappedType::Varchar { size: 10 },
-        "MySQL CHAR must map to Exasol VARCHAR, never Exasol CHAR, because Exasol blank-pads \
-         CHAR and MySQL returns a CHAR value with its trailing spaces stripped"
+        column_read_sql(Some("decimal"), declared, "`c`"),
+        "CAST(`c` AS CHAR)"
     );
+}
 
-    let mut zero_length_column = utf8mb4_column("VARCHAR");
-    zero_length_column.character_length = Some(0);
-    let mapped = map_column(&zero_length_column).expect("VARCHAR(0) must map to size 1");
-    assert_eq!(mapped.exasol_type, MappedType::Varchar { size: 1 });
+#[test]
+fn a_decimal_without_a_declared_precision_is_unmapped() {
+    let reason = unmapped(&column("decimal"));
+
+    assert!(
+        reason.contains("precision"),
+        "the reason must name the missing precision: {reason}"
+    );
+}
+
+#[test]
+fn character_types_preserve_the_declared_length() {
+    assert_eq!(
+        mapped(&character_column("varchar", 100)),
+        ExasolType::Varchar { size: 100 }
+    );
+    assert_eq!(
+        mapped(&character_column("char", 10)),
+        ExasolType::Char { size: 10 },
+        "MySQL CHAR maps to Exasol CHAR, as the JDBC Virtual Schema maps it"
+    );
+    assert_eq!(
+        mapped(&character_column("varchar", 0)),
+        ExasolType::Varchar { size: 1 },
+        "Exasol's minimum character-type size is 1"
+    );
+    assert_eq!(
+        mapped(&character_column("char", 0)),
+        ExasolType::Char { size: 1 },
+        "Exasol rejects CHAR(0), so a length-0 CHAR maps to size 1"
+    );
 }
 
 #[test]
 fn a_character_column_without_a_declared_length_is_unmapped() {
-    let varchar_column = utf8mb4_column("VARCHAR");
+    for data_type in ["varchar", "char", "enum", "set"] {
+        let reason = unmapped(&column(data_type));
 
-    let reason =
-        map_column(&varchar_column).expect_err("VARCHAR with no declared length must be unmapped");
-    assert!(
-        reason.contains("CHARACTER_MAXIMUM_LENGTH"),
-        "reason must name the missing CHARACTER_MAXIMUM_LENGTH, got: {reason}"
-    );
-}
-
-#[test]
-fn a_character_column_reporting_no_character_set_is_unmapped() {
-    let mut column = column("VARCHAR");
-    column.character_length = Some(50);
-    column.character_set = None;
-
-    let reason = map_column(&column)
-        .expect_err("a VARCHAR reporting no CHARACTER_SET_NAME must be unmapped");
-    assert!(
-        reason.contains("CHARACTER_SET_NAME"),
-        "reason must name the missing CHARACTER_SET_NAME field, got: {reason}"
-    );
-}
-
-#[test]
-fn non_utf8mb4_character_columns_unmapped() {
-    for mysql_type in ["VARCHAR", "CHAR"] {
-        let mut latin1_column = column(mysql_type);
-        latin1_column.character_length = Some(50);
-        latin1_column.character_set = Some("latin1".to_string());
-
-        let reason = map_column(&latin1_column).expect_err(&format!(
-            "{mysql_type} of character set latin1 must be unmapped"
-        ));
         assert!(
-            reason.contains("latin1"),
-            "reason must name the column's character set latin1, got: {reason}"
+            reason.contains("CHARACTER_MAXIMUM_LENGTH"),
+            "{data_type}: the reason must name the missing CHARACTER_MAXIMUM_LENGTH: {reason}"
         );
-        assert!(
-            reason.contains("utf8mb4"),
-            "reason must name utf8mb4 as the only character set this release maps, got: {reason}"
+    }
+}
+
+/// The catalog row carries no character set, so a `latin1` column and a
+/// `utf8mb4` one are the same input to the mapping and declare the same type.
+#[test]
+fn character_columns_map_whatever_their_character_set() {
+    assert_eq!(
+        mapped(&character_column("varchar", 50)),
+        ExasolType::Varchar { size: 50 }
+    );
+    assert_eq!(
+        mapped(&character_column("char", 50)),
+        ExasolType::Char { size: 50 }
+    );
+    assert_eq!(
+        mapped(&character_column("text", 65_535)),
+        ExasolType::Varchar { size: 65_535 }
+    );
+}
+
+#[test]
+fn text_types_map_to_varchar_bounded_by_their_storage_limit() {
+    for (data_type, catalog_length, size) in [
+        ("tinytext", 255, 255),
+        ("text", 65_535, 65_535),
+        ("mediumtext", 16_777_215, 2_000_000),
+        ("longtext", 4_294_967_295, 2_000_000),
+    ] {
+        assert_eq!(
+            mapped(&character_column(data_type, catalog_length)),
+            ExasolType::Varchar { size },
+            "{data_type}"
+        );
+        assert_eq!(
+            mapped(&column(data_type)),
+            ExasolType::Varchar { size },
+            "{data_type} with no catalog length"
         );
     }
 }
 
 #[test]
-fn temporal_and_double_map() {
+fn bit_of_every_width_maps_to_boolean() {
+    for width in [1, 8, 64] {
+        let bit = character_column("bit", width);
+        assert_eq!(mapped(&bit), ExasolType::Boolean, "BIT({width})");
+        assert_eq!(
+            column_read_sql(Some("bit"), ExasolType::Boolean, "`c`"),
+            "(`c` <> 0)"
+        );
+    }
+}
+
+#[test]
+fn enum_and_set_map_to_char_up_to_2000() {
     assert_eq!(
-        map_column(&column("DATE"))
-            .expect("DATE must map")
-            .exasol_type,
-        MappedType::Date
+        mapped(&character_column("enum", 5)),
+        ExasolType::Char { size: 5 }
     );
     assert_eq!(
-        map_column(&column("DATETIME"))
-            .expect("DATETIME must map")
-            .exasol_type,
-        MappedType::Timestamp
+        mapped(&character_column("set", 4)),
+        ExasolType::Char { size: 4 }
     );
     assert_eq!(
-        map_column(&column("DOUBLE"))
-            .expect("DOUBLE must map")
-            .exasol_type,
-        MappedType::Double
+        mapped(&character_column("set", 2000)),
+        ExasolType::Char { size: 2000 },
+        "2000 is Exasol's maximum CHAR size"
+    );
+    assert_eq!(
+        mapped(&character_column("set", 2001)),
+        ExasolType::Varchar { size: 2001 },
+        "above 2000 a SET maps to VARCHAR of the same length"
     );
 }
 
 #[test]
-fn unsigned_integers_unmapped() {
-    let mut unsigned_bigint = column("BIGINT");
-    unsigned_bigint.is_unsigned = true;
+fn json_maps_to_varchar_read_as_text() {
+    let declared = mapped(&column("json"));
 
-    let reason = map_column(&unsigned_bigint).expect_err("BIGINT UNSIGNED must be unmapped");
-    assert!(
-        reason.to_lowercase().contains("unsigned"),
-        "reason must identify the unsigned modifier as unsupported, got: {reason}"
+    assert_eq!(declared, ExasolType::Varchar { size: 2_000_000 });
+    assert_eq!(
+        column_read_sql(Some("json"), declared, "`c`"),
+        "CAST(`c` AS CHAR)"
     );
+}
+
+#[test]
+fn temporal_and_floating_point_types_map_to_their_exasol_counterparts() {
+    assert_eq!(mapped(&column("date")), ExasolType::Date);
+    assert_eq!(
+        mapped(&temporal_column("datetime", 0)),
+        ExasolType::Timestamp { precision: 0 }
+    );
+    assert_eq!(
+        mapped(&temporal_column("datetime", 6)),
+        ExasolType::Timestamp { precision: 6 }
+    );
+    assert_eq!(mapped(&column("double")), ExasolType::Double);
+    assert_eq!(mapped(&column("float")), ExasolType::Double);
+}
+
+#[test]
+fn a_datetime_without_a_reported_precision_declares_the_most_mysql_holds() {
+    assert_eq!(
+        mapped(&column("datetime")),
+        ExasolType::Timestamp { precision: 6 }
+    );
+}
+
+#[test]
+fn timestamp_maps_to_timestamp_of_its_precision() {
+    for precision in [0, 3, 6] {
+        let timestamp = temporal_column("timestamp", precision);
+
+        assert_eq!(mapped(&timestamp), ExasolType::Timestamp { precision });
+        assert_eq!(
+            column_read_sql(
+                Some("timestamp"),
+                ExasolType::Timestamp { precision },
+                "`c`"
+            ),
+            "`c`",
+            "a TIMESTAMP reads bare, in the session time zone"
+        );
+    }
+}
+
+#[test]
+fn time_maps_to_a_timestamp_of_its_precision_and_year_to_a_date() {
+    assert_eq!(
+        mapped(&temporal_column("time", 3)),
+        ExasolType::Timestamp { precision: 3 }
+    );
+    assert_eq!(mapped(&column("year")), ExasolType::Date);
+}
+
+#[test]
+fn column_read_sql_follows_the_source_type() {
+    let varchar = ExasolType::Varchar { size: 2_000_000 };
+    let timestamp = ExasolType::Timestamp { precision: 3 };
+
+    for (source_type, declared, expected) in [
+        ("time", timestamp, "TIMESTAMP(DATE '1970-01-01', `c`)"),
+        ("year", ExasolType::Date, "MAKEDATE(`c`, 1)"),
+        ("bit", ExasolType::Boolean, "(`c` <> 0)"),
+        ("json", varchar, "CAST(`c` AS CHAR)"),
+        ("decimal", varchar, "CAST(`c` AS CHAR)"),
+        ("TIME", timestamp, "TIMESTAMP(DATE '1970-01-01', `c`)"),
+        ("decimal", decimal(12), "`c`"),
+        ("varchar", ExasolType::Varchar { size: 10 }, "`c`"),
+        ("char", ExasolType::Char { size: 10 }, "`c`"),
+        ("enum", ExasolType::Char { size: 5 }, "`c`"),
+        ("text", varchar, "`c`"),
+        ("datetime", timestamp, "`c`"),
+        ("timestamp", timestamp, "`c`"),
+        ("float", ExasolType::Double, "`c`"),
+        ("bigint", decimal(20), "`c`"),
+    ] {
+        assert_eq!(
+            column_read_sql(Some(source_type), declared, "`c`"),
+            expected,
+            "for {source_type} declared {declared:?}"
+        );
+    }
+    assert_eq!(column_read_sql(None, varchar, "`c`"), "`c`");
 }
 
 #[test]
 fn non_core_types_unmapped() {
-    let unmapped_types = [
-        "JSON",
-        "TEXT",
+    for mysql_type in [
+        "BINARY",
+        "VARBINARY",
+        "TINYBLOB",
         "BLOB",
-        "ENUM",
-        "SET",
-        "TINYINT",
-        "SMALLINT",
-        "MEDIUMINT",
-        "FLOAT",
-        "TIME",
-        "YEAR",
-        "TIMESTAMP",
+        "MEDIUMBLOB",
+        "LONGBLOB",
         "GEOMETRY",
-    ];
+        "POINT",
+    ] {
+        let reason = unmapped(&column(mysql_type));
 
-    for mysql_type in unmapped_types {
-        let reason =
-            map_column(&column(mysql_type)).expect_err(&format!("{mysql_type} must be unmapped"));
         assert!(
             reason.contains(mysql_type),
             "reason for {mysql_type} must name the rejected type, got: {reason}"
-        );
-    }
-}
-
-#[test]
-fn every_mapped_type_widens_into_its_declarable_counterpart() {
-    let cases = [
-        (
-            MappedType::Decimal {
-                precision: 12,
-                scale: 4,
-            },
-            ExasolType::Decimal {
-                precision: 12,
-                scale: 4,
-            },
-        ),
-        (
-            MappedType::Varchar { size: 100 },
-            ExasolType::Varchar { size: 100 },
-        ),
-        (MappedType::Date, ExasolType::Date),
-        (MappedType::Timestamp, ExasolType::Timestamp),
-        (MappedType::Double, ExasolType::Double),
-    ];
-
-    for (mapped, expected) in cases {
-        assert_eq!(
-            ExasolType::from(mapped),
-            expected,
-            "{mapped:?} must widen into the declarable set unchanged"
         );
     }
 }

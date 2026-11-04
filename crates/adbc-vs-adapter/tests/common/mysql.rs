@@ -47,6 +47,81 @@ pub const CODE_POINT_ITEMS: &str = "items_bin";
 /// trailing space is significant, as it is in Exasol.
 const CODE_POINT_COLLATION: &str = "utf8mb4_0900_bin";
 
+/// The view over `items` exposing its `latin1` `region` converted to
+/// [`CODE_POINT_COLLATION`], which is the source-side remedy
+/// `vs-adapter/mysql-collation` names for a `latin1` column: the view's column
+/// compares by code point, as Exasol does.
+pub const CONVERTED_REGION_VIEW: &str = "items_region_bin";
+
+/// The tables holding one column per mapped type, a text value beyond Exasol's
+/// `VARCHAR` maximum, and the `YEAR` edge values.
+///
+/// `type_coverage` declares each column nullable and seeds three rows: the
+/// extreme values, a second set of values, and a row of nulls beside a `BIT(8)`
+/// of zero. Its columns, their Exasol types, and their values are mirrored by
+/// [`super::mirror`], which states them independently.
+///
+/// - Each integer width is signed and unsigned, at the extremes of its range.
+///   `flag_value` is a `TINYINT(1)` holding `5`, which is not a boolean.
+/// - `bit_flag`, `bits`, and `wide_bits` are `BIT(1)`, `BIT(8)`, and `BIT(64)`.
+///   `bits` holds two different non-zero values and zero, so a comparison
+///   that reads two different source values as one `true` is visible.
+/// - `fixed` is a `CHAR(10)` and `tiny_text` a `TINYTEXT`, both holding `ab` in
+///   the first row, so a comparison of a fixed-width value with a variable-width
+///   one has a pair that MySQL calls equal and Exasol does not.
+/// - `latin_*` are `latin1` columns holding `café`.
+/// - `elapsed` is a `TIME(3)` of `25:00:00`, past a day.
+/// - `local_at` equals `happened_at` in the first row and differs in the
+///   second, so an equi-join of the two selects exactly the first.
+/// - `year_edges.y` holds `0000`, which `MAKEDATE` reads as the year 2000.
+const TYPE_COVERAGE_SCRIPT: &str = "\
+    DROP TABLE IF EXISTS type_coverage; \
+    CREATE TABLE type_coverage (id INT NOT NULL, \
+        tiny_value TINYINT NULL, small_value SMALLINT NULL, medium_value MEDIUMINT NULL, \
+        int_value INT NULL, big_value BIGINT NULL, \
+        utiny_value TINYINT UNSIGNED NULL, usmall_value SMALLINT UNSIGNED NULL, \
+        umedium_value MEDIUMINT UNSIGNED NULL, uint_value INT UNSIGNED NULL, \
+        ubig_value BIGINT UNSIGNED NULL, flag_value TINYINT(1) NULL, \
+        approx FLOAT NULL, wide_amount DECIMAL(40,2) NULL, \
+        bit_flag BIT(1) NULL, bits BIT(8) NULL, wide_bits BIT(64) NULL, \
+        fixed CHAR(10) NULL, tiny_text TINYTEXT NULL, plain_text TEXT NULL, \
+        medium_text MEDIUMTEXT NULL, long_text LONGTEXT NULL, \
+        latin_varchar VARCHAR(20) CHARACTER SET latin1 NULL, \
+        latin_char CHAR(10) CHARACTER SET latin1 NULL, \
+        latin_text TEXT CHARACTER SET latin1 NULL, \
+        kind ENUM('ab','abcde') NULL, tags SET('x','yz') NULL, doc JSON NULL, \
+        elapsed TIME(3) NULL, y YEAR NULL, at_second DATETIME(0) NULL, \
+        at_micro DATETIME(6) NULL, happened_at TIMESTAMP(6) NULL, local_at DATETIME(6) NULL, \
+        PRIMARY KEY (id)); \
+    INSERT INTO type_coverage VALUES \
+        (1, 127, 32767, 8388607, 2147483647, 9223372036854775807, \
+         255, 65535, 16777215, 4294967295, 18446744073709551615, 5, \
+         0.1, 12345678901234567890123456789012345678.90, \
+         b'1', b'00000101', 0x8000000000000000, \
+         'ab', 'ab', 'plain', 'medium', 'long', 'café', 'café', 'café', \
+         'ab', 'x', '{\"a\": 1}', \
+         '16:59:59.123', 2024, '2024-01-01 12:00:00', '2024-01-01 12:00:00.123456', \
+         '2024-01-01 12:00:00.123456', '2024-01-01 12:00:00.123456'), \
+        (2, -128, -32768, -8388608, -2147483648, -9223372036854775808, \
+         0, 0, 0, 0, 0, 0, \
+         1.5, -0.05, \
+         b'0', b'00001001', 0x0000000000000001, \
+         'abcdefghij', 'a', 'b', 'c', 'd', 'tea', 'tea', 'tea', \
+         'abcde', 'yz', '{\"a\": 2}', \
+         '25:00:00', 2023, '2024-06-15 08:30:00', '2024-06-15 08:30:00.500000', \
+         '2024-06-15 08:30:00.500000', '2024-06-15 09:30:00.500000'), \
+        (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+         NULL, NULL, NULL, b'00000000', NULL, \
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+         NULL, NULL, NULL, \
+         NULL, NULL, NULL, NULL, NULL, NULL); \
+    DROP TABLE IF EXISTS text_overflow; \
+    CREATE TABLE text_overflow (id INT NOT NULL, body MEDIUMTEXT NOT NULL, PRIMARY KEY (id)); \
+    INSERT INTO text_overflow VALUES (1, REPEAT('a', 2000001)); \
+    DROP TABLE IF EXISTS year_edges; \
+    CREATE TABLE year_edges (id INT NOT NULL, y YEAR NOT NULL, PRIMARY KEY (id)); \
+    INSERT INTO year_edges VALUES (1, 2024), (2, 0);";
+
 /// The fixture tables the end-to-end tests read, beyond the `orders` table the
 /// Compose seed creates.
 ///
@@ -69,8 +144,7 @@ const CODE_POINT_COLLATION: &str = "utf8mb4_0900_bin";
 ///   delegated `GROUP BY` folds the set to 2 groups; under
 ///   [`CODE_POINT_COLLATION`] in [`CODE_POINT_ITEMS`] it keeps the 4 Exasol
 ///   keeps over the mirror.
-/// - `code`: a `CHAR(8)` column, so the CHAR-to-VARCHAR mapping (decision
-///   `[15]`) is exercised end to end.
+/// - `code`: a `CHAR(8)` column, which maps to Exasol `CHAR(8)`.
 /// - `batch`: a `VARCHAR`, not `CHAR`, column carrying the `'ab'`/`'ab '`/
 ///   `'ab!'` set. Measured on MySQL 8.4, `MIN` over it returns `'ab '` under
 ///   the `PAD SPACE` `utf8mb4_bin`, where Exasol and the `NO PAD`
@@ -81,12 +155,16 @@ const CODE_POINT_COLLATION: &str = "utf8mb4_0900_bin";
 /// - `rank_key`/`tie_break`: a sort key that repeats (`rank_key`) with a
 ///   second key (`tie_break`) that disambiguates it; seeded out of the order
 ///   `ORDER BY rank_key, tie_break` would return.
-/// - `region`: `latin1`, beside the table's other `utf8mb4` columns, for the
-///   non-utf8mb4-unmapping omission test. It carries no collation clause in
-///   either table, because MySQL rejects [`CODE_POINT_COLLATION`] for
-///   `latin1`, so it stays unmapped in [`CODE_POINT_ITEMS`] too.
-/// - [`CODE_POINT_ITEMS`]: the same rows as `items`, created in the same
-///   script, so it exists before the shared setup creates the virtual schema.
+/// - `region`: `latin1`, beside the table's other `utf8mb4` columns. It carries
+///   no collation clause in either table, because MySQL rejects
+///   [`CODE_POINT_COLLATION`] for `latin1`, so it compares under
+///   `latin1_swedish_ci` in [`CODE_POINT_ITEMS`] too. The view
+///   [`CONVERTED_REGION_VIEW`] converts it to `utf8mb4_0900_bin`.
+/// - [`CODE_POINT_ITEMS`]: the same rows as `items` and two more, created in the
+///   same script, so it exists before the shared setup creates the virtual
+///   schema.
+/// - `type_coverage`, `text_overflow`, and `year_edges`: one column per mapped
+///   type, a text value beyond Exasol's `VARCHAR` maximum, and a zero `YEAR`.
 /// - `item_notes`: the join partner, keyed by `item_id`. `items.id` 1 carries
 ///   no matching row (unmatched on the `items` side), and `item_id` 99
 ///   matches no `items` row (unmatched on the `item_notes` side).
@@ -100,29 +178,38 @@ fn fixture_script() -> String {
     DROP VIEW IF EXISTS order_names; \
     CREATE VIEW order_names AS SELECT id, name FROM orders; \
     DROP TABLE IF EXISTS mixed_types; \
-    CREATE TABLE mixed_types (id INT NOT NULL, label VARCHAR(20) NOT NULL, payload JSON NULL); \
-    INSERT INTO mixed_types VALUES (1, 'first', '{{\"a\": 1}}'); \
+    CREATE TABLE mixed_types (id INT NOT NULL, label VARCHAR(20) NOT NULL, photo BLOB NULL); \
+    INSERT INTO mixed_types VALUES (1, 'first', X'DEADBEEF'); \
     DROP TABLE IF EXISTS unmapped_only; \
-    CREATE TABLE unmapped_only (payload JSON NULL, notes TEXT NULL); \
+    CREATE TABLE unmapped_only (photo BLOB NULL, shape GEOMETRY NULL); \
     DROP TABLE IF EXISTS refresh_target; \
     CREATE TABLE refresh_target (id INT NOT NULL, name VARCHAR(30) NOT NULL); \
     INSERT INTO refresh_target VALUES (1, 'before'); \
+    {} \
     DROP TABLE IF EXISTS item_notes; \
     {} \
+    DROP VIEW IF EXISTS {CONVERTED_REGION_VIEW}; \
+    CREATE VIEW {CONVERTED_REGION_VIEW} AS \
+        SELECT id, CONVERT(region USING utf8mb4) COLLATE utf8mb4_0900_bin AS region FROM items; \
     {} \
     CREATE TABLE item_notes (item_id INT NOT NULL, note VARCHAR(50) NOT NULL, \
         PRIMARY KEY (item_id)); \
     INSERT INTO item_notes (item_id, note) VALUES {};",
-        items_table("items", None),
-        items_table(CODE_POINT_ITEMS, Some(CODE_POINT_COLLATION)),
+        TYPE_COVERAGE_SCRIPT,
+        items_table("items", None, &items::source_values()),
+        items_table(
+            CODE_POINT_ITEMS,
+            Some(CODE_POINT_COLLATION),
+            &items::code_point_source_values()
+        ),
         items::note_values()
     )
 }
 
-/// The statements that recreate `table` holding every `items` row, each
-/// `utf8mb4` character column declaring `collation`, or the server default
-/// when it is `None`.
-fn items_table(table: &str, collation: Option<&str>) -> String {
+/// The statements that recreate `table` holding `values`, each `utf8mb4`
+/// character column declaring `collation`, or the server default when it is
+/// `None`.
+fn items_table(table: &str, collation: Option<&str>, values: &str) -> String {
     let collate = collation
         .map(|collation| format!(" COLLATE {collation}"))
         .unwrap_or_default();
@@ -133,8 +220,7 @@ fn items_table(table: &str, collation: Option<&str>) -> String {
          quantity DECIMAL(9,0) NULL, rank_key INT NOT NULL, tie_break INT NOT NULL, \
          region VARCHAR(30) CHARACTER SET latin1 NOT NULL, PRIMARY KEY (id)); \
          INSERT INTO {table} (id, category, code, batch, quantity, rank_key, tie_break, region) \
-         VALUES {};",
-        items::source_values()
+         VALUES {values};"
     )
 }
 
@@ -372,8 +458,8 @@ mod tests {
         let script = fixture_script();
         assert!(
             script.contains("code CHAR(8) NOT NULL"),
-            "items.code must be declared CHAR so the CHAR-to-VARCHAR mapping is exercised end \
-             to end: {script}"
+            "items.code must be declared CHAR so the CHAR mapping is exercised end to end: \
+             {script}"
         );
     }
 
@@ -382,8 +468,8 @@ mod tests {
         let script = fixture_script();
         assert!(
             script.contains("CHARACTER SET latin1"),
-            "items.region must be declared latin1 so metadata discovery has a non-utf8mb4 \
-             column to omit: {script}"
+            "items.region must be declared latin1 so a non-utf8mb4 column is mapped end to \
+             end: {script}"
         );
     }
 

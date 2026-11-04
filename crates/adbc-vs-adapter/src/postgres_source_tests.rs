@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_mapping::MappedType;
+use crate::exa_type::ExasolType;
 
 /// One `information_schema.columns` row, with the fields a test does not care
 /// about set to what the first column of a table reports.
@@ -12,6 +12,7 @@ fn column_row(column: &str, data_type: &str) -> ColumnRow {
         character_maximum_length: None,
         numeric_precision: None,
         numeric_scale: None,
+        datetime_precision: None,
         is_nullable: true,
     }
 }
@@ -49,7 +50,7 @@ pub(crate) fn one_mapped_and_one_unmapped_column() -> Vec<DiscoveredTable> {
             },
             ColumnRow {
                 ordinal_position: 2,
-                ..column_row("payload", "jsonb")
+                ..column_row("payload", "ARRAY")
             },
         ],
     )
@@ -81,7 +82,7 @@ fn a_table_reports_its_mapped_and_its_omitted_columns_together() {
         column_row("id", "integer"),
         ColumnRow {
             ordinal_position: 2,
-            ..column_row("payload", "jsonb")
+            ..column_row("payload", "ARRAY")
         },
     ]);
 
@@ -89,7 +90,7 @@ fn a_table_reports_its_mapped_and_its_omitted_columns_together() {
     assert_eq!(table.columns[0].name, "id");
     assert_eq!(
         table.columns[0].mapped.exasol_type,
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 10,
             scale: 0
         }
@@ -98,7 +99,7 @@ fn a_table_reports_its_mapped_and_its_omitted_columns_together() {
     assert_eq!(table.omissions.len(), 1);
     assert_eq!(table.omissions[0].table, "orders");
     assert_eq!(table.omissions[0].column.as_deref(), Some("payload"));
-    assert_eq!(table.omissions[0].source_type.as_deref(), Some("jsonb"));
+    assert_eq!(table.omissions[0].source_type.as_deref(), Some("ARRAY"));
 }
 
 /// A table every column of which is unmapped is still reported, with no
@@ -106,7 +107,7 @@ fn a_table_reports_its_mapped_and_its_omitted_columns_together() {
 /// not this source's, and answering it here would decide it twice.
 #[test]
 fn a_table_with_no_mappable_column_is_reported_with_no_columns() {
-    let table = assembled(vec![column_row("payload", "jsonb")]);
+    let table = assembled(vec![column_row("payload", "ARRAY")]);
 
     assert!(table.columns.is_empty());
     assert_eq!(table.omissions.len(), 1);
@@ -180,6 +181,7 @@ fn the_columns_query_selects_every_field_the_mapping_reads() {
         "character_maximum_length",
         "numeric_precision",
         "numeric_scale",
+        "datetime_precision",
         "is_nullable",
     ] {
         assert!(
@@ -202,7 +204,7 @@ fn a_numeric_columns_precision_and_scale_reach_the_mapping() {
 
     assert_eq!(
         table.columns[0].mapped.exasol_type,
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 12,
             scale: 4
         }
@@ -220,7 +222,7 @@ fn a_character_columns_length_reaches_the_mapping() {
 
     assert_eq!(
         table.columns[0].mapped.exasol_type,
-        MappedType::Varchar { size: 100 }
+        ExasolType::Varchar { size: 100 }
     );
 }
 
@@ -258,15 +260,45 @@ fn a_utf8_database_is_accepted() {
 }
 
 /// A catalog value that cannot be a length, a precision, or a scale is read as
-/// absent rather than wrapped into a plausible one, so the column is omitted
-/// with a reason instead of declared at a size the source never reported.
+/// absent rather than wrapped into a plausible one, so the column maps as the
+/// unbounded type instead of being declared at a size the source never
+/// reported.
 #[test]
 fn a_length_or_precision_outside_u32_is_read_as_absent() {
+    let table = assembled(vec![
+        ColumnRow {
+            character_maximum_length: Some(-1),
+            ..column_row("name", "character varying")
+        },
+        ColumnRow {
+            ordinal_position: 2,
+            numeric_precision: Some(-1),
+            ..column_row("amount", "numeric")
+        },
+    ]);
+
+    for column in &table.columns {
+        assert_eq!(
+            column.mapped.exasol_type,
+            ExasolType::Varchar { size: 2_000_000 },
+            "for {}",
+            column.name
+        );
+    }
+}
+
+/// `vs-adapter/postgresql-type-mapping`: the catalog's fractional-second digits
+/// reach the mapping, so a `timestamp(6)` is declared `TIMESTAMP(6)` rather
+/// than at Exasol's default of 3.
+#[test]
+fn a_timestamps_precision_reaches_the_mapping() {
     let table = assembled(vec![ColumnRow {
-        character_maximum_length: Some(-1),
-        ..column_row("name", "character varying")
+        datetime_precision: Some(6),
+        ..column_row("created_at", "timestamp without time zone")
     }]);
 
-    assert!(table.columns.is_empty());
-    assert!(table.omissions[0].reason.contains("length"));
+    assert_eq!(
+        table.columns[0].mapped.exasol_type,
+        ExasolType::Timestamp { precision: 6 }
+    );
 }

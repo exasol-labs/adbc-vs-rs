@@ -100,6 +100,7 @@ use crate::pushdown_query::{
     InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
+use crate::trino_type_mapping;
 
 /// The constant an empty select list projects, one digit wide because
 /// `pushdown_query` declares that select-list item `DECIMAL(1,0)`.
@@ -348,6 +349,7 @@ impl<'a> Statement<'a> {
 
     fn render_predicate(&self, predicate: &Predicate) -> Result<String, RenderError> {
         match predicate {
+            Predicate::BooleanColumn(column) => self.render_column(column),
             Predicate::And(predicates) => self.render_junction(predicates, "AND"),
             Predicate::Or(predicates) => self.render_junction(predicates, "OR"),
             Predicate::Not(inner) => Ok(format!("(NOT {})", self.render_predicate(inner)?)),
@@ -502,11 +504,23 @@ impl<'a> Statement<'a> {
     /// Renders one column reference. Every reference goes through here — a
     /// projected one, a predicate operand, an aggregate's argument, a join
     /// condition operand, and a grouping column — so how a column is named
-    /// is one decision, made once.
+    /// and read is one decision, made once.
     ///
-    /// A join qualifies the reference by the alias of the table it resolves
-    /// to, and a single-table statement names the column alone.
+    /// The named column renders through its read expression, so every
+    /// position acts on the value the scan emits for it.
     fn render_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
+        let named = self.name_column(column)?;
+
+        Ok(trino_type_mapping::column_read_sql(
+            column.source_type.as_deref(),
+            column.declared_type,
+            &named,
+        ))
+    }
+
+    /// Names `column`: qualified by the alias of the table it resolves to in a
+    /// join, alone in a single-table statement.
+    fn name_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
         let Self::Joined(from) = self else {
             return Ok(quote_identifier(&column.name));
         };

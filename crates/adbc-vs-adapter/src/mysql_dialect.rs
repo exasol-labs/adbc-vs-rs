@@ -22,12 +22,21 @@
 //! code-point answers. Choosing the collation is the source's decision, not
 //! this dialect's.
 //!
-//! Grouping needs no coordination as a result. MySQL's `ONLY_FULL_GROUP_BY`
-//! mode, which `mysql:8.4` sets by default, rejects a select list whose
-//! occurrence of a grouped column differs from its `GROUP BY` key. Both
-//! occurrences are the bare column, rendered by the one function every
-//! column reference takes, so they cannot differ, and a select-list
-//! predicate reading the key is an expression over that same column.
+//! Every column reference renders through the read expression MySQL's type
+//! mapping names for its recorded source type, in every position, and
+//! grouping coordinates one thing as a result. MySQL's `ONLY_FULL_GROUP_BY`
+//! mode, which `mysql:8.4` sets by default, matches a select-list expression
+//! against a `GROUP BY` expression only whole and rejects any other
+//! expression over a grouped column with error 1055. A key that reads bare
+//! needs nothing: its select-list occurrence is the same bare column, and a
+//! select-list predicate reading it is an expression over that column, which
+//! MySQL accepts. A key read through a conversion is grouped by its read
+//! expression, and its select-list occurrence outside an aggregate renders as
+//! `ANY_VALUE(<read expression>)`, which has the grouping value within its
+//! group and which MySQL exempts from the check. Grouping by the bare column
+//! instead would group a read expression that does not preserve equality,
+//! such as a multi-bit `BIT` read as `BOOLEAN`, apart from the key the scan
+//! emits.
 //!
 //! Which aggregate functions this dialect renders is its own question,
 //! decided here rather than in the model: an aggregate the renderer does not
@@ -51,7 +60,7 @@
 
 use adbc_vs_scan::driver::Driver;
 
-use crate::mysql_type_mapping::SUPPORTED_CHARACTER_SET;
+use crate::mysql_type_mapping;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
     InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
@@ -103,7 +112,11 @@ const NUMERIC_LITERAL_CHARACTERS: &str = "0123456789+-.eE";
 /// so a quote or a backslash reaching it could end the literal early.
 const TEMPORAL_LITERAL_CHARACTERS: &str = "0123456789-:. ";
 
-/// The MySQL dialect: the only [`SqlDialect`] this release implements.
+/// The character set a string literal's hex introducer names: the literal
+/// carries UTF-8 bytes whatever the column's character set.
+const LITERAL_CHARACTER_SET: &str = "utf8mb4";
+
+/// The MySQL dialect.
 pub struct MySqlDialect;
 
 impl SqlDialect for MySqlDialect {
@@ -117,16 +130,27 @@ impl SqlDialect for MySqlDialect {
     }
 
     fn render(&self, query: &Query) -> Result<String, RenderError> {
-        let statement = Statement::of(&query.from);
-        let projection = statement.render_projection(&query.select_list)?;
-        let from = statement.render_from()?;
+        let tables = Tables::of(&query.from);
+        let per_row = Statement {
+            tables: &tables,
+            any_value_keys: &[],
+        };
+        let grouping_keys = per_row.render_grouping_keys(query.aggregation.as_ref())?;
+        let select_list = Statement {
+            any_value_keys: &grouping_keys,
+            ..per_row
+        };
+
+        let projection = select_list.render_projection(&query.select_list)?;
+        let from = per_row.render_from()?;
         let filter = match &query.filter {
-            Some(predicate) => format!(" WHERE {}", statement.render_predicate(predicate)?),
+            Some(predicate) => format!(" WHERE {}", per_row.render_predicate(predicate)?),
             None => String::new(),
         };
-        let grouping = match &query.aggregation {
-            Some(aggregation) => statement.render_grouping(aggregation)?,
-            None => String::new(),
+        let grouping = if grouping_keys.is_empty() {
+            String::new()
+        } else {
+            format!(" GROUP BY {}", grouping_keys.join(", "))
         };
 
         Ok(format!("SELECT {projection} FROM {from}{filter}{grouping}"))
@@ -217,7 +241,7 @@ impl<'a> AliasedFrom<'a> {
 /// condition operand, and a grouping key alike. Settling it once, here, is
 /// what leaves a grouping key and its select-list occurrence unable to
 /// disagree about their qualifier, which MySQL would reject with error 1055.
-enum Statement<'a> {
+enum Tables<'a> {
     /// One table, named by nothing: a single table's column reference cannot
     /// be ambiguous, so the statement carries no alias and no qualifier even
     /// when the request assigned the table an alias of its own.
@@ -226,20 +250,47 @@ enum Statement<'a> {
     Joined(AliasedFrom<'a>),
 }
 
-impl<'a> Statement<'a> {
+impl<'a> Tables<'a> {
     fn of(from: &'a FromClause) -> Self {
         match from {
             FromClause::Table(table) => Self::OneTable(table),
             FromClause::Join(_) => Self::Joined(AliasedFrom::of(from)),
         }
     }
+}
+
+/// One position of the statement being rendered: how it names its tables, and
+/// which grouping keys read through `ANY_VALUE` there.
+///
+/// The keys are the second decision a MySQL statement settles before its
+/// select list renders. `ONLY_FULL_GROUP_BY` matches a select-list expression
+/// against a `GROUP BY` expression only whole, so outside an aggregate in the
+/// select list a key grouped by a read expression other than the bare column
+/// reads as `ANY_VALUE(<read expression>)`, which has the grouping value
+/// within its group. Every other position carries no key: a `WHERE` or `ON`
+/// operand and an aggregate's argument are read per row.
+#[derive(Clone, Copy)]
+struct Statement<'s> {
+    tables: &'s Tables<'s>,
+    any_value_keys: &'s [String],
+}
+
+impl Statement<'_> {
+    /// This statement in a position read per row, where no key reads through
+    /// `ANY_VALUE`.
+    fn per_row(self) -> Self {
+        Self {
+            any_value_keys: &[],
+            ..self
+        }
+    }
 
     /// Renders the `FROM` clause: one qualified table name, or the whole join
     /// tree with every table aliased.
     fn render_from(&self) -> Result<String, RenderError> {
-        match self {
-            Self::OneTable(table) => Ok(qualified_table(table)),
-            Self::Joined(from) => self.render_join_tree(from),
+        match self.tables {
+            Tables::OneTable(table) => Ok(qualified_table(table)),
+            Tables::Joined(from) => self.render_join_tree(from),
         }
     }
 
@@ -274,9 +325,10 @@ impl<'a> Statement<'a> {
         }
     }
 
-    /// Renders the select list. Every entry renders exactly as it does in
-    /// any other position, including a grouped column and a predicate
-    /// reading one.
+    /// Renders the select list. Every entry renders through the renderer
+    /// every other position takes, and a grouping key this position carries
+    /// reads through `ANY_VALUE` outside an aggregate, alone or inside a
+    /// predicate.
     fn render_projection(&self, select_list: &[SelectItem]) -> Result<String, RenderError> {
         if select_list.is_empty() {
             return Err(RenderError::new(
@@ -292,8 +344,8 @@ impl<'a> Statement<'a> {
             .join(", "))
     }
 
-    /// Renders the `GROUP BY` clause an aggregation needs, which is nothing
-    /// for a single-group one.
+    /// Renders the `GROUP BY` keys an aggregation names, each as its read
+    /// expression, and none for a single-group aggregation or none at all.
     ///
     /// The two aggregation kinds differ only in this clause: MySQL aggregates
     /// a whole result into one row for a select list of aggregates carrying
@@ -305,10 +357,14 @@ impl<'a> Statement<'a> {
     /// occurrences independently, `tableName` on one and `tableAlias` on the
     /// other, but both resolve to the same table and so render identically,
     /// which MySQL's `ONLY_FULL_GROUP_BY` requires: it rejects the statement
-    /// with error 1055 when they differ.
-    fn render_grouping(&self, aggregation: &Aggregation) -> Result<String, RenderError> {
-        let Aggregation::GroupBy(columns) = aggregation else {
-            return Ok(String::new());
+    /// with error 1055 when they differ. That identity is also how the select
+    /// list recognizes a key it reads through `ANY_VALUE`.
+    fn render_grouping_keys(
+        &self,
+        aggregation: Option<&Aggregation>,
+    ) -> Result<Vec<String>, RenderError> {
+        let Some(Aggregation::GroupBy(columns)) = aggregation else {
+            return Ok(Vec::new());
         };
         if columns.is_empty() {
             return Err(RenderError::new(
@@ -318,17 +374,16 @@ impl<'a> Statement<'a> {
             ));
         }
 
-        let grouping = columns
+        let per_row = self.per_row();
+        columns
             .iter()
-            .map(|column| self.render_column(column))
-            .collect::<Result<Vec<_>, _>>()?
-            .join(", ");
-
-        Ok(format!(" GROUP BY {grouping}"))
+            .map(|column| per_row.render_column(column))
+            .collect()
     }
 
     fn render_predicate(&self, predicate: &Predicate) -> Result<String, RenderError> {
         match predicate {
+            Predicate::BooleanColumn(column) => self.render_column(column),
             Predicate::And(predicates) => self.render_junction(predicates, "AND"),
             Predicate::Or(predicates) => self.render_junction(predicates, "OR"),
             Predicate::Not(inner) => Ok(format!("(NOT {})", self.render_predicate(inner)?)),
@@ -448,7 +503,7 @@ impl<'a> Statement<'a> {
         };
 
         let distinct = if call.distinct { "DISTINCT " } else { "" };
-        let operand = self.render_expression(argument)?;
+        let operand = self.per_row().render_expression(argument)?;
 
         Ok(format!("{function}({distinct}{operand})"))
     }
@@ -466,12 +521,31 @@ impl<'a> Statement<'a> {
     /// Renders one column reference. Every reference goes through here — a
     /// projected one, a predicate operand, an aggregate's argument, a join
     /// condition operand, and a grouping column — so how a column is named
-    /// is one decision, made once.
+    /// and read is one decision, made once.
     ///
-    /// A join qualifies the reference by the alias of the table it resolves
-    /// to, and a single-table statement names the column alone.
+    /// The named column renders through its read expression, so every
+    /// position acts on the value the scan emits for it. A read expression
+    /// other than the bare column that is one of this position's grouping
+    /// keys reads through `ANY_VALUE`; one that is no key stays unwrapped, so
+    /// MySQL refuses it rather than return an arbitrary value of the group.
     fn render_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
-        let Self::Joined(from) = self else {
+        let named = self.name_column(column)?;
+        let read = mysql_type_mapping::column_read_sql(
+            column.source_type.as_deref(),
+            column.declared_type,
+            &named,
+        );
+
+        if read != named && self.any_value_keys.contains(&read) {
+            return Ok(format!("ANY_VALUE({read})"));
+        }
+        Ok(read)
+    }
+
+    /// Names `column`: qualified by the alias of the table it resolves to in a
+    /// join, alone in a single-table statement.
+    fn name_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
+        let Tables::Joined(from) = self.tables else {
             return Ok(quote_identifier(&column.name));
         };
         let alias = resolve_alias(from, column)?;
@@ -638,7 +712,7 @@ fn render_string_literal(value: &str) -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect();
 
-    format!("_{SUPPORTED_CHARACTER_SET} X'{hex}'")
+    format!("_{LITERAL_CHARACTER_SET} X'{hex}'")
 }
 
 fn render_numeric_literal(value: &str) -> Result<String, RenderError> {

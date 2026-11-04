@@ -5,7 +5,8 @@
 
 ## Specs
 
-- `specs/` holds product behavior only. E2E, integration testing, toolchain, build, CI, and licensing never get a spec. Their rules live in this file.
+- `specs/` holds product behavior only, plus the Exasol type reference `specs/exasol-types.md`. E2E, integration testing, toolchain, build, CI, and licensing never get a spec. Their rules live in this file.
+- A type mapping cites `specs/exasol-types.md` for Exasol's type limits, aliases, defaults, and comparison rules. The file holds no scenarios, and `speq` does not read it as a feature.
 - Feature specs never pin dependency, toolchain, or image versions. Those live in `Cargo.toml`, `rust-toolchain.toml`, and CI.
 - A feature is a framework feature (protocol vocabulary, e.g. `pushdown-filter`) or a technology feature (`<technology>-<concern>`, e.g. `mysql-pushdown`). Both sit flat in a domain, never nested: `speq` drops nested features silently.
 - `vs-adapter` exceeds the speq >8-features-per-domain guideline on purpose. Do not re-consolidate features to fix it.

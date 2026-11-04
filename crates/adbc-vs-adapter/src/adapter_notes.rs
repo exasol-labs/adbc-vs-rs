@@ -131,6 +131,33 @@ pub struct Omission {
     pub reason: String,
 }
 
+/// The state one mapped column records in its own `adapterNotes`, which Exasol
+/// echoes in `involvedTables[].columns[].adapterNotes` on every `pushdown`.
+///
+/// It holds the source type as the catalog spelled it, because the source
+/// type rather than the declared Exasol type selects the read expression a
+/// dialect renders: two source types sharing one declared type, such as
+/// PostgreSQL `uuid` and `text`, can need different conversions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnNotes {
+    #[serde(rename = "sourceType")]
+    pub source_type: String,
+}
+
+impl ColumnNotes {
+    /// Renders these notes as the stringified JSON object a column's
+    /// `adapterNotes` carries.
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).expect("ColumnNotes always serializes to JSON")
+    }
+
+    /// Parses a column's `adapterNotes` back into [`ColumnNotes`].
+    pub fn parse(text: &str) -> Result<Self, String> {
+        serde_json::from_str(text)
+            .map_err(|error| format!("parsing column adapter notes JSON: {error}"))
+    }
+}
+
 /// The state `pushdown`, `refresh`, and `setProperties` need back, recorded
 /// by `createVirtualSchema` into `schemaMetadata.adapterNotes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

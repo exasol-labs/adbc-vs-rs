@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
-    Decimal256Array, Decimal64Array, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, NullArray, RecordBatch, StringArray, StringViewArray,
+    Decimal256Array, Decimal64Array, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, LargeStringArray, NullArray, RecordBatch, StringArray, StringViewArray,
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray,
+    TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{i256, DataType, Field, Schema, TimeUnit};
 
@@ -721,4 +721,157 @@ fn a_scale_zero_decimal_beyond_eighteen_digits_emits_as_a_decimal() {
         &DataType::Decimal128(19, 0),
         "a DECIMAL(19,0) exceeds a 64-bit integer, so Exasol declares it as a numeric column"
     );
+}
+
+fn decimal_of(precision: u32) -> DeclaredType {
+    DeclaredType::Decimal {
+        precision,
+        scale: 0,
+    }
+}
+
+#[test]
+fn narrow_and_unsigned_integers_coerce_into_their_declared_decimal() {
+    let declared_decimal_3 = decimal_of(3);
+    let declared_decimal_5 = decimal_of(5);
+    let declared_decimal_7 = decimal_of(7);
+    let declared_decimal_8 = decimal_of(8);
+    let declared_decimal_10 = decimal_of(10);
+    let declared_decimal_19 = decimal_of(19);
+    let declared_decimal_20 = decimal_of(20);
+    let cases: Vec<(ArrayRef, DeclaredType, i128)> = vec![
+        (
+            Arc::new(Int8Array::from(vec![-128])),
+            declared_decimal_3,
+            -128,
+        ),
+        (
+            Arc::new(Int8Array::from(vec![127])),
+            declared_decimal_3,
+            127,
+        ),
+        (
+            Arc::new(UInt8Array::from(vec![255])),
+            declared_decimal_3,
+            255,
+        ),
+        (
+            Arc::new(Int16Array::from(vec![-32_768])),
+            declared_decimal_5,
+            -32_768,
+        ),
+        (
+            Arc::new(Int16Array::from(vec![32_767])),
+            declared_decimal_5,
+            32_767,
+        ),
+        (
+            Arc::new(UInt16Array::from(vec![65_535])),
+            declared_decimal_5,
+            65_535,
+        ),
+        (
+            Arc::new(Int32Array::from(vec![-8_388_608])),
+            declared_decimal_7,
+            -8_388_608,
+        ),
+        (
+            Arc::new(Int32Array::from(vec![8_388_607])),
+            declared_decimal_7,
+            8_388_607,
+        ),
+        (
+            Arc::new(UInt32Array::from(vec![16_777_215])),
+            declared_decimal_8,
+            16_777_215,
+        ),
+        (
+            Arc::new(Int32Array::from(vec![i32::MIN])),
+            declared_decimal_10,
+            i128::from(i32::MIN),
+        ),
+        (
+            Arc::new(Int32Array::from(vec![i32::MAX])),
+            declared_decimal_10,
+            i128::from(i32::MAX),
+        ),
+        (
+            Arc::new(UInt32Array::from(vec![u32::MAX])),
+            declared_decimal_10,
+            i128::from(u32::MAX),
+        ),
+        (
+            Arc::new(Int64Array::from(vec![i64::MIN])),
+            declared_decimal_19,
+            i128::from(i64::MIN),
+        ),
+        (
+            Arc::new(Int64Array::from(vec![i64::MAX])),
+            declared_decimal_19,
+            i128::from(i64::MAX),
+        ),
+        (
+            Arc::new(UInt64Array::from(vec![u64::MAX])),
+            declared_decimal_20,
+            i128::from(u64::MAX),
+        ),
+    ];
+
+    for (source, declared_type, expected) in cases {
+        let origin = source.data_type().clone();
+        let coerced = expect_coerced(source, declared_type);
+
+        let actual = match coerced.data_type() {
+            DataType::Int32 => i128::from(
+                coerced
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("an Int32 column downcasts to Int32Array")
+                    .value(0),
+            ),
+            DataType::Int64 => i128::from(
+                coerced
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .expect("an Int64 column downcasts to Int64Array")
+                    .value(0),
+            ),
+            DataType::Decimal128(_, 0) => coerced
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .expect("a Decimal128 column downcasts to Decimal128Array")
+                .value(0),
+            other => {
+                panic!("{origin:?} coerced to {other:?}, not a representation of {declared_type}")
+            }
+        };
+        assert_eq!(
+            actual, expected,
+            "{origin:?} lost digits coercing into {declared_type}"
+        );
+    }
+}
+
+#[test]
+fn time_zone_aware_timestamp_coerces_to_its_utc_wall_clock_value() {
+    const UTC_WALL_CLOCK_MICROS: i64 = 1_729_989_000_123_456;
+    let expected: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![UTC_WALL_CLOCK_MICROS]));
+
+    for zone in ["UTC", "+00:00", "Europe/Berlin"] {
+        let source: ArrayRef = Arc::new(
+            TimestampMicrosecondArray::from(vec![UTC_WALL_CLOCK_MICROS]).with_timezone(zone),
+        );
+
+        let coerced = expect_coerced(source, DeclaredType::Timestamp);
+
+        assert_eq!(
+            coerced.data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None),
+            "zone {zone} did not coerce to the declared TIMESTAMP representation"
+        );
+        assert_eq!(
+            &coerced, &expected,
+            "zone {zone} shifted the value away from the UTC wall-clock value"
+        );
+    }
 }

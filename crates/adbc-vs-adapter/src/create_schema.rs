@@ -24,7 +24,7 @@ use exasol_udf_sdk::connect_back::ConnectionObject;
 use exasol_udf_sdk::context::UdfContext;
 use serde_json::Value;
 
-use crate::adapter_notes::{AdapterNotes, Omission, SourceQualifier};
+use crate::adapter_notes::{AdapterNotes, ColumnNotes, Omission, SourceQualifier};
 use crate::exa_type;
 use crate::metadata::{self, DiscoveredTable, MetadataError, MetadataSource};
 use crate::provisioning::{
@@ -779,7 +779,7 @@ fn exposed_tables(tables: Vec<DiscoveredTable>) -> (Vec<Value>, Vec<Omission>) {
         let columns: Vec<Value> = table
             .columns
             .iter()
-            .map(|column| column_json(&column.name, column.mapped))
+            .map(|column| column_json(&column.name, &column.mapped))
             .collect();
         table_values.push(serde_json::json!({"name": table.name, "columns": columns}));
     }
@@ -787,11 +787,15 @@ fn exposed_tables(tables: Vec<DiscoveredTable>) -> (Vec<Value>, Vec<Omission>) {
     (table_values, omitted)
 }
 
-fn column_json(name: &str, mapped: MappedColumn) -> Value {
+fn column_json(name: &str, mapped: &MappedColumn) -> Value {
+    let notes = ColumnNotes {
+        source_type: mapped.source_type.clone(),
+    };
     serde_json::json!({
         "name": name,
-        "dataType": exa_type::to_json(mapped.exasol_type.into()),
+        "dataType": exa_type::to_json(mapped.exasol_type),
         "isNullable": mapped.is_nullable,
+        "adapterNotes": notes.to_json_string(),
     })
 }
 

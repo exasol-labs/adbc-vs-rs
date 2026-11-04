@@ -1593,3 +1593,294 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
         ),
     }
 }
+
+/// PostgreSQL source types whose read expression converts: a `uuid` reads as
+/// text and a `bit` as whether any bit is set.
+const CONVERTED_NOTES: fixtures::ConvertedNotes = fixtures::ConvertedNotes {
+    uid: "uuid",
+    flag: "bit",
+};
+
+/// `vs-adapter/pushdown-dialect`, scenario "A column reference renders through
+/// its read expression in every position": a converted column reads through
+/// one read expression in the select list, a `WHERE` comparison, a `GROUP BY`
+/// key, a `MIN` and a `COUNT(DISTINCT)` operand, and an equi-join condition,
+/// and a column without notes reads bare.
+#[test]
+fn column_reference_renders_identically_in_every_position() {
+    let filtered = render_statement(&fixtures::converted_column_filtered_request(
+        CONVERTED_NOTES,
+    ));
+    assert_eq!(
+        filtered,
+        r#"SELECT CAST("uid" AS TEXT) FROM "public"."orders" WHERE (CAST("uid" AS TEXT) = E'a')"#
+    );
+
+    let grouped = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            column("uid"),
+            fixtures::aggregate_over("MIN", "uid", false),
+            fixtures::aggregate_over("COUNT", "uid", true),
+        ]),
+        json!([
+            {"type": "VARCHAR", "size": 36},
+            {"type": "VARCHAR", "size": 36},
+            {"type": "DECIMAL", "precision": 18, "scale": 0},
+        ]),
+        "uid",
+    ));
+    assert_eq!(
+        grouped,
+        r#"SELECT CAST("uid" AS TEXT), MIN(CAST("uid" AS TEXT)), COUNT(DISTINCT CAST("uid" AS TEXT)) FROM "public"."orders" GROUP BY CAST("uid" AS TEXT)"#
+    );
+
+    let joined = render_statement(&fixtures::converted_column_joined_request(CONVERTED_NOTES));
+    assert_eq!(
+        joined,
+        r#"SELECT "t1"."id" FROM ("public"."orders" AS "t1" INNER JOIN "public"."customers" AS "t2" ON (CAST("t1"."uid" AS TEXT) = CAST("t2"."uid" AS TEXT)))"#
+    );
+}
+
+/// `vs-adapter/pushdown-filter`, scenario "BOOLEAN column is a predicate on its
+/// own": the predicate is the column's read expression, with no comparison
+/// added, alone and under `NOT`, `AND`, and `OR`.
+#[test]
+fn boolean_column_predicate_renders_through_its_read_expression() {
+    for (filter, expected) in [
+        (column("flag"), r#"(position(B'1' IN "flag") > 0)"#),
+        (column("active"), r#""active""#),
+        (
+            fixtures::not(column("flag")),
+            r#"(NOT (position(B'1' IN "flag") > 0))"#,
+        ),
+        (
+            fixtures::and(json!([column("flag"), column("active")])),
+            r#"((position(B'1' IN "flag") > 0) AND "active")"#,
+        ),
+        (
+            fixtures::or(json!([
+                column("active"),
+                less(numeric_literal("5"), column("id"))
+            ])),
+            r#"("active" OR (5 < "id"))"#,
+        ),
+    ] {
+        let sql = render_statement(&fixtures::converted_table_filtered_request(
+            CONVERTED_NOTES,
+            filter,
+        ));
+
+        assert_eq!(
+            sql,
+            format!(r#"SELECT "id" FROM "public"."orders" WHERE {expected}"#)
+        );
+    }
+}
+
+/// Measured on Exasol 2025.1.11, `WHERE b = (d > 5)` arrives delegated with a
+/// predicate as the comparison's right operand.
+#[test]
+fn predicate_operand_of_a_comparison_renders_parenthesized() {
+    let columns = json!([
+        {"name": "active", "dataType": {"type": "BOOLEAN"}},
+        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+    ]);
+    for (operand, expected) in [
+        (
+            less(numeric_literal("5"), column("id")),
+            r#"("active" = (5 < "id"))"#,
+        ),
+        (
+            fixtures::not(column("active")),
+            r#"("active" = (NOT "active"))"#,
+        ),
+    ] {
+        let clause = where_clause_over(columns.clone(), equal(column("active"), operand));
+
+        assert_eq!(clause, expected);
+    }
+}
+
+/// An involved table of a `boolean` column `flag` and a `bit` column `bits`,
+/// each declared `BOOLEAN` and recording its own source type, beside a `uuid`
+/// column `uid` and an `id` column that records no notes.
+fn flags_table(name: &str) -> Value {
+    json!({
+        "name": name,
+        "columns": [
+            {"name": "id", "dataType": id_type()},
+            {
+                "name": "flag",
+                "dataType": boolean_type(),
+                "adapterNotes": r#"{"sourceType":"boolean"}"#,
+            },
+            {
+                "name": "bits",
+                "dataType": boolean_type(),
+                "adapterNotes": r#"{"sourceType":"bit"}"#,
+            },
+            {
+                "name": "uid",
+                "dataType": {"type": "VARCHAR", "size": 2000000, "characterSet": "UTF8"},
+                "adapterNotes": r#"{"sourceType":"uuid"}"#,
+            },
+        ],
+    })
+}
+
+/// A single-group aggregation over `flags` projecting `select_list`.
+fn flags_aggregation(select_list: Value, data_types: Value) -> Value {
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": {
+            "type": "select",
+            "from": {"type": "table", "name": "flags"},
+            "selectList": select_list,
+            "selectListDataTypes": data_types,
+            "aggregationType": "single_group",
+        },
+        "involvedTables": [flags_table("flags")],
+    })
+}
+
+/// `vs-adapter/postgresql-pushdown`, scenario "MIN and MAX over a BOOLEAN
+/// column render as bool_and and bool_or": over a `boolean` column and a `bit`
+/// column, with and without `DISTINCT`, over the read expression of each; and
+/// over a column of any other type, as `MIN` and `MAX`.
+#[test]
+fn min_and_max_over_boolean_render_as_bool_and_and_bool_or() {
+    for (select_entry, expected) in [
+        (
+            fixtures::aggregate_over("MIN", "flag", false),
+            r#"bool_and("flag")"#,
+        ),
+        (
+            fixtures::aggregate_over("MAX", "flag", false),
+            r#"bool_or("flag")"#,
+        ),
+        (
+            fixtures::aggregate_over("MIN", "flag", true),
+            r#"bool_and(DISTINCT "flag")"#,
+        ),
+        (
+            fixtures::aggregate_over("MAX", "flag", true),
+            r#"bool_or(DISTINCT "flag")"#,
+        ),
+        (
+            fixtures::aggregate_over("MIN", "bits", false),
+            r#"bool_and((position(B'1' IN "bits") > 0))"#,
+        ),
+        (
+            fixtures::aggregate_over("MAX", "bits", false),
+            r#"bool_or((position(B'1' IN "bits") > 0))"#,
+        ),
+        (
+            fixtures::aggregate_over("MAX", "bits", true),
+            r#"bool_or(DISTINCT (position(B'1' IN "bits") > 0))"#,
+        ),
+        (
+            fixtures::aggregate_over("COUNT", "flag", true),
+            r#"COUNT(DISTINCT "flag")"#,
+        ),
+        (fixtures::aggregate_over("MIN", "id", false), r#"MIN("id")"#),
+        (
+            fixtures::aggregate_over("MAX", "uid", false),
+            r#"MAX(CAST("uid" AS TEXT))"#,
+        ),
+    ] {
+        let data_type = if select_entry["name"] == "COUNT" {
+            count_type()
+        } else {
+            boolean_type()
+        };
+        let request = flags_aggregation(json!([select_entry]), json!([data_type]));
+
+        assert_eq!(
+            render_statement(&request),
+            format!(r#"SELECT {expected} FROM "public"."flags""#)
+        );
+    }
+}
+
+/// An aggregate over a select-list predicate carries no declared column type to
+/// read, because a predicate is boolean by construction, and PostgreSQL has no
+/// `min` or `max` for it either.
+#[test]
+fn min_and_max_over_a_predicate_render_as_bool_and_and_bool_or() {
+    let predicate = less(numeric_literal("5"), column("id"));
+    for (function, expected) in [("MIN", "bool_and"), ("MAX", "bool_or")] {
+        let entry = json!({
+            "type": "function_aggregate",
+            "name": function,
+            "arguments": [predicate],
+        });
+        let request = flags_aggregation(json!([entry]), json!([boolean_type()]));
+
+        assert_eq!(
+            render_statement(&request),
+            format!(r#"SELECT {expected}((5 < "id")) FROM "public"."flags""#)
+        );
+    }
+}
+
+/// The aggregates over a `BOOLEAN` operand that `every_advertised_capability_
+/// renders_per_dialect` exercises as their own arm, because this dialect
+/// renders `MIN` and `MAX` differently for that one declared type.
+pub(crate) fn boolean_operand_exercising(capability: &str) -> Option<(&'static str, Query)> {
+    let (fragment, function) = match capability {
+        "FN_AGG_MIN" => (r#"bool_and("flag")"#, "MIN"),
+        "FN_AGG_MAX" => (r#"bool_or("flag")"#, "MAX"),
+        _ => return None,
+    };
+    let flag = pushdown_query::ColumnRef {
+        name: "flag".to_string(),
+        declared_type: ExasolType::Boolean,
+        source_type: Some("boolean".to_string()),
+        table_name: None,
+        table_alias: None,
+    };
+    let query = fixtures::aggregated(
+        &namespace(),
+        vec![SelectItem {
+            expression: Expression::Aggregate(fixtures::aggregate_call(
+                function,
+                Expression::Column(flag),
+                false,
+            )),
+            declared_type: ExasolType::Boolean,
+        }],
+    );
+
+    Some((fragment, query))
+}
+
+/// `vs-adapter/pushdown-dialect`, scenario "A column reference renders through
+/// its read expression in every position", over PostgreSQL's own read
+/// expressions: the join keys of a full outer join, each a `uuid` read as text,
+/// carry the conversion on both sides, qualified by the alias of their table.
+#[test]
+fn converted_join_keys_render_through_their_read_expressions_in_a_full_outer_join() {
+    let qualified =
+        |name: &str, table: &str| json!({"type": "column", "name": name, "tableName": table});
+    let request = json!({
+        "type": "pushdown",
+        "pushdownRequest": {
+            "type": "select",
+            "from": {
+                "type": "join",
+                "join_type": "full_outer",
+                "left": {"type": "table", "name": "flags"},
+                "right": {"type": "table", "name": "other_flags"},
+                "condition": equal(qualified("uid", "flags"), qualified("uid", "other_flags")),
+            },
+            "selectList": [qualified("id", "flags")],
+        },
+        "involvedTables": [flags_table("flags"), flags_table("other_flags")],
+    });
+
+    assert_eq!(
+        render_statement(&request),
+        r#"SELECT "t1"."id" FROM ("public"."flags" AS "t1" FULL OUTER JOIN "public"."other_flags" AS "t2" ON (CAST("t1"."uid" AS TEXT) = CAST("t2"."uid" AS TEXT)))"#
+    );
+}

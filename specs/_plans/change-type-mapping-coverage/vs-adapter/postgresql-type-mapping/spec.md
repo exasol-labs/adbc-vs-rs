@@ -127,7 +127,7 @@ States which PostgreSQL column types map to which Exasol types, which are omitte
 * *WHEN* the column is mapped and queried
 * *THEN* the result MUST be the Exasol type `DOUBLE`
 * *AND* every reference to the column MUST render as `CAST(CAST(<column> AS NUMERIC) AS DOUBLE PRECISION)`, because PostgreSQL defines no direct conversion from `money` to `double precision`
-* *AND* the scan MUST emit `12.34` as a `DOUBLE`, whatever `lc_monetary` the source session uses
+* *AND* the scan MUST emit `12.34` as a `DOUBLE` under a session `lc_monetary` with two fractional digits, because PostgreSQL scales the stored amount by that setting
 * *AND* a delegated comparison with the literal `12.34` MUST select the row, as Exasol's comparison of the emitted value does
 <!-- /DELTA:NEW -->
 

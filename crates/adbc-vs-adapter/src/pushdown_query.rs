@@ -29,7 +29,7 @@
 
 use serde_json::Value;
 
-use crate::adapter_notes::SourceQualifier;
+use crate::adapter_notes::{ColumnNotes, SourceQualifier};
 use crate::emit_type;
 use crate::exa_type::{self, ExasolType};
 
@@ -102,21 +102,26 @@ pub enum Expression {
     /// group. Reachable as a bare select-list entry and as the operand of a
     /// select-list [`Predicate`], the shape `COUNT(*) > 0` arrives in.
     Aggregate(AggregateCall),
-    /// A `predicate_*` node in select-list position, as `SELECTLIST_EXPRESSIONS`
-    /// lets a delegated predicate reach the select list rather than only
-    /// `WHERE`. Declared `BOOLEAN`.
+    /// A `predicate_*` node in value position: a select-list entry, as
+    /// `SELECTLIST_EXPRESSIONS` lets a delegated predicate reach the select
+    /// list rather than only `WHERE`, or an operand, as `b = (d > 5)` arrives.
+    /// Declared `BOOLEAN`.
     Predicate(Box<Predicate>),
 }
 
 /// A reference to a column of a table in the `from` tree, carrying the
-/// Exasol type that table declares for it.
+/// Exasol type that table declares for it and the source type the column's
+/// `adapterNotes` recorded.
 ///
-/// The type travels with the reference because a `column` select-list entry
-/// takes it as the `EMITS` type when `selectListDataTypes` is absent, and
-/// because Exasol's type-equality check reads it. It never decides how a
-/// dialect renders the column: a dialect renders no collation, so a character
-/// column and a numeric column render the same way. Resolving the type again
-/// by name at render time would put the involved table's column list on both
+/// The declared type travels with the reference because a `column`
+/// select-list entry takes it as the `EMITS` type when `selectListDataTypes`
+/// is absent, and because Exasol's type-equality check reads it. Together with
+/// the source type it selects the read expression the column's technology
+/// renders in every position the reference reaches, because two source types
+/// sharing one declared type can need different conversions. A column without
+/// notes, as a virtual schema created before columns carried them declares
+/// it, has no source type and renders bare. Resolving either type again by
+/// name at render time would put the involved table's column list on both
 /// sides of the dialect boundary.
 ///
 /// How the reference names its table travels unresolved, in both spellings
@@ -135,6 +140,9 @@ pub enum Expression {
 pub struct ColumnRef {
     pub name: String,
     pub declared_type: ExasolType,
+    /// The source type as the catalog spelled it, from the column's
+    /// `adapterNotes`, or `None` for a column that carries no notes.
+    pub source_type: Option<String>,
     /// The column node's own `tableName`, when the request supplied one: the
     /// real name of the table the column belongs to, the same name
     /// `involvedTables[].name` carries.
@@ -189,6 +197,10 @@ pub enum Literal {
 /// renders the tree without rediscovering the JSON shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
+    /// A `column` node whose declared type is `BOOLEAN`, standing as a
+    /// predicate on its own: measured on Exasol 2025.1.11, `WHERE b` arrives
+    /// as the bare column rather than as a comparison with a boolean literal.
+    BooleanColumn(ColumnRef),
     And(Vec<Predicate>),
     Or(Vec<Predicate>),
     Not(Box<Predicate>),
@@ -357,6 +369,7 @@ struct InvolvedTable {
 struct InvolvedColumn {
     name: String,
     declared_type: ExasolType,
+    source_type: Option<String>,
 }
 
 /// Reads every entry of `involvedTables`: one table for a single-table
@@ -410,7 +423,30 @@ fn read_involved_column(column: &Value) -> Result<InvolvedColumn, String> {
     Ok(InvolvedColumn {
         name: name.to_string(),
         declared_type: exa_type::from_json(data_type)?,
+        source_type: read_source_type(column, name)?,
     })
+}
+
+/// Reads the source type a column's `adapterNotes` recorded.
+///
+/// An absent note gives `None`, because a column declared before columns
+/// carried notes renders bare rather than failing every query over it.
+fn read_source_type(column: &Value, name: &str) -> Result<Option<String>, String> {
+    let text = match column.get("adapterNotes") {
+        None => return Ok(None),
+        Some(Value::String(text)) => text,
+        Some(other) => {
+            return Err(format!(
+                "involved table column `{name}` carries adapterNotes {other}, which is not the \
+                 JSON string createVirtualSchema records"
+            ))
+        }
+    };
+    ColumnNotes::parse(text)
+        .map(|notes| Some(notes.source_type))
+        .map_err(|error| {
+            format!("involved table column `{name}` carries malformed adapterNotes {text}: {error}")
+        })
 }
 
 /// Resolves a `column` node's declared type against `tables`, using
@@ -493,6 +529,7 @@ fn read_column_ref(
     Ok(ColumnRef {
         name: name.to_string(),
         declared_type: column.declared_type,
+        source_type: column.source_type.clone(),
         table_name: table_name.map(str::to_string),
         table_alias: table_alias.map(str::to_string),
     })
@@ -709,6 +746,7 @@ fn project_column(column: &InvolvedColumn) -> SelectItem {
         expression: Expression::Column(ColumnRef {
             name: column.name.clone(),
             declared_type: column.declared_type,
+            source_type: column.source_type.clone(),
             table_name: None,
             table_alias: None,
         }),
@@ -733,6 +771,7 @@ fn read_predicate(node: &Value, tables: &[InvolvedTable]) -> Result<Predicate, S
         .ok_or_else(|| format!("filter predicate {node} carries no `type` field"))?;
 
     match predicate_type {
+        "column" => read_boolean_column(node, tables).map(Predicate::BooleanColumn),
         "predicate_and" => Ok(Predicate::And(read_predicate_list(node, tables)?)),
         "predicate_or" => Ok(Predicate::Or(read_predicate_list(node, tables)?)),
         "predicate_not" => Ok(Predicate::Not(Box::new(read_nested_predicate(
@@ -761,6 +800,22 @@ fn read_predicate(node: &Value, tables: &[InvolvedTable]) -> Result<Predicate, S
             "filter predicate of type `{other}` has no rendering path in this release"
         )),
     }
+}
+
+/// Reads a `column` node in predicate position. Only a `BOOLEAN` column has a
+/// truth value to test, so a column of any other declared type fails naming
+/// it rather than render a non-boolean operand as a predicate.
+fn read_boolean_column(node: &Value, tables: &[InvolvedTable]) -> Result<ColumnRef, String> {
+    let column = read_column_ref(node, tables, "filter predicate")?;
+    if column.declared_type != ExasolType::Boolean {
+        return Err(format!(
+            "filter predicate of type `column` names `{}`, which declares {}; only a BOOLEAN \
+             column stands as a predicate on its own",
+            column.name,
+            exa_type::to_ddl(column.declared_type)
+        ));
+    }
+    Ok(column)
 }
 
 fn read_predicate_list(node: &Value, tables: &[InvolvedTable]) -> Result<Vec<Predicate>, String> {
@@ -843,11 +898,13 @@ fn read_named_expression(
 }
 
 /// Reads one value expression: a `column` reference resolved against the
-/// involved tables, one of the six literal kinds this release delegates, or
-/// a `function_aggregate`, the shape a select-list predicate's operand takes
-/// for `COUNT(*) > 0`. Keyed on `type` for the same reason a `selectList`
-/// entry is: an operand is not always a column once a predicate can also
-/// compare a literal, or an aggregate, against another operand.
+/// involved tables, one of the six literal kinds this release delegates, a
+/// `function_aggregate`, the shape a select-list predicate's operand takes
+/// for `COUNT(*) > 0`, or a `predicate_*` node read as a boolean value, the
+/// shape `b = (d > 5)` arrives in. Keyed on `type` for the same reason a
+/// `selectList` entry is: an operand is not always a column once a predicate
+/// can also compare a literal, an aggregate, or another predicate against
+/// another operand.
 fn read_expression(node: &Value, tables: &[InvolvedTable]) -> Result<Expression, String> {
     let expression_type = node
         .get("type")
@@ -873,6 +930,9 @@ fn read_expression(node: &Value, tables: &[InvolvedTable]) -> Result<Expression,
             node,
         )?))),
         "function_aggregate" => Ok(Expression::Aggregate(read_aggregate_call(node, tables)?)),
+        _ if expression_type.starts_with("predicate_") => Ok(Expression::Predicate(Box::new(
+            read_predicate(node, tables)?,
+        ))),
         other => Err(format!(
             "filter expression of type `{other}` has no rendering path in this release"
         )),

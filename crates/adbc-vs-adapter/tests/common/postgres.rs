@@ -55,7 +55,14 @@ const SEEDED_OBJECTS: &[&str] = &[
     "refresh_target",
     "order_names",
     "MixedCase",
+    "type_coverage",
+    "text_overflow",
+    "collated_names",
 ];
+
+/// The types `docker/postgres/init.sql` seeds, which `information_schema.tables`
+/// does not list, so [`Postgres::check_fixture`] reads them from `pg_type`.
+const SEEDED_TYPES: &[&str] = &["mood"];
 
 /// The PostgreSQL instance under test.
 pub struct Postgres {
@@ -139,6 +146,24 @@ impl Postgres {
              PostgreSQL container outlived a change to docker/postgres/init.sql. Recreate the \
              service with `docker compose rm -sfv postgres && make stack-up-postgres`",
             SEEDED_OBJECTS.len()
+        );
+
+        let type_names = SEEDED_TYPES
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let seeded_types = self.query_scalar(&format!(
+            "SELECT count(*) FROM pg_type WHERE typname IN ({type_names})"
+        ));
+
+        assert_eq!(
+            seeded_types,
+            SEEDED_TYPES.len().to_string(),
+            "database `{DATABASE}` holds {seeded_types} of the {} seeded fixture types \
+             {SEEDED_TYPES:?}; recreate the service with \
+             `docker compose rm -sfv postgres && make stack-up-postgres`",
+            SEEDED_TYPES.len()
         );
     }
 

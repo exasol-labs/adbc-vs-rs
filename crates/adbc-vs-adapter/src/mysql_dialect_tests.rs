@@ -109,6 +109,32 @@ fn no_operand_carries_a_collation_suffix_in_any_position() {
              collation: {sql}"
         );
     }
+
+    let json_columns = json!([{
+        "name": "doc",
+        "dataType": {"type": "VARCHAR", "size": 2_000_000, "characterSet": "UTF8"},
+        "adapterNotes": r#"{"sourceType":"json"}"#,
+    }]);
+    let json_statements = [
+        where_clause_over(
+            json_columns.clone(),
+            equal(column_operand("doc"), string_literal("x")),
+        ),
+        render_statement(&filtered_request(
+            json_columns,
+            json!({"type": "predicate_is_null", "expression": column_operand("doc")}),
+        )),
+    ];
+    for sql in json_statements {
+        assert!(
+            sql.contains("CAST(`doc` AS CHAR)"),
+            "a JSON operand must read through its text conversion: {sql}"
+        );
+        assert!(
+            !sql.contains("COLLATE"),
+            "a converted operand must carry no collation suffix either: {sql}"
+        );
+    }
 }
 
 /// Exasol normalizes `id > 5` into `predicate_less` with the operands
@@ -1508,4 +1534,222 @@ fn a_reference_more_than_one_joined_table_answers_to_fails_naming_it() {
         error.contains("`id`") && error.contains("orders") && error.contains("more than one"),
         "the error must name the column and the reference two tables answer to: {error}"
     );
+}
+
+/// MySQL source types whose read expression converts: a `json` reads as
+/// text and a `bit` as whether any bit is set.
+const CONVERTED_NOTES: fixtures::ConvertedNotes = fixtures::ConvertedNotes {
+    uid: "json",
+    flag: "bit",
+};
+
+/// The types Exasol declares for a select list of `uid`, a predicate over it,
+/// `MIN(uid)`, and `COUNT(*)`.
+fn converted_select_list_types() -> Value {
+    json!([
+        {"type": "VARCHAR", "size": 36},
+        {"type": "BOOLEAN"},
+        {"type": "VARCHAR", "size": 36},
+        {"type": "DECIMAL", "precision": 18, "scale": 0},
+    ])
+}
+
+/// `vs-adapter/pushdown-dialect`, scenario "A column reference renders through
+/// its read expression in every position": a converted column reads through
+/// one read expression in the select list, a `WHERE` comparison, a `GROUP BY`
+/// key, a `MIN` and a `COUNT(DISTINCT)` operand, and an equi-join condition,
+/// and a column without notes reads bare.
+#[test]
+fn column_reference_renders_identically_in_every_position() {
+    let filtered = render_statement(&fixtures::converted_column_filtered_request(
+        CONVERTED_NOTES,
+    ));
+    assert_eq!(
+        filtered,
+        "SELECT CAST(`uid` AS CHAR) FROM `shop`.`orders` \
+         WHERE (CAST(`uid` AS CHAR) = _utf8mb4 X'61')"
+    );
+
+    let grouped = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            fixtures::aggregate_over("MIN", "uid", false),
+            fixtures::aggregate_over("COUNT", "uid", true),
+        ]),
+        json!([
+            {"type": "VARCHAR", "size": 36},
+            {"type": "DECIMAL", "precision": 18, "scale": 0},
+        ]),
+        "uid",
+    ));
+    assert_eq!(
+        grouped,
+        "SELECT MIN(CAST(`uid` AS CHAR)), COUNT(DISTINCT CAST(`uid` AS CHAR)) \
+         FROM `shop`.`orders` GROUP BY CAST(`uid` AS CHAR)"
+    );
+
+    let joined = render_statement(&fixtures::converted_column_joined_request(CONVERTED_NOTES));
+    assert_eq!(
+        joined,
+        "SELECT `t1`.`id` FROM (`shop`.`orders` AS `t1` INNER JOIN `shop`.`customers` AS `t2` \
+         ON (CAST(`t1`.`uid` AS CHAR) = CAST(`t2`.`uid` AS CHAR)))"
+    );
+}
+
+/// `vs-adapter/pushdown-dialect` and decision-log `[plan-review]`: MySQL
+/// matches a select-list expression against a `GROUP BY` expression only
+/// whole, so a grouped key read through a conversion reads through
+/// `ANY_VALUE` in the select list, alone and inside a predicate, while an
+/// aggregate's operand, the `WHERE` clause, and the `GROUP BY` key read it
+/// unwrapped.
+#[test]
+fn grouped_converted_column_in_the_select_list_renders_inside_any_value() {
+    let mut request = fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            column_operand("uid"),
+            equal(column_operand("uid"), string_literal("a")),
+            fixtures::aggregate_over("MIN", "uid", false),
+            aggregate("COUNT", None),
+        ]),
+        converted_select_list_types(),
+        "uid",
+    );
+    request["pushdownRequest"]["filter"] = equal(column_operand("uid"), string_literal("b"));
+
+    let sql = render_statement(&request);
+
+    assert_eq!(
+        sql,
+        "SELECT ANY_VALUE(CAST(`uid` AS CHAR)), \
+         (ANY_VALUE(CAST(`uid` AS CHAR)) = _utf8mb4 X'61'), \
+         MIN(CAST(`uid` AS CHAR)), COUNT(*) FROM `shop`.`orders` \
+         WHERE (CAST(`uid` AS CHAR) = _utf8mb4 X'62') GROUP BY CAST(`uid` AS CHAR)"
+    );
+}
+
+/// A grouped key that reads bare is the select-list expression MySQL matches
+/// against its `GROUP BY` key already, so it gains no `ANY_VALUE`.
+#[test]
+fn grouped_bare_column_in_the_select_list_renders_without_any_value() {
+    let sql = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            column_operand("note"),
+            equal(column_operand("note"), string_literal("a")),
+            fixtures::aggregate_over("MIN", "uid", false),
+            aggregate("COUNT", None),
+        ]),
+        converted_select_list_types(),
+        "note",
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT `note`, (`note` = _utf8mb4 X'61'), MIN(CAST(`uid` AS CHAR)), COUNT(*) \
+         FROM `shop`.`orders` GROUP BY `note`"
+    );
+}
+
+/// `ANY_VALUE` exempts its operand from MySQL's full-group-by check, so it
+/// wraps only a grouping key: a converted column the query does not group by
+/// reads unwrapped and MySQL refuses the statement, rather than returning an
+/// arbitrary value of the group.
+#[test]
+fn a_converted_column_the_query_does_not_group_by_reads_without_any_value() {
+    let sql = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([column_operand("uid"), aggregate("COUNT", None)]),
+        json!([
+            {"type": "VARCHAR", "size": 36},
+            {"type": "DECIMAL", "precision": 18, "scale": 0},
+        ]),
+        "note",
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT CAST(`uid` AS CHAR), COUNT(*) FROM `shop`.`orders` GROUP BY `note`"
+    );
+}
+
+/// `vs-adapter/pushdown-filter`, scenario "BOOLEAN column is a predicate on its
+/// own": the predicate is the column's read expression, with no comparison
+/// added, alone and under `NOT`, `AND`, and `OR`.
+#[test]
+fn boolean_column_predicate_renders_through_its_read_expression() {
+    for (filter, expected) in [
+        (column_operand("flag"), "(`flag` <> 0)"),
+        (column_operand("active"), "`active`"),
+        (fixtures::not(column_operand("flag")), "(NOT (`flag` <> 0))"),
+        (
+            fixtures::and(json!([column_operand("flag"), column_operand("active")])),
+            "((`flag` <> 0) AND `active`)",
+        ),
+        (
+            fixtures::or(json!([
+                column_operand("active"),
+                less(numeric_literal("5"), column_operand("id")),
+            ])),
+            "(`active` OR (5 < `id`))",
+        ),
+    ] {
+        let sql = render_statement(&fixtures::converted_table_filtered_request(
+            CONVERTED_NOTES,
+            filter,
+        ));
+
+        assert_eq!(
+            sql,
+            format!("SELECT `id` FROM `shop`.`orders` WHERE {expected}")
+        );
+    }
+}
+
+/// The select-list shape decision-log `[plan-review]` names, `NOT BITS`
+/// grouped by `BITS`: the negated grouping key reads through `ANY_VALUE`.
+#[test]
+fn a_negated_grouped_converted_boolean_column_reads_through_any_value() {
+    let sql = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            fixtures::not(column_operand("flag")),
+            aggregate("COUNT", None)
+        ]),
+        json!([
+            {"type": "BOOLEAN"},
+            {"type": "DECIMAL", "precision": 18, "scale": 0},
+        ]),
+        "flag",
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT (NOT ANY_VALUE((`flag` <> 0))), COUNT(*) FROM `shop`.`orders` \
+         GROUP BY (`flag` <> 0)"
+    );
+}
+
+/// Measured on Exasol 2025.1.11, `WHERE b = (d > 5)` arrives delegated with a
+/// predicate as the comparison's right operand.
+#[test]
+fn predicate_operand_of_a_comparison_renders_parenthesized() {
+    let columns = json!([
+        {"name": "active", "dataType": {"type": "BOOLEAN"}},
+        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+    ]);
+    for (operand, expected) in [
+        (
+            less(numeric_literal("5"), column_operand("id")),
+            "(`active` = (5 < `id`))",
+        ),
+        (
+            fixtures::not(column_operand("active")),
+            "(`active` = (NOT `active`))",
+        ),
+    ] {
+        let clause = where_clause_over(columns.clone(), equal(column_operand("active"), operand));
+
+        assert_eq!(clause, expected);
+    }
 }

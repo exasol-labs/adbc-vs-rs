@@ -20,13 +20,14 @@
 //! names the value exactly as the catalog spelled it.
 //!
 //! Seven Trino types map: `integer`, `bigint`, `decimal(p,s)`, `varchar(n)`,
-//! `date`, `timestamp(p)` at any precision, and `double`. Every other type is
-//! unmapped, with the reason naming the type the catalog reported. Unmapped
-//! is a normal outcome, not a system failure: the caller omits the column and
-//! records why, per `vs-adapter/type-mapping`.
+//! `date`, `timestamp(p)` at any precision to `TIMESTAMP(3)`, and `double`.
+//! Every other type is unmapped, with the reason naming the type the catalog
+//! reported. Unmapped is a normal outcome, not a system failure: the caller
+//! omits the column and records why, per `vs-adapter/type-mapping`.
 
+use crate::exa_type::{ExasolType, DEFAULT_TIMESTAMP_PRECISION};
 use crate::type_mapping::{
-    MappedColumn, MappedType, MAX_DECIMAL_PRECISION, MAX_VARCHAR_SIZE, MIN_CHARACTER_SIZE,
+    MappedColumn, MAX_DECIMAL_PRECISION, MAX_VARCHAR_SIZE, MIN_CHARACTER_SIZE,
 };
 
 /// The `DECIMAL` precision a Trino `integer` column maps to: the digits of a
@@ -62,8 +63,21 @@ pub fn map_column(column: &TrinoColumn) -> Result<MappedColumn, String> {
     let exasol_type = map_data_type(column)?;
     Ok(MappedColumn {
         exasol_type,
+        source_type: column.data_type.clone(),
         is_nullable: column.is_nullable,
     })
+}
+
+/// The SQL that reads `column`, already quoted, as the value the scan emits
+/// for `declared`, selected by the `source_type` the column's `adapterNotes`
+/// recorded.
+///
+/// The Trino dialect renders every column reference through this one function,
+/// so a delegated filter, grouping key, aggregate operand, and join key act on
+/// the value Exasol receives. No Trino type this mapping maps needs a
+/// conversion, so every column reads bare.
+pub fn column_read_sql(_source_type: Option<&str>, _declared: ExasolType, column: &str) -> String {
+    column.to_string()
 }
 
 /// One of the three `data_type` shapes this release's parser reads.
@@ -125,7 +139,7 @@ fn is_timestamp_with_time_zone(data_type: &str) -> bool {
     data_type.starts_with("timestamp(") && data_type.ends_with(TIME_ZONE_SUFFIX)
 }
 
-fn map_data_type(column: &TrinoColumn) -> Result<MappedType, String> {
+fn map_data_type(column: &TrinoColumn) -> Result<ExasolType, String> {
     let data_type = column.data_type.as_str();
 
     if is_timestamp_with_time_zone(data_type) {
@@ -133,16 +147,16 @@ fn map_data_type(column: &TrinoColumn) -> Result<MappedType, String> {
     }
 
     match parse_data_type(data_type) {
-        Some(ParsedType::Bare("integer")) => Ok(MappedType::Decimal {
+        Some(ParsedType::Bare("integer")) => Ok(ExasolType::Decimal {
             precision: INTEGER_PRECISION,
             scale: 0,
         }),
-        Some(ParsedType::Bare("bigint")) => Ok(MappedType::Decimal {
+        Some(ParsedType::Bare("bigint")) => Ok(ExasolType::Decimal {
             precision: BIGINT_PRECISION,
             scale: 0,
         }),
-        Some(ParsedType::Bare("date")) => Ok(MappedType::Date),
-        Some(ParsedType::Bare("double")) => Ok(MappedType::Double),
+        Some(ParsedType::Bare("date")) => Ok(ExasolType::Date),
+        Some(ParsedType::Bare("double")) => Ok(ExasolType::Double),
         Some(ParsedType::Bare("varchar")) => Err(unbounded_varchar_reason(data_type)),
         Some(ParsedType::Bare("boolean")) => Err(boolean_reason(data_type)),
         Some(ParsedType::OneParam {
@@ -150,9 +164,13 @@ fn map_data_type(column: &TrinoColumn) -> Result<MappedType, String> {
             param,
         }) => map_varchar(param, data_type),
         Some(ParsedType::OneParam { name: "char", .. }) => Err(char_reason(data_type)),
+        // Exasol's default precision, so a refresh leaves an existing Trino
+        // column's type unchanged.
         Some(ParsedType::OneParam {
             name: "timestamp", ..
-        }) => Ok(MappedType::Timestamp),
+        }) => Ok(ExasolType::Timestamp {
+            precision: DEFAULT_TIMESTAMP_PRECISION,
+        }),
         Some(ParsedType::PrecisionScale {
             name: "decimal",
             precision,
@@ -164,7 +182,7 @@ fn map_data_type(column: &TrinoColumn) -> Result<MappedType, String> {
 
 /// Maps `varchar(n)` to Exasol `VARCHAR(n)`, raising a declared length of 0 to
 /// Exasol's minimum and refusing a length beyond Exasol's maximum.
-fn map_varchar(param: u32, data_type: &str) -> Result<MappedType, String> {
+fn map_varchar(param: u32, data_type: &str) -> Result<ExasolType, String> {
     let size = param.max(MIN_CHARACTER_SIZE);
     if size > MAX_VARCHAR_SIZE {
         return Err(format!(
@@ -172,20 +190,20 @@ fn map_varchar(param: u32, data_type: &str) -> Result<MappedType, String> {
              VARCHAR size of {MAX_VARCHAR_SIZE}"
         ));
     }
-    Ok(MappedType::Varchar { size })
+    Ok(ExasolType::Varchar { size })
 }
 
 /// Maps `decimal(p,s)` to Exasol `DECIMAL(p,s)`, refusing a precision beyond
 /// Exasol's maximum rather than Trino's own — Trino admits up to 38, Exasol
 /// only 36.
-fn map_decimal(precision: u32, scale: u32, data_type: &str) -> Result<MappedType, String> {
+fn map_decimal(precision: u32, scale: u32, data_type: &str) -> Result<ExasolType, String> {
     if precision > MAX_DECIMAL_PRECISION {
         return Err(format!(
             "Trino type {data_type} declares precision {precision}, which exceeds Exasol's \
              maximum DECIMAL precision of {MAX_DECIMAL_PRECISION}"
         ));
     }
-    Ok(MappedType::Decimal { precision, scale })
+    Ok(ExasolType::Decimal { precision, scale })
 }
 
 fn char_reason(data_type: &str) -> String {
@@ -193,16 +211,15 @@ fn char_reason(data_type: &str) -> String {
         "Trino type {data_type} is blank-padded to its declared length: Trino returns the value \
          padded and compares two of them ignoring trailing spaces while a pattern match over them \
          does not, so a delegated LIKE over a mapped column would disagree with a delegated \
-         equality over the same column; Exasol VARCHAR does neither and no column adbc-vs maps \
-         produces Exasol CHAR"
+         equality over the same column; Exasol VARCHAR does neither, and this release maps a \
+         source column to Exasol CHAR for PostgreSQL and MySQL only"
     )
 }
 
 fn boolean_reason(data_type: &str) -> String {
     format!(
-        "Trino type {data_type} is not mapped to Exasol BOOLEAN, because a mapped boolean column \
-         would widen the set of Exasol types a source column produces and bring a boolean operand \
-         into every predicate path"
+        "Trino type {data_type} is outside this release's Trino scope, which maps no Trino column \
+         to Exasol BOOLEAN although the PostgreSQL and MySQL mappings do"
     )
 }
 
@@ -227,4 +244,4 @@ fn not_mapped_reason(data_type: &str) -> String {
 
 #[cfg(test)]
 #[path = "trino_type_mapping_tests.rs"]
-mod tests;
+pub(crate) mod tests;

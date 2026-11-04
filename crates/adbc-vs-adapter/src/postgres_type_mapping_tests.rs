@@ -9,6 +9,7 @@ fn column(data_type: &str) -> PostgresColumn {
         character_length: None,
         numeric_precision: None,
         numeric_scale: None,
+        datetime_precision: None,
         is_nullable: true,
     }
 }
@@ -28,10 +29,61 @@ fn character_varying_column(length: Option<u32>) -> PostgresColumn {
     }
 }
 
-fn mapped(column: &PostgresColumn) -> MappedType {
+fn character_column(data_type: &str, length: Option<u32>) -> PostgresColumn {
+    PostgresColumn {
+        character_length: length,
+        ..column(data_type)
+    }
+}
+
+fn timestamp_column(data_type: &str, precision: u32) -> PostgresColumn {
+    PostgresColumn {
+        datetime_precision: Some(precision),
+        ..column(data_type)
+    }
+}
+
+/// One column of each PostgreSQL type this mapping maps, for the rules every
+/// source's mapping obeys: every Exasol type the mapping produces appears at
+/// least once, and so does every conversion its read expressions apply.
+pub(crate) fn one_column_of_every_mapped_type() -> Vec<PostgresColumn> {
+    vec![
+        column("smallint"),
+        column("integer"),
+        column("bigint"),
+        numeric_column(Some(12), Some(4)),
+        numeric_column(None, None),
+        column("real"),
+        column("double precision"),
+        column("money"),
+        column("boolean"),
+        character_column("bit", Some(8)),
+        character_column("bit varying", Some(16)),
+        character_column("character", Some(5)),
+        character_column("character", Some(3000)),
+        character_varying_column(Some(100)),
+        column("text"),
+        column("uuid"),
+        column("jsonb"),
+        column("time without time zone"),
+        column("date"),
+        timestamp_column("timestamp without time zone", 6),
+        timestamp_column("timestamp with time zone", 6),
+    ]
+}
+
+fn mapped(column: &PostgresColumn) -> ExasolType {
     map_column(column)
         .unwrap_or_else(|reason| panic!("`{}` must map: {reason}", column.data_type))
         .exasol_type
+}
+
+/// How the dialect reads `column`, named `"c"`, once it is mapped.
+fn read(column: &PostgresColumn) -> String {
+    let mapped = map_column(column)
+        .unwrap_or_else(|reason| panic!("`{}` must map: {reason}", column.data_type));
+
+    column_read_sql(Some(&mapped.source_type), mapped.exasol_type, r#""c""#)
 }
 
 fn unmapped(column: &PostgresColumn) -> String {
@@ -46,24 +98,21 @@ fn unmapped(column: &PostgresColumn) -> String {
 
 /// `vs-adapter/postgresql-type-mapping`: the digit counts follow from the
 /// integer widths rather than from the source, so they are the same values
-/// MySQL's mapping produces for `INT` and `BIGINT` — stated here rather than
-/// read from MySQL's table, which the two mappings do not share.
+/// MySQL's mapping produces for `SMALLINT`, `INT`, and `BIGINT` — stated here
+/// rather than read from MySQL's table, which the two mappings do not share.
 #[test]
 fn integer_types_map_to_decimal() {
-    assert_eq!(
-        mapped(&column("integer")),
-        MappedType::Decimal {
-            precision: 10,
-            scale: 0
-        }
-    );
-    assert_eq!(
-        mapped(&column("bigint")),
-        MappedType::Decimal {
-            precision: 19,
-            scale: 0
-        }
-    );
+    for (data_type, precision) in [("smallint", 5), ("integer", 10), ("bigint", 19)] {
+        assert_eq!(
+            mapped(&column(data_type)),
+            ExasolType::Decimal {
+                precision,
+                scale: 0
+            },
+            "for {data_type}"
+        );
+        assert_eq!(read(&column(data_type)), r#""c""#);
+    }
 }
 
 /// PostgreSQL reports an integer column's `numeric_precision` in the radix
@@ -82,7 +131,7 @@ fn an_integer_width_is_not_read_from_the_catalogs_precision() {
 
     assert_eq!(
         mapped(&reported_by_the_catalog),
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 10,
             scale: 0
         }
@@ -90,212 +139,314 @@ fn an_integer_width_is_not_read_from_the_catalogs_precision() {
 }
 
 /// `vs-adapter/postgresql-type-mapping`: a `numeric(p,s)` keeps the source's
-/// own precision and scale, because Exasol compares a declared type for exact
-/// equality and a reduced precision would truncate values.
+/// own precision and scale and reads bare, and Exasol's maximum precision
+/// itself still maps.
 #[test]
 fn numeric_preserves_the_source_precision_and_scale() {
-    assert_eq!(
-        mapped(&numeric_column(Some(12), Some(4))),
-        MappedType::Decimal {
-            precision: 12,
-            scale: 4
-        }
-    );
-    assert_eq!(
-        mapped(&numeric_column(Some(30), None)),
-        MappedType::Decimal {
-            precision: 30,
-            scale: 0
-        }
-    );
+    for (column, expected) in [
+        (
+            numeric_column(Some(12), Some(4)),
+            ExasolType::Decimal {
+                precision: 12,
+                scale: 4,
+            },
+        ),
+        (
+            numeric_column(Some(30), None),
+            ExasolType::Decimal {
+                precision: 30,
+                scale: 0,
+            },
+        ),
+        (
+            numeric_column(Some(36), Some(2)),
+            ExasolType::Decimal {
+                precision: 36,
+                scale: 2,
+            },
+        ),
+    ] {
+        assert_eq!(mapped(&column), expected);
+        assert_eq!(read(&column), r#""c""#);
+    }
 }
 
 /// `vs-adapter/type-mapping`, PostgreSQL's half: a source precision Exasol's
-/// `DECIMAL` cannot hold is omitted rather than silently reduced, and the
-/// reason names Exasol's maximum so an operator can see why.
+/// `DECIMAL` cannot hold maps to `VARCHAR(2000000)` read as PostgreSQL's text
+/// for the value, which keeps every digit, rather than being reduced.
 #[test]
-fn oversize_numeric_is_unmapped() {
-    let reason = unmapped(&numeric_column(Some(40), Some(2)));
+fn numeric_beyond_precision_36_maps_to_varchar_read_as_text() {
+    let beyond = numeric_column(Some(40), Some(2));
 
-    assert!(
-        reason.contains("40") && reason.contains("36"),
-        "the reason must name the source precision and Exasol's maximum: {reason}"
-    );
-    assert!(
-        reason.contains("numeric"),
-        "the reason must name the type it rejected: {reason}"
-    );
-
-    assert_eq!(
-        mapped(&numeric_column(Some(36), Some(2))),
-        MappedType::Decimal {
-            precision: 36,
-            scale: 2
-        },
-        "Exasol's maximum precision itself must still map"
-    );
+    assert_eq!(mapped(&beyond), ExasolType::Varchar { size: 2_000_000 });
+    assert_eq!(read(&beyond), r#"CAST("c" AS TEXT)"#);
 }
 
-/// An unconstrained `numeric` reports no precision. Substituting Exasol's
-/// maximum would declare a type an arbitrary-precision source value need not
-/// fit, so the column is omitted and the reason names the absent precision.
+/// An unconstrained `numeric` reports no precision. Its values need not fit
+/// any `DECIMAL`, and `NaN`, `Infinity`, and trailing zeros are values of its
+/// own, so it maps to the text PostgreSQL prints for each.
 #[test]
-fn numeric_without_a_declared_precision_is_unmapped() {
-    let reason = unmapped(&numeric_column(None, None));
+fn unconstrained_numeric_maps_to_varchar_read_as_text() {
+    let unconstrained = numeric_column(None, None);
 
-    assert!(
-        reason.contains("numeric") && reason.contains("precision"),
-        "the reason must name the type and its absent precision: {reason}"
+    assert_eq!(
+        mapped(&unconstrained),
+        ExasolType::Varchar { size: 2_000_000 }
     );
+    assert_eq!(read(&unconstrained), r#"CAST("c" AS TEXT)"#);
 }
 
 /// `vs-adapter/postgresql-type-mapping`: the declared length carries through
-/// to Exasol `VARCHAR`, and a declared length of 0 — which PostgreSQL rejects
-/// but the mapping must not depend on it rejecting — is raised to Exasol's
-/// minimum character-type size of 1 rather than declared as `VARCHAR(0)`,
-/// which Exasol rejects.
+/// to Exasol `VARCHAR`, a declared length of 0 — which PostgreSQL rejects but
+/// the mapping must not depend on it rejecting — is raised to Exasol's minimum
+/// size of 1, and an absent or oversize length, like `text`, is the maximum.
+/// All of them read bare.
 #[test]
-fn character_varying_preserves_its_declared_length() {
-    assert_eq!(
-        mapped(&character_varying_column(Some(100))),
-        MappedType::Varchar { size: 100 }
-    );
-    assert_eq!(
-        mapped(&character_varying_column(Some(0))),
-        MappedType::Varchar { size: 1 }
-    );
+fn character_varying_and_text_map_to_varchar_capped_at_the_maximum() {
+    for (column, size) in [
+        (character_varying_column(Some(100)), 100),
+        (character_varying_column(Some(0)), 1),
+        (character_varying_column(Some(2_000_000)), 2_000_000),
+        (character_varying_column(Some(10_485_760)), 2_000_000),
+        (character_varying_column(None), 2_000_000),
+        (column("text"), 2_000_000),
+    ] {
+        assert_eq!(
+            mapped(&column),
+            ExasolType::Varchar { size },
+            "for {}",
+            column.data_type
+        );
+        assert_eq!(read(&column), r#""c""#);
+    }
 }
 
-/// A `character varying` with no declared length is `varchar` without a
-/// length specifier, which is unbounded. Exasol needs an exact size for a
-/// type it compares for equality, so the column is omitted.
+/// `vs-adapter/postgresql-type-mapping`: `character(n)` is Exasol `CHAR(n)` up
+/// to Exasol's maximum `CHAR` size of 2000 and reads bare. Above it, no `CHAR`
+/// holds the column, so it is a `VARCHAR` of the same size read as text, which
+/// drops the blanks PostgreSQL pads with.
 #[test]
-fn character_varying_without_a_declared_length_is_unmapped() {
-    let reason = unmapped(&character_varying_column(None));
+fn character_maps_to_char_up_to_2000_and_varchar_above() {
+    for (length, expected, expected_read) in [
+        (5, ExasolType::Char { size: 5 }, r#""c""#),
+        (2000, ExasolType::Char { size: 2000 }, r#""c""#),
+        (
+            2001,
+            ExasolType::Varchar { size: 2001 },
+            r#"CAST("c" AS TEXT)"#,
+        ),
+        (
+            3000,
+            ExasolType::Varchar { size: 3000 },
+            r#"CAST("c" AS TEXT)"#,
+        ),
+        (
+            10_485_760,
+            ExasolType::Varchar { size: 2_000_000 },
+            r#"CAST("c" AS TEXT)"#,
+        ),
+    ] {
+        let character = character_column("character", Some(length));
 
-    assert!(
-        reason.contains("character varying") && reason.contains("length"),
-        "the reason must name the type and its absent length: {reason}"
-    );
+        assert_eq!(mapped(&character), expected, "for length {length}");
+        assert_eq!(read(&character), expected_read, "for length {length}");
+    }
 }
 
-/// PostgreSQL admits a `character varying` far longer than Exasol's maximum
-/// `VARCHAR` size. Declaring it anyway would fail the whole `CREATE VIRTUAL
-/// SCHEMA` rather than omit one column, which is the outcome the omission
-/// contract exists to avoid.
+/// `vs-adapter/postgresql-type-mapping`: a `bpchar` without a length reports
+/// `character` with no length and is the maximum `VARCHAR` read as text, and a
+/// reported length of 0 is raised to Exasol's minimum `CHAR(1)`.
 #[test]
-fn oversize_character_varying_is_unmapped() {
-    let reason = unmapped(&character_varying_column(Some(10_485_760)));
+fn unbounded_and_zero_length_character_columns_map() {
+    let unbounded = character_column("character", None);
+    assert_eq!(mapped(&unbounded), ExasolType::Varchar { size: 2_000_000 });
+    assert_eq!(read(&unbounded), r#"CAST("c" AS TEXT)"#);
 
-    assert!(
-        reason.contains("10485760") && reason.contains("2000000"),
-        "the reason must name the source length and Exasol's maximum: {reason}"
-    );
-
-    assert_eq!(
-        mapped(&character_varying_column(Some(2_000_000))),
-        MappedType::Varchar { size: 2_000_000 },
-        "Exasol's maximum size itself must still map"
-    );
+    let zero_length = character_column("character", Some(0));
+    assert_eq!(mapped(&zero_length), ExasolType::Char { size: 1 });
+    assert_eq!(read(&zero_length), r#""c""#);
 }
 
-/// `vs-adapter/postgresql-type-mapping`: the three remaining mapped types.
+/// `vs-adapter/postgresql-type-mapping`: the temporal and floating-point
+/// types, each with its own fractional-second precision where it has one, all
+/// read bare.
 #[test]
 fn temporal_and_floating_point_types_map_to_their_exasol_counterparts() {
-    assert_eq!(mapped(&column("date")), MappedType::Date);
+    assert_eq!(mapped(&column("date")), ExasolType::Date);
+    for (precision, column) in [
+        (6, timestamp_column("timestamp without time zone", 6)),
+        (0, timestamp_column("timestamp without time zone", 0)),
+    ] {
+        assert_eq!(mapped(&column), ExasolType::Timestamp { precision });
+    }
+    assert_eq!(mapped(&column("double precision")), ExasolType::Double);
+    assert_eq!(mapped(&column("real")), ExasolType::Double);
+
+    for data_type in ["date", "double precision", "real"] {
+        assert_eq!(read(&column(data_type)), r#""c""#);
+    }
     assert_eq!(
-        mapped(&column("timestamp without time zone")),
-        MappedType::Timestamp
+        read(&timestamp_column("timestamp without time zone", 6)),
+        r#""c""#
     );
-    assert_eq!(mapped(&column("double precision")), MappedType::Double);
 }
 
-/// `vs-adapter/postgresql-type-mapping`: every type outside this release's
-/// scope is omitted, and each reason names the type the catalog reported so
-/// the omission reaches an operator as the whole explanation.
-///
-/// `ARRAY` is spelled as `information_schema` reports it — upper case, and
-/// naming no element type — which is why the reason has to echo the catalog's
-/// own spelling rather than a normalized one.
+/// `vs-adapter/postgresql-type-mapping`: `boolean` and `bit` of every width
+/// are `BOOLEAN`, and a `bit` column reads as whether any bit is set, as the
+/// JDBC Virtual Schema reads it.
 #[test]
-fn non_core_types_are_unmapped_with_the_reason_naming_the_type() {
+fn boolean_and_bit_of_every_width_map_to_boolean() {
+    assert_eq!(mapped(&column("boolean")), ExasolType::Boolean);
+    assert_eq!(read(&column("boolean")), r#""c""#);
+
+    for length in [1, 8, 64] {
+        let bit = character_column("bit", Some(length));
+
+        assert_eq!(mapped(&bit), ExasolType::Boolean, "for bit({length})");
+        assert_eq!(
+            read(&bit),
+            r#"(position(B'1' IN "c") > 0)"#,
+            "for bit({length})"
+        );
+    }
+}
+
+/// `vs-adapter/postgresql-type-mapping`: PostgreSQL defines no direct
+/// conversion from `money` to `double precision`, so the read goes through
+/// `numeric`.
+#[test]
+fn money_maps_to_double_read_through_numeric() {
+    assert_eq!(mapped(&column("money")), ExasolType::Double);
+    assert_eq!(
+        read(&column("money")),
+        r#"CAST(CAST("c" AS NUMERIC) AS DOUBLE PRECISION)"#
+    );
+}
+
+/// `vs-adapter/postgresql-type-mapping`: a type Exasol has no counterpart for
+/// is `VARCHAR` read as PostgreSQL's text for the value, sized to what that
+/// text can hold: a bit string's length, 100 for a `time`, and the maximum
+/// for the rest.
+#[test]
+fn types_without_a_counterpart_map_to_varchar_read_as_text() {
     for data_type in [
-        "boolean",
-        "text",
-        "smallint",
-        "real",
-        "time without time zone",
-        "time with time zone",
-        "timestamp with time zone",
         "uuid",
         "json",
         "jsonb",
+        "xml",
         "bytea",
         "interval",
-        "money",
-        "ARRAY",
+        "inet",
+        "cidr",
+        "macaddr",
+        "point",
+        "tsvector",
+        "USER-DEFINED",
     ] {
-        let reason = unmapped(&column(data_type));
+        let column = column(data_type);
 
-        assert!(
-            reason.contains(data_type),
-            "`{data_type}`'s reason must name it: {reason}"
+        assert_eq!(
+            mapped(&column),
+            ExasolType::Varchar { size: 2_000_000 },
+            "for {data_type}"
+        );
+        assert_eq!(read(&column), r#"CAST("c" AS TEXT)"#, "for {data_type}");
+    }
+
+    for data_type in ["time without time zone", "time with time zone"] {
+        let column = column(data_type);
+
+        assert_eq!(mapped(&column), ExasolType::Varchar { size: 100 });
+        assert_eq!(read(&column), r#"CAST("c" AS TEXT)"#);
+    }
+
+    for (length, size) in [(Some(16), 16), (None, 2_000_000)] {
+        let bit_varying = character_column("bit varying", length);
+
+        assert_eq!(mapped(&bit_varying), ExasolType::Varchar { size });
+        assert_eq!(read(&bit_varying), r#"CAST("c" AS TEXT)"#);
+    }
+}
+
+/// `vs-adapter/postgresql-type-mapping`: the read expression is selected by the
+/// source type the column recorded and the type it declared, so a column of a
+/// type that reads as itself renders bare, a column without notes renders bare
+/// as a schema created before notes existed does, and a `character varying`
+/// declared `VARCHAR` is not wrapped in a conversion that would change nothing.
+#[test]
+fn column_read_sql_follows_the_source_type() {
+    let varchar = ExasolType::Varchar { size: 2_000_000 };
+    let double = ExasolType::Double;
+
+    for (source_type, declared, expected) in [
+        ("uuid", varchar, r#"CAST("c" AS TEXT)"#),
+        ("USER-DEFINED", varchar, r#"CAST("c" AS TEXT)"#),
+        ("numeric", varchar, r#"CAST("c" AS TEXT)"#),
+        ("character", varchar, r#"CAST("c" AS TEXT)"#),
+        ("character varying", varchar, r#""c""#),
+        ("text", varchar, r#""c""#),
+        (
+            "money",
+            double,
+            r#"CAST(CAST("c" AS NUMERIC) AS DOUBLE PRECISION)"#,
+        ),
+        (
+            "MONEY",
+            double,
+            r#"CAST(CAST("c" AS NUMERIC) AS DOUBLE PRECISION)"#,
+        ),
+        ("bit", ExasolType::Boolean, r#"(position(B'1' IN "c") > 0)"#),
+        ("boolean", ExasolType::Boolean, r#""c""#),
+        ("real", double, r#""c""#),
+        ("character", ExasolType::Char { size: 5 }, r#""c""#),
+    ] {
+        assert_eq!(
+            column_read_sql(Some(source_type), declared, r#""c""#),
+            expected,
+            "for {source_type} declared {declared:?}"
+        );
+    }
+    assert_eq!(column_read_sql(None, varchar, r#""c""#), r#""c""#);
+}
+
+/// `vs-adapter/postgresql-type-mapping`: a `timestamp with time zone` is
+/// `TIMESTAMP` of its own precision rather than a time-zone type, and reads
+/// bare, because the scan emits its UTC wall-clock value.
+#[test]
+fn timestamp_with_time_zone_maps_to_timestamp_of_its_precision() {
+    for precision in [0, 3, 6] {
+        let timestamptz = timestamp_column("timestamp with time zone", precision);
+
+        assert_eq!(mapped(&timestamptz), ExasolType::Timestamp { precision });
+        assert_eq!(read(&timestamptz), r#""c""#);
+    }
+}
+
+/// `vs-adapter/postgresql-type-mapping`: a timestamp whose catalog row reports
+/// no precision declares PostgreSQL's default of 6 fractional digits.
+#[test]
+fn a_timestamp_without_a_reported_precision_declares_postgresqls_default_of_six() {
+    for data_type in ["timestamp without time zone", "timestamp with time zone"] {
+        assert_eq!(
+            mapped(&column(data_type)),
+            ExasolType::Timestamp { precision: 6 },
+            "for {data_type}"
         );
     }
 }
 
-/// `character` is blank-padded: PostgreSQL returns the value padded to its
-/// declared length and compares two of them ignoring trailing spaces, which
-/// Exasol `VARCHAR` does neither of. Exasol `CHAR` would match both, but no
-/// column this release maps produces Exasol `CHAR`.
+/// `vs-adapter/postgresql-type-mapping`: an array is omitted, as the JDBC
+/// Virtual Schema leaves it out, and the reason names `ARRAY` as the
+/// catalog spelled it, which names no element type.
 #[test]
-fn character_is_unmapped_because_it_is_blank_padded() {
-    let reason = unmapped(&PostgresColumn {
-        character_length: Some(5),
-        ..column("character")
-    });
+fn array_columns_are_unmapped_naming_array() {
+    let reason = unmapped(&column("ARRAY"));
 
-    assert!(
-        reason.contains("character"),
-        "the reason must name the type it rejected: {reason}"
+    assert_eq!(
+        reason,
+        "PostgreSQL type ARRAY is not mapped, because the catalog names no element type and the \
+         Exasol PostgreSQL JDBC Virtual Schema leaves arrays out too"
     );
-    assert!(
-        reason.contains("pad"),
-        "the reason must name the blank padding as the cause: {reason}"
-    );
-}
-
-/// `boolean` is omitted despite Exasol having a `BOOLEAN` type: a mapped
-/// boolean column would widen the set of Exasol types a source column
-/// produces and bring a boolean operand into every predicate path.
-#[test]
-fn boolean_is_unmapped_despite_exasol_having_one() {
-    let reason = unmapped(&column("boolean"));
-
-    assert!(
-        reason.contains("boolean") && reason.contains("BOOLEAN"),
-        "the reason must name the source type and the Exasol type it is not mapped to: {reason}"
-    );
-}
-
-/// `timestamp with time zone` is omitted rather than mapped to Exasol
-/// `TIMESTAMP`: the two carry different instants for one wall-clock value.
-/// The internal spelling is refused for the same reason, so a catalog that
-/// reported it would not fall through to the unspecific reason.
-#[test]
-fn a_time_zone_aware_timestamp_is_unmapped_rather_than_mapped_to_timestamp() {
-    for spelling in ["timestamp with time zone", "timestamptz"] {
-        let reason = unmapped(&column(spelling));
-
-        assert!(
-            reason.contains(spelling),
-            "the reason must name the type it rejected: {reason}"
-        );
-        assert!(
-            reason.contains("instant"),
-            "the reason must name the differing instants as the cause: {reason}"
-        );
-    }
 }
 
 /// `vs-adapter/type-mapping`: whether a column may hold a null is the
@@ -326,6 +477,6 @@ fn a_data_type_is_matched_whatever_its_case() {
             character_length: Some(20),
             ..column("CHARACTER VARYING")
         }),
-        MappedType::Varchar { size: 20 }
+        ExasolType::Varchar { size: 20 }
     );
 }

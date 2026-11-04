@@ -1,4 +1,4 @@
-[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md)
+[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md) · [Type Mapping](type-mapping.md)
 
 ---
 
@@ -31,7 +31,7 @@ The adapter keeps no state between calls. The scan UDF is the only part that rea
 - `adbc-vs-rs` is read-only. `INSERT`, `UPDATE`, and `DELETE` are not supported on a virtual schema.
 - `adbc-vs-rs` does not cache. Every query runs against the source.
 - `adbc-vs-rs` supports Linux x86_64 and aarch64. The release has one library for each architecture, and the automatic install requests the driver package of the library's architecture. The aarch64 library is tested against Exasol Personal only, because no other aarch64 Exasol is available to the tests.
-- Columns and tables with a type that has no Exasol match are left out.
+- Columns and tables with a type that has no Exasol match are left out. See [Type Mapping](type-mapping.md) for the mapping of each database and its [known differences](type-mapping.md#known-differences).
 - `adbc-vs-rs` does not bundle ADBC drivers. The drivers come from the registry or from you.
 
 ### What runs at the source
@@ -64,11 +64,13 @@ To get the Exasol behavior, use one of two options:
 #### MySQL
 
 - The default collation `utf8mb4_0900_ai_ci` ignores case and accents. Use `utf8mb4_0900_bin` for the Exasol behavior. It needs MySQL 8.0.17 or later. MariaDB has no equal collation.
+- Every type maps except binary, blob, and spatial types. A `CHAR(n)` column maps to `CHAR(n)`, a `latin1` column maps like a `utf8mb4` column, and a `TIMESTAMP` column keeps its precision. See [Type Mapping](type-mapping.md#mysql).
 - Driver version range: `>=0.6.0, <0.7.0`.
 
 #### PostgreSQL
 
 - One virtual schema shows one database and its `public` schema. Other schemas are not visible.
+- Every type maps except arrays. A type with no Exasol counterpart, such as `uuid` or `json`, maps to `VARCHAR(2000000)` and is read as text. A `timestamp` column keeps its precision. See [Type Mapping](type-mapping.md#postgresql).
 - Use the collation `"C"` for the Exasol behavior.
 - Before version 18, a delegated `LIKE` on a column with a nondeterministic collation fails at the source.
 - Driver version range: `>=1.12.0, <2.0.0`.
@@ -76,5 +78,6 @@ To get the Exasol behavior, use one of two options:
 #### Trino
 
 - The address must have a catalog and a schema.
+- Seven types map, and every `timestamp(p)` column maps to `TIMESTAMP(3)`. See [Type Mapping](type-mapping.md#trino).
 - A backslash in a `LIKE` pattern is an ordinary character, unless the query has an `ESCAPE` clause. Exasol then runs that predicate.
 - Driver version range: `>=0.5.3, <0.6.0`.

@@ -8,9 +8,11 @@
 use super::*;
 use crate::exa_type::{self, ExasolType};
 use crate::mysql_source;
+use crate::mysql_type_mapping;
 use crate::postgres_source;
+use crate::postgres_type_mapping;
 use crate::trino_source;
-use crate::type_mapping::MappedType;
+use crate::trino_type_mapping;
 
 /// One table assembled out of catalog rows in the shape the named source's own
 /// catalog reports them: a column that maps, and a column of that source's own
@@ -51,7 +53,7 @@ fn each_source_maps_its_own_catalog_row() {
         assert!(
             matches!(
                 table.columns[0].mapped.exasol_type,
-                MappedType::Decimal { .. }
+                ExasolType::Decimal { .. }
             ),
             "`{}` must map the column itself rather than hand its catalog row on",
             driver.as_str()
@@ -210,64 +212,110 @@ fn a_namespace_disagreeing_with_its_drivers_declared_depth_is_refused_naming_bot
     }
 }
 
-/// Every type in the closed set, one representative each.
-const EVERY_MAPPED_TYPE: &[MappedType] = &[
-    MappedType::Decimal {
-        precision: 36,
-        scale: 6,
-    },
-    MappedType::Varchar { size: 2_000_000 },
-    MappedType::Date,
-    MappedType::Timestamp,
-    MappedType::Double,
-];
-
-/// Where `mapped` sits in [`EVERY_MAPPED_TYPE`].
+/// The `dataType` spelling of each of the seven types a mapped column may
+/// declare.
 ///
-/// Matched with no wildcard, so a type added to [`MappedType`] fails to
-/// compile here rather than being quietly left untested.
-fn position_in_the_closed_set(mapped: MappedType) -> usize {
-    match mapped {
-        MappedType::Decimal { .. } => 0,
-        MappedType::Varchar { .. } => 1,
-        MappedType::Date => 2,
-        MappedType::Timestamp => 3,
-        MappedType::Double => 4,
+/// Matched with no wildcard, so a variant added to [`ExasolType`] fails to
+/// compile here rather than silently widening the set the pushdown closure
+/// argument rests on.
+fn closed_set_name(declared: ExasolType) -> &'static str {
+    match declared {
+        ExasolType::Decimal { .. } => "DECIMAL",
+        ExasolType::Varchar { .. } => "VARCHAR",
+        ExasolType::Char { .. } => "CHAR",
+        ExasolType::Date => "DATE",
+        ExasolType::Timestamp { .. } => "TIMESTAMP",
+        ExasolType::Double => "DOUBLE",
+        ExasolType::Boolean => "BOOLEAN",
     }
 }
 
-/// No source maps a column to an Exasol type outside the set a virtual column
-/// can declare.
-///
-/// `vs-adapter/pushdown-dialect` argues about a closed set of declared types:
-/// every rendering path, every `EMITS` clause, and every scan coercion is
-/// total over it. A source that could produce a type outside it would leave
-/// that argument resting on nothing.
-#[test]
-fn every_mapped_type_is_in_the_declarable_set() {
-    let covered: Vec<usize> = EVERY_MAPPED_TYPE
-        .iter()
-        .map(|mapped| position_in_the_closed_set(*mapped))
-        .collect();
-    for position in 0..EVERY_MAPPED_TYPE.len() {
-        assert!(
-            covered.contains(&position),
-            "every type in the closed set needs a representative here: {covered:?}"
-        );
+/// Every column the named source's own mapping tests cover, as the catalog
+/// spelled its type, mapped through that source's mapping.
+fn every_covered_mapping(driver: Driver) -> Vec<(String, MappedColumn)> {
+    fn mapped<C>(
+        columns: Vec<C>,
+        spelling: impl Fn(&C) -> &str,
+        map: impl Fn(&C) -> Result<MappedColumn, String>,
+    ) -> Vec<(String, MappedColumn)> {
+        columns
+            .iter()
+            .map(|column| {
+                let mapped = map(column).unwrap_or_else(|reason| {
+                    panic!("covered column `{}` must map: {reason}", spelling(column))
+                });
+                (spelling(column).to_string(), mapped)
+            })
+            .collect()
     }
+    match driver {
+        Driver::MySql => mapped(
+            mysql_type_mapping::tests::one_column_of_every_mapped_type(),
+            |column| &column.data_type,
+            mysql_type_mapping::map_column,
+        ),
+        Driver::Postgres => mapped(
+            postgres_type_mapping::tests::one_column_of_every_mapped_type(),
+            |column| &column.data_type,
+            postgres_type_mapping::map_column,
+        ),
+        Driver::Trino => mapped(
+            trino_type_mapping::tests::one_column_of_every_mapped_type(),
+            |column| &column.data_type,
+            trino_type_mapping::map_column,
+        ),
+    }
+}
 
-    for mapped in EVERY_MAPPED_TYPE {
-        let declarable = ExasolType::from(*mapped);
+/// `vs-adapter/type-mapping`, scenario "A mapped column records its source
+/// type in its adapterNotes": the recorded value is the catalog's own
+/// spelling, which each technology's read expression is keyed on.
+#[test]
+fn every_mapped_column_records_the_catalog_spelling_of_its_type() {
+    for driver in Driver::ALL {
+        for (spelling, mapped) in every_covered_mapping(*driver) {
+            assert_eq!(
+                mapped.source_type,
+                spelling,
+                "`{}` must record the type as its catalog spelled it",
+                driver.as_str()
+            );
+        }
+    }
+}
 
+/// `vs-adapter/type-mapping`, scenario "A mapped column declares only an
+/// Exasol type this release produces": no source maps a column to an Exasol
+/// type outside the seven an `EMITS` column may declare.
+///
+/// The round trip is the membership test, because `from_json` reads exactly
+/// that set and refuses `TIMESTAMP WITH LOCAL TIME ZONE`, `INTERVAL`,
+/// `GEOMETRY`, and `HASHTYPE`.
+#[test]
+fn every_mapped_column_declares_a_type_of_the_closed_set() {
+    for driver in Driver::ALL {
+        let covered = every_covered_mapping(*driver);
         assert!(
-            !exa_type::to_ddl(declarable).is_empty(),
-            "{mapped:?} must render as an EMITS declaration"
+            !covered.is_empty(),
+            "`{}` must cover at least one mapped type",
+            driver.as_str()
         );
-        assert_eq!(
-            exa_type::from_json(&exa_type::to_json(declarable))
-                .unwrap_or_else(|error| panic!("{mapped:?} must round-trip: {error}")),
-            declarable,
-            "{mapped:?} must survive the encoding schemaMetadata and the scan specification share"
-        );
+
+        for exasol_type in covered.into_iter().map(|(_, mapped)| mapped.exasol_type) {
+            let json = exa_type::to_json(exasol_type);
+            assert_eq!(
+                json["type"],
+                closed_set_name(exasol_type),
+                "`{}` declares {exasol_type:?} as {json}",
+                driver.as_str()
+            );
+            assert_eq!(
+                exa_type::from_json(&json),
+                Ok(exasol_type),
+                "`{}` declares {exasol_type:?}, which must read back from {json} as one of the \
+                 seven declarable types",
+                driver.as_str()
+            );
+        }
     }
 }

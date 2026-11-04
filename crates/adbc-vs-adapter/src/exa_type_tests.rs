@@ -25,10 +25,95 @@ fn char_renders_with_utf8_charset() {
 }
 
 #[test]
-fn date_and_timestamp_and_double_render_with_no_arguments() {
+fn date_and_double_render_with_no_arguments() {
     assert_eq!(to_ddl(ExasolType::Date), "DATE");
-    assert_eq!(to_ddl(ExasolType::Timestamp), "TIMESTAMP");
     assert_eq!(to_ddl(ExasolType::Double), "DOUBLE");
+}
+
+#[test]
+fn timestamp_precision_round_trips_through_ddl_and_json() {
+    for precision in [0, 3, 6, 9] {
+        let timestamp = ExasolType::Timestamp { precision };
+
+        assert_eq!(to_ddl(timestamp), format!("TIMESTAMP({precision})"));
+        let json = to_json(timestamp);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "TIMESTAMP",
+                "withLocalTimeZone": false,
+                "fractionalSecondsPrecision": precision
+            }),
+            "a TIMESTAMP declares its precision and that it carries no local time zone"
+        );
+        assert_eq!(
+            from_json(&json),
+            Ok(timestamp),
+            "precision {precision} must survive the round trip through {json}"
+        );
+    }
+}
+
+#[test]
+fn timestamp_without_precision_reads_as_three() {
+    let parsed = from_json(&serde_json::json!({"type": "TIMESTAMP"}))
+        .expect("a TIMESTAMP without fractionalSecondsPrecision parses");
+
+    assert_eq!(
+        parsed,
+        ExasolType::Timestamp { precision: 3 },
+        "a dataType without fractionalSecondsPrecision, as a virtual schema declared with a \
+         bare TIMESTAMP echoes it, holds Exasol's default precision of 3"
+    );
+    assert_eq!(to_ddl(parsed), "TIMESTAMP(3)");
+}
+
+#[test]
+fn timestamp_with_a_non_numeric_precision_fails_naming_the_field() {
+    for precision in [
+        serde_json::json!("6"),
+        serde_json::json!(-1),
+        serde_json::Value::Null,
+    ] {
+        let data_type =
+            serde_json::json!({"type": "TIMESTAMP", "fractionalSecondsPrecision": precision});
+
+        let error = from_json(&data_type).expect_err(&format!(
+            "{data_type} must fail rather than read as the default precision"
+        ));
+
+        assert!(
+            error.contains("fractionalSecondsPrecision"),
+            "the error must name the unreadable field: {error}"
+        );
+    }
+}
+
+#[test]
+fn char_boolean_and_precise_timestamp_entries_read() {
+    let cases = [
+        (
+            serde_json::json!({"type": "CHAR", "size": 8, "characterSet": "UTF8"}),
+            ExasolType::Char { size: 8 },
+        ),
+        (serde_json::json!({"type": "BOOLEAN"}), ExasolType::Boolean),
+        (
+            serde_json::json!({
+                "type": "TIMESTAMP",
+                "withLocalTimeZone": false,
+                "fractionalSecondsPrecision": 6
+            }),
+            ExasolType::Timestamp { precision: 6 },
+        ),
+    ];
+
+    for (data_type, expected) in cases {
+        assert_eq!(
+            from_json(&data_type),
+            Ok(expected),
+            "{data_type} is a virtual column's dataType and must read back as {expected:?}"
+        );
+    }
 }
 
 #[test]
@@ -59,7 +144,7 @@ fn every_declarable_type_round_trips_through_json() {
         ExasolType::Varchar { size: 100 },
         ExasolType::Char { size: 8 },
         ExasolType::Date,
-        ExasolType::Timestamp,
+        ExasolType::Timestamp { precision: 6 },
         ExasolType::Double,
         ExasolType::Boolean,
     ];
@@ -80,15 +165,14 @@ fn timestamp_precision_and_absent_character_set_are_read() {
 
     assert_eq!(
         parsed,
-        ExasolType::Timestamp,
+        ExasolType::Timestamp { precision: 3 },
         "selectListDataTypes sends fractionalSecondsPrecision on a TIMESTAMP entry, and the \
-         declarable type carries no precision to hold it"
+         declarable type holds it"
     );
     assert_eq!(
         to_ddl(parsed),
-        "TIMESTAMP",
-        "the fractional precision is never rendered back: Exasol's own default is 3, which is \
-         the only value a virtual table this adapter declared can echo"
+        "TIMESTAMP(3)",
+        "the fractional precision is rendered back into the EMITS clause"
     );
 
     let sized_varchar = serde_json::json!({"type": "VARCHAR", "size": 100});
@@ -122,6 +206,35 @@ fn every_declarable_type_name_parses() {
             panic!("declarable type name `{name}` failed to parse: {error}")
         });
     }
+}
+
+#[test]
+fn local_time_zone_timestamp_fails_rather_than_reading_as_timestamp() {
+    let data_type = serde_json::json!({
+        "type": "TIMESTAMP",
+        "withLocalTimeZone": true,
+        "fractionalSecondsPrecision": 3
+    });
+
+    let error = from_json(&data_type).expect_err(
+        "a TIMESTAMP WITH LOCAL TIME ZONE compares in the Exasol session zone, so reading it as \
+         TIMESTAMP would substitute a type the adapter can render",
+    );
+
+    assert!(
+        error.contains("TIMESTAMP WITH LOCAL TIME ZONE"),
+        "the error must name the type it received: {error}"
+    );
+}
+
+#[test]
+fn timestamp_declaring_no_local_time_zone_reads_as_timestamp() {
+    let data_type = serde_json::json!({"type": "TIMESTAMP", "withLocalTimeZone": false});
+
+    assert_eq!(
+        from_json(&data_type),
+        Ok(ExasolType::Timestamp { precision: 3 })
+    );
 }
 
 #[test]
