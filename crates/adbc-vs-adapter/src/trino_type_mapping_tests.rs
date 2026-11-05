@@ -1,4 +1,5 @@
 use super::*;
+use crate::exa_type;
 
 fn column(data_type: &str) -> TrinoColumn {
     TrinoColumn {
@@ -7,7 +8,24 @@ fn column(data_type: &str) -> TrinoColumn {
     }
 }
 
-fn mapped(data_type: &str) -> MappedType {
+/// One column of each Trino type this mapping maps, for the rules every
+/// source's mapping obeys.
+pub(crate) fn one_column_of_every_mapped_type() -> Vec<TrinoColumn> {
+    [
+        "integer",
+        "bigint",
+        "decimal(12,4)",
+        "varchar(100)",
+        "date",
+        "timestamp(6)",
+        "double",
+    ]
+    .into_iter()
+    .map(column)
+    .collect()
+}
+
+fn mapped(data_type: &str) -> ExasolType {
     map_column(&column(data_type))
         .unwrap_or_else(|reason| panic!("`{data_type}` must map: {reason}"))
         .exasol_type
@@ -44,7 +62,7 @@ fn an_unrecognized_data_type_is_named_in_full_rather_than_truncated_to_its_bare_
 fn decimal_and_map_disagree_on_whether_the_comma_carries_a_space() {
     assert_eq!(
         mapped("decimal(30,2)"),
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 30,
             scale: 2
         }
@@ -60,14 +78,14 @@ fn decimal_and_map_disagree_on_whether_the_comma_carries_a_space() {
 fn integer_types_map_to_decimal_with_the_matching_digit_count() {
     assert_eq!(
         mapped("integer"),
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 10,
             scale: 0
         }
     );
     assert_eq!(
         mapped("bigint"),
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 19,
             scale: 0
         }
@@ -80,7 +98,7 @@ fn integer_types_map_to_decimal_with_the_matching_digit_count() {
 fn decimal_preserves_the_source_precision_and_scale() {
     assert_eq!(
         mapped("decimal(12,4)"),
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 12,
             scale: 4
         }
@@ -98,8 +116,8 @@ fn decimal_preserves_the_source_precision_and_scale() {
 /// length and uses UTF8".
 #[test]
 fn varchar_preserves_the_declared_length() {
-    assert_eq!(mapped("varchar(100)"), MappedType::Varchar { size: 100 });
-    assert_eq!(mapped("varchar(0)"), MappedType::Varchar { size: 1 });
+    assert_eq!(mapped("varchar(100)"), ExasolType::Varchar { size: 100 });
+    assert_eq!(mapped("varchar(0)"), ExasolType::Varchar { size: 1 });
 
     let unbounded = unmapped("varchar");
     assert!(
@@ -131,16 +149,23 @@ fn char_is_unmapped_naming_the_blank_padding() {
 /// types map to their Exasol counterparts".
 #[test]
 fn temporal_and_floating_point_types_map_to_their_exasol_counterparts() {
-    assert_eq!(mapped("date"), MappedType::Date);
-    assert_eq!(mapped("timestamp(6)"), MappedType::Timestamp);
-    for precision in ["timestamp(0)", "timestamp(3)", "timestamp(9)"] {
+    assert_eq!(mapped("date"), ExasolType::Date);
+    for data_type in [
+        "timestamp(0)",
+        "timestamp(3)",
+        "timestamp(6)",
+        "timestamp(12)",
+    ] {
+        let declared = mapped(data_type);
         assert_eq!(
-            mapped(precision),
-            MappedType::Timestamp,
-            "every timestamp precision Trino admits must map to Exasol TIMESTAMP"
+            declared,
+            ExasolType::Timestamp { precision: 3 },
+            "`{data_type}` must declare TIMESTAMP(3), what a Trino virtual table declared before \
+             this release, because this release carries no Trino fractional-second precision"
         );
+        assert_eq!(exa_type::to_ddl(declared), "TIMESTAMP(3)");
     }
-    assert_eq!(mapped("double"), MappedType::Double);
+    assert_eq!(mapped("double"), ExasolType::Double);
 }
 
 /// `vs-adapter/trino-type-mapping`, scenario "Non-core types are unmapped" —
@@ -171,19 +196,19 @@ fn non_core_types_are_unmapped_naming_the_rejected_type() {
     }
 }
 
-/// `boolean` is unmapped despite Exasol having a `BOOLEAN` type, because a
-/// mapped column would widen the set of Exasol types a source column
-/// produces.
+/// `vs-adapter/trino-type-mapping`, scenario "Non-core types are unmapped":
+/// `boolean` is outside this release's Trino scope, although the PostgreSQL
+/// and MySQL mappings produce Exasol `BOOLEAN`.
 #[test]
-fn boolean_is_unmapped_despite_exasol_having_a_boolean_type() {
+fn boolean_is_unmapped_as_outside_the_trino_scope() {
     let reason = unmapped("boolean");
     assert!(
         reason.contains("boolean"),
         "the reason must name the rejected type: {reason}"
     );
     assert!(
-        reason.to_ascii_lowercase().contains("widen"),
-        "the reason must explain that a mapped BOOLEAN would widen the declarable set: {reason}"
+        reason.contains("Trino scope"),
+        "the reason must name this release's Trino scope as the cause: {reason}"
     );
 }
 

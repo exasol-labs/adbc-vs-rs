@@ -54,13 +54,15 @@ pub fn run_scan(ctx: &mut dyn UdfContext, scan_spec_json: &str) -> Result<(), Ud
 /// `adbc-vs-scan`'s coercion owns. `Varchar` and `Char` both collapse to
 /// [`DeclaredType::Text`]: coercion only needs to know a column is text, not
 /// its declared length — Exasol enforces the length itself when it accepts
-/// the row.
+/// the row. A `Timestamp` of every precision collapses to
+/// [`DeclaredType::Timestamp`], because coercion casts every timestamp to one
+/// microsecond unit.
 fn declared_column(column: &ScanColumn) -> DeclaredColumn {
     let declared_type = match column.exasol_type {
         ExasolType::Decimal { precision, scale } => DeclaredType::Decimal { precision, scale },
         ExasolType::Varchar { .. } | ExasolType::Char { .. } => DeclaredType::Text,
         ExasolType::Date => DeclaredType::Date,
-        ExasolType::Timestamp => DeclaredType::Timestamp,
+        ExasolType::Timestamp { .. } => DeclaredType::Timestamp,
         ExasolType::Double => DeclaredType::Double,
         ExasolType::Boolean => DeclaredType::Boolean,
     };

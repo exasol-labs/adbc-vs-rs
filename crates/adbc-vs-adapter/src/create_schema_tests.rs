@@ -4,8 +4,9 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
+use crate::adapter_notes::ColumnNotes;
+use crate::exa_type::ExasolType;
 use crate::metadata::{DiscoveredColumn, DiscoveredTable, MetadataError};
-use crate::type_mapping::MappedType;
 
 /// A version no constant in this crate states, so a note reporting it can only
 /// have got it from the resolution that selected it.
@@ -13,17 +14,25 @@ const RESOLVED_VERSION: &str = "0.6.1";
 
 /// A table of already-mapped columns, in the shape a source hands back.
 fn table(name: &str, columns: &[&str]) -> DiscoveredTable {
+    let columns: Vec<(&str, &str)> = columns.iter().map(|column| (*column, "int")).collect();
+    table_of_source_types(name, &columns)
+}
+
+/// A table of already-mapped columns, each named beside the source type its
+/// catalog spelled.
+fn table_of_source_types(name: &str, columns: &[(&str, &str)]) -> DiscoveredTable {
     DiscoveredTable {
         name: name.to_string(),
         columns: columns
             .iter()
-            .map(|column| DiscoveredColumn {
+            .map(|(column, source_type)| DiscoveredColumn {
                 name: (*column).to_string(),
                 mapped: MappedColumn {
-                    exasol_type: MappedType::Decimal {
+                    exasol_type: ExasolType::Decimal {
                         precision: 10,
                         scale: 0,
                     },
+                    source_type: (*source_type).to_string(),
                     is_nullable: true,
                 },
             })
@@ -265,6 +274,34 @@ fn a_mapped_column_carries_its_name_type_and_nullability() {
     assert_eq!(column["name"], "id");
     assert_eq!(column["isNullable"], true);
     assert_eq!(column["dataType"]["type"], "DECIMAL");
+}
+
+/// `vs-adapter/type-mapping`, scenario "A mapped column records its source
+/// type in its adapterNotes": the note is the column's own stringified JSON
+/// object, holding the catalog's spelling and nothing else, so no credential.
+#[test]
+fn mapped_columns_carry_their_source_type_in_adapter_notes() {
+    let (table_values, _) = exposed_tables(vec![table_of_source_types(
+        "orders",
+        &[("uid", "uuid"), ("started", "time")],
+    )]);
+
+    for (index, source_type) in ["uuid", "time"].into_iter().enumerate() {
+        let column = &table_values[0]["columns"][index];
+        let notes = column["adapterNotes"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a column's adapterNotes is a JSON string: {column}"));
+        assert_eq!(
+            serde_json::from_str::<Value>(notes).expect("the column notes are JSON"),
+            json!({"sourceType": source_type}),
+            "the column notes must hold the catalog's spelling of the source type alone"
+        );
+        assert_eq!(
+            ColumnNotes::parse(notes).map(|parsed| parsed.source_type),
+            Ok(source_type.to_string()),
+            "the notes a pushdown reads back must yield the recorded source type"
+        );
+    }
 }
 
 /// The source decided which column did not map and why; what this asserts is

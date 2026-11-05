@@ -1,4 +1,4 @@
-[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md)
+[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md) · [Type Mapping](type-mapping.md)
 
 ---
 
@@ -26,7 +26,7 @@ If you change a property later, use `ALTER VIRTUAL SCHEMA ... SET`. To read the 
 
 Exasol keeps the case of the source names. Put the names in double quotes in your query, for example `MYSQLVS."customers"` for a schema named `MYSQLVS`.
 
-`adbc-vs-rs` leaves out a column that has no matching Exasol type. It leaves out a table that has no usable column. It records each omission in the `adapterNotes` of the schema.
+`adbc-vs-rs` leaves out a column that has no matching Exasol type. It leaves out a table that has no usable column. It records each omission in the `adapterNotes` of the schema. [Type Mapping](type-mapping.md) lists the Exasol type of each source type and the types that are left out.
 
 ## Errors
 

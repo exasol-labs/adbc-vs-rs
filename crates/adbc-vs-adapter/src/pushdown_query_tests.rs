@@ -63,6 +63,7 @@ fn column(name: &str) -> Expression {
     Expression::Column(ColumnRef {
         name: name.to_string(),
         declared_type,
+        source_type: None,
         table_name: None,
         table_alias: None,
     })
@@ -363,6 +364,143 @@ fn an_involved_column_of_an_undeclarable_exasol_type_is_reported() {
     );
 }
 
+/// A request over `orders` whose `uid` column carries `uid_notes` as its
+/// `adapterNotes` and whose `id` column carries none, as a column declared
+/// before this release does.
+fn request_with_column_notes(uid_notes: Value) -> Value {
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": {"type": "select", "from": {"type": "table", "name": "orders"}},
+        "involvedTables": [{
+            "name": "orders",
+            "columns": [
+                {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+                {
+                    "name": "uid",
+                    "dataType": {"type": "VARCHAR", "size": 2_000_000, "characterSet": "UTF8"},
+                    "adapterNotes": uid_notes,
+                },
+            ],
+        }],
+    })
+}
+
+fn uuid_notes() -> Value {
+    json!(r#"{"sourceType":"uuid"}"#)
+}
+
+/// `vs-adapter/type-mapping`, scenario "A mapped column records its source
+/// type in its adapterNotes": every position a column reference reaches reads
+/// the note, so a dialect can render one read expression wherever the column
+/// appears.
+#[test]
+fn column_reference_carries_the_recorded_source_type() {
+    let mut request = request_with_column_notes(uuid_notes());
+    request["pushdownRequest"]["selectList"] = json!([
+        {"type": "column", "name": "uid"},
+        {"type": "function_aggregate", "name": "MAX", "arguments": [{"type": "column", "name": "uid"}]},
+    ]);
+    request["pushdownRequest"]["selectListDataTypes"] = json!([
+        {"type": "VARCHAR", "size": 2_000_000},
+        {"type": "VARCHAR", "size": 2_000_000},
+    ]);
+    request["pushdownRequest"]["filter"] = json!({
+        "type": "predicate_equal",
+        "left": {"type": "column", "name": "uid"},
+        "right": {"type": "literal_string", "value": "a"},
+    });
+    request["pushdownRequest"]["aggregationType"] = json!("group_by");
+    request["pushdownRequest"]["groupBy"] = json!([{"type": "column", "name": "uid"}]);
+
+    let query = parse(&request, &namespace()).expect("parse must succeed");
+
+    let Expression::Column(projected) = &query.select_list[0].expression else {
+        panic!("the first entry is a column: {query:?}");
+    };
+    let Expression::Aggregate(AggregateCall {
+        argument: Some(argument),
+        ..
+    }) = &query.select_list[1].expression
+    else {
+        panic!("the second entry is an aggregate over a column: {query:?}");
+    };
+    let Expression::Column(aggregated) = argument.as_ref() else {
+        panic!("the aggregate's argument is a column: {query:?}");
+    };
+    let Some(Predicate::Equal(Comparison {
+        left: Expression::Column(filtered),
+        ..
+    })) = &query.filter
+    else {
+        panic!("the filter compares the column: {query:?}");
+    };
+    let Some(Aggregation::GroupBy(grouped)) = &query.aggregation else {
+        panic!("the query groups by the column: {query:?}");
+    };
+
+    for reference in [projected, aggregated, filtered, &grouped[0]] {
+        assert_eq!(
+            reference.source_type.as_deref(),
+            Some("uuid"),
+            "every reference to `uid` must carry the source type its notes recorded: {reference:?}"
+        );
+    }
+}
+
+#[test]
+fn projected_columns_without_a_select_list_carry_their_source_type() {
+    let query =
+        parse(&request_with_column_notes(uuid_notes()), &namespace()).expect("parse must succeed");
+
+    let source_types: Vec<Option<&str>> = query
+        .select_list
+        .iter()
+        .map(|item| match &item.expression {
+            Expression::Column(reference) => reference.source_type.as_deref(),
+            other => panic!("a request without a selectList projects columns: {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        source_types,
+        vec![None, Some("uuid")],
+        "the fallback projection must carry each involved column's own note"
+    );
+}
+
+/// `vs-adapter/type-mapping`: a column of a virtual schema created before this
+/// release carries no `adapterNotes`, and renders as the bare quoted column.
+#[test]
+fn column_without_adapter_notes_has_no_source_type() {
+    let mut request = request_with_column_notes(uuid_notes());
+    request["pushdownRequest"]["selectList"] = json!([{"type": "column", "name": "id"}]);
+
+    let query = parse(&request, &namespace()).expect("parse must succeed");
+
+    let Expression::Column(reference) = &query.select_list[0].expression else {
+        panic!("the entry is a column: {query:?}");
+    };
+    assert_eq!(reference.source_type, None);
+}
+
+#[test]
+fn malformed_column_note_fails_naming_the_column() {
+    for notes in [
+        json!(""),
+        json!("not json"),
+        json!("{}"),
+        json!(r#"{"sourceType": 5}"#),
+        json!({"sourceType": "uuid"}),
+    ] {
+        let message = parse_failure(&request_with_column_notes(notes.clone()));
+
+        assert!(
+            message.contains("`uid`") && message.contains("adapterNotes"),
+            "the error for notes {notes} must name the column and the field: {message}"
+        );
+    }
+}
+
 fn request_with_filter(filter: Value) -> Value {
     let mut request = request(None);
     request["pushdownRequest"]["filter"] = filter;
@@ -374,6 +512,140 @@ fn filter_of(request: &Value, namespace: &SourceQualifier) -> Predicate {
         .expect("parse must succeed")
         .filter
         .expect("the request carries a filter")
+}
+
+/// A request over the probe table's measured shape, a `BOOLEAN` column `b`
+/// beside a `DECIMAL(12,4)` column `d`, filtered by `filter`.
+fn boolean_request(filter: Value) -> Value {
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": {
+            "type": "select",
+            "from": {"type": "table", "name": "t"},
+            "selectList": [{"type": "column", "name": "d"}],
+            "filter": filter,
+        },
+        "involvedTables": [{
+            "name": "t",
+            "columns": [
+                {"name": "b", "dataType": {"type": "BOOLEAN"}},
+                {"name": "d", "dataType": {"type": "DECIMAL", "precision": 12, "scale": 4}},
+            ],
+        }],
+    })
+}
+
+fn boolean_column_b() -> ColumnRef {
+    ColumnRef {
+        name: "b".to_string(),
+        declared_type: ExasolType::Boolean,
+        source_type: None,
+        table_name: None,
+        table_alias: None,
+    }
+}
+
+fn decimal_column_d() -> Expression {
+    Expression::Column(ColumnRef {
+        name: "d".to_string(),
+        declared_type: ExasolType::Decimal {
+            precision: 12,
+            scale: 4,
+        },
+        source_type: None,
+        table_name: None,
+        table_alias: None,
+    })
+}
+
+/// `5 < d`, as Exasol sends `d > 5`.
+fn d_above_five() -> Predicate {
+    Predicate::Less(Comparison {
+        left: Expression::Literal(Literal::ExactNumeric("5".to_string())),
+        right: decimal_column_d(),
+    })
+}
+
+/// `vs-adapter/pushdown-filter`, scenario "BOOLEAN column is a predicate on its
+/// own", in the shapes measured on Exasol 2025.1.11: `WHERE b` arrives as a
+/// bare `column` entry and `WHERE NOT b` as a `predicate_not` over one.
+#[test]
+fn boolean_column_is_a_predicate_in_every_position() {
+    let b = json!({"type": "column", "name": "b"});
+    let d_above_five_node = json!({
+        "type": "predicate_less",
+        "left": {"type": "literal_exactnumeric", "value": "5"},
+        "right": {"type": "column", "name": "d"},
+    });
+    let cases = [
+        (b.clone(), Predicate::BooleanColumn(boolean_column_b())),
+        (
+            json!({"type": "predicate_not", "expression": b}),
+            Predicate::Not(Box::new(Predicate::BooleanColumn(boolean_column_b()))),
+        ),
+        (
+            json!({"type": "predicate_and", "expressions": [b, d_above_five_node]}),
+            Predicate::And(vec![
+                Predicate::BooleanColumn(boolean_column_b()),
+                d_above_five(),
+            ]),
+        ),
+        (
+            json!({"type": "predicate_or", "expressions": [d_above_five_node, b]}),
+            Predicate::Or(vec![
+                d_above_five(),
+                Predicate::BooleanColumn(boolean_column_b()),
+            ]),
+        ),
+    ];
+
+    for (filter, expected) in cases {
+        assert_eq!(
+            filter_of(&boolean_request(filter.clone()), &namespace()),
+            expected,
+            "filter {filter} must read the BOOLEAN column as a predicate on its own"
+        );
+    }
+}
+
+#[test]
+fn non_boolean_column_in_predicate_position_fails_naming_its_type() {
+    let d = json!({"type": "column", "name": "d"});
+    for filter in [
+        d.clone(),
+        json!({"type": "predicate_not", "expression": d}),
+        json!({"type": "predicate_and", "expressions": [{"type": "column", "name": "b"}, d]}),
+    ] {
+        let message = parse_failure(&boolean_request(filter.clone()));
+
+        assert!(
+            message.contains("column") && message.contains("DECIMAL(12,4)"),
+            "the error for {filter} must name the entry type and the declared type: {message}"
+        );
+    }
+}
+
+/// Measured on Exasol 2025.1.11, `WHERE b = (d > 5)` arrives delegated as a
+/// `predicate_equal` whose right operand is a `predicate_less`.
+#[test]
+fn predicate_operand_of_a_comparison_is_read() {
+    let filter = json!({
+        "type": "predicate_equal",
+        "left": {"type": "column", "name": "b"},
+        "right": {
+            "type": "predicate_less",
+            "left": {"type": "literal_exactnumeric", "value": "5"},
+            "right": {"type": "column", "name": "d"},
+        },
+    });
+
+    assert_eq!(
+        filter_of(&boolean_request(filter), &namespace()),
+        Predicate::Equal(Comparison {
+            left: Expression::Column(boolean_column_b()),
+            right: Expression::Predicate(Box::new(d_above_five())),
+        })
+    );
 }
 
 #[test]
@@ -733,6 +1005,7 @@ fn aggregation_type_group_by_parses_its_columns_in_request_order() {
             ColumnRef {
                 name: "note".to_string(),
                 declared_type: ExasolType::Varchar { size: 100 },
+                source_type: None,
                 table_name: None,
                 table_alias: None,
             },
@@ -742,6 +1015,7 @@ fn aggregation_type_group_by_parses_its_columns_in_request_order() {
                     precision: 19,
                     scale: 0,
                 },
+                source_type: None,
                 table_name: None,
                 table_alias: None,
             },
@@ -1020,7 +1294,10 @@ fn a_predicate_select_list_entry_with_no_declared_type_fails() {
 fn every_exasol_type_the_adapter_maps_round_trips_into_a_declared_type() {
     let cases = [
         (json!({"type": "DATE"}), ExasolType::Date),
-        (json!({"type": "TIMESTAMP"}), ExasolType::Timestamp),
+        (
+            json!({"type": "TIMESTAMP"}),
+            ExasolType::Timestamp { precision: 3 },
+        ),
         (json!({"type": "DOUBLE"}), ExasolType::Double),
         (
             json!({"type": "CHAR", "size": 5, "characterSet": "UTF8"}),
@@ -1090,6 +1367,7 @@ fn decimal_ref(name: &str, table_name: &str, table_alias: Option<&str>) -> Colum
             precision: 19,
             scale: 0,
         },
+        source_type: None,
         table_name: Some(table_name.to_string()),
         table_alias: table_alias.map(str::to_string),
     }
@@ -1339,6 +1617,7 @@ fn a_table_name_matching_no_involved_table_falls_back_to_resolving_by_column_nam
             expression: Expression::Column(ColumnRef {
                 name: "name".to_string(),
                 declared_type: ExasolType::Varchar { size: 100 },
+                source_type: None,
                 table_name: Some("does_not_exist".to_string()),
                 table_alias: Some("x".to_string()),
             }),

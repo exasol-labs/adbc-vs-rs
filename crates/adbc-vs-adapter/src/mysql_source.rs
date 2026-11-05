@@ -17,7 +17,7 @@ use adbc_driver_manager::ManagedConnection;
 use crate::adapter_notes::SourceQualifier;
 use crate::metadata::{
     assemble_tables, batch_column, i64_cell, required_i64_cell, required_string_cell, run_query,
-    string_cell, CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
+    CatalogRow, DiscoveredTable, MetadataError, MetadataSource,
 };
 use crate::mysql_type_mapping::{self, MySqlColumn};
 
@@ -78,7 +78,7 @@ struct ColumnRow {
     data_type: String,
     column_type: String,
     character_maximum_length: Option<i64>,
-    character_set: Option<String>,
+    datetime_precision: Option<i64>,
     numeric_precision: Option<i64>,
     numeric_scale: Option<i64>,
     is_nullable: bool,
@@ -113,7 +113,7 @@ fn mysql_column(row: ColumnRow) -> MySqlColumn {
         character_length: row
             .character_maximum_length
             .and_then(|n| u32::try_from(n).ok()),
-        character_set: row.character_set,
+        datetime_precision: row.datetime_precision.and_then(|n| u32::try_from(n).ok()),
         numeric_precision: row.numeric_precision.and_then(|n| u32::try_from(n).ok()),
         numeric_scale: row.numeric_scale.and_then(|n| u32::try_from(n).ok()),
         is_nullable: row.is_nullable,
@@ -172,18 +172,28 @@ fn query_table_names(
     Ok(names)
 }
 
-fn query_columns(
-    connection: &mut ManagedConnection,
-    database: &str,
-) -> Result<Vec<ColumnRow>, MetadataError> {
-    let sql = format!(
+/// The statement reading every column of `database`.
+///
+/// `information_schema.columns` answers everything the mapping reads.
+///
+/// Visible to the crate's own tests: they assert that every field the mapping
+/// reads is selected, which is a claim about this statement.
+pub(crate) fn columns_query(database: &str) -> String {
+    format!(
         "SELECT TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, DATA_TYPE, COLUMN_TYPE, \
-         CHARACTER_MAXIMUM_LENGTH, CHARACTER_SET_NAME, NUMERIC_PRECISION, NUMERIC_SCALE, \
+         CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, DATETIME_PRECISION, \
          IS_NULLABLE \
          FROM information_schema.columns WHERE TABLE_SCHEMA = {} \
          ORDER BY TABLE_NAME, ORDINAL_POSITION",
         quote_string_literal(database)
-    );
+    )
+}
+
+fn query_columns(
+    connection: &mut ManagedConnection,
+    database: &str,
+) -> Result<Vec<ColumnRow>, MetadataError> {
+    let sql = columns_query(database);
 
     let mut rows = Vec::new();
     for batch in run_query(connection, &sql)? {
@@ -193,9 +203,9 @@ fn query_columns(
         let data_type = batch_column(&batch, "DATA_TYPE", &sql)?;
         let column_type = batch_column(&batch, "COLUMN_TYPE", &sql)?;
         let character_maximum_length = batch_column(&batch, "CHARACTER_MAXIMUM_LENGTH", &sql)?;
-        let character_set = batch_column(&batch, "CHARACTER_SET_NAME", &sql)?;
         let numeric_precision = batch_column(&batch, "NUMERIC_PRECISION", &sql)?;
         let numeric_scale = batch_column(&batch, "NUMERIC_SCALE", &sql)?;
+        let datetime_precision = batch_column(&batch, "DATETIME_PRECISION", &sql)?;
         let is_nullable = batch_column(&batch, "IS_NULLABLE", &sql)?;
 
         for row in 0..batch.num_rows() {
@@ -206,9 +216,9 @@ fn query_columns(
                 data_type: required_string_cell(data_type, row, "DATA_TYPE")?,
                 column_type: required_string_cell(column_type, row, "COLUMN_TYPE")?,
                 character_maximum_length: i64_cell(character_maximum_length, row)?,
-                character_set: string_cell(character_set, row)?,
                 numeric_precision: i64_cell(numeric_precision, row)?,
                 numeric_scale: i64_cell(numeric_scale, row)?,
+                datetime_precision: i64_cell(datetime_precision, row)?,
                 is_nullable: required_string_cell(is_nullable, row, "IS_NULLABLE")? == "YES",
             });
         }

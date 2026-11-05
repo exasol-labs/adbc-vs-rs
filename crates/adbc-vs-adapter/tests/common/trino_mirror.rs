@@ -24,8 +24,7 @@
 //! Only `items`'s mapped columns are mirrored here. `items` also carries
 //! `code`, `bio`, and `active`, which `docker/trino/init.sql` documents as
 //! unmapped — no delegated query can reach them, so no mirror column
-//! corresponds to them, the same reasoning `super::mirror` states for
-//! MySQL's latin1 `region` column. `all_unmapped` carries no mirror at all:
+//! corresponds to them. `all_unmapped` carries no mirror at all:
 //! it has no mapped column for a delegated query to reach in the first
 //! place. `refresh_target` and the `orders_view` view are likewise
 //! unmirrored: `refresh_target` is read for its declared column set before

@@ -26,6 +26,12 @@
 //! consumer names its own columns in its own quoting: the source's types,
 //! `latin1` column, and primary keys belong to [`super::mysql`], and the
 //! Exasol types the mirror declares belong to [`super::mirror`].
+//!
+//! A backslash is the one character the two engines' literals read
+//! differently: MySQL's default `sql_mode` reads it as an escape introducer
+//! and Exasol reads it as an ordinary character, which decision-log `[8]`
+//! measured. The rows below therefore render once per engine, so a value
+//! holding a backslash reaches each engine as the same characters.
 
 /// One `items` row, in the source table's column order.
 pub struct Item {
@@ -36,10 +42,8 @@ pub struct Item {
     pub quantity: Option<i64>,
     pub rank_key: i64,
     pub tie_break: i64,
-    /// `latin1` at the source, and therefore absent from the mirror:
-    /// metadata discovery unmaps a non-`utf8mb4` character column, so no
-    /// delegated query can reach this one and no mirror column corresponds
-    /// to it.
+    /// `latin1` at the source and `UTF8` in the mirror, so it holds only
+    /// characters `latin1` can hold.
     pub region: &'static str,
 }
 
@@ -52,6 +56,10 @@ pub struct Note {
 
 /// Every `items` row, seeded out of the order `ORDER BY rank_key, tie_break`
 /// returns so an ordering test cannot pass on storage order alone.
+///
+/// `region` repeats `North` with a trailing space and `South` in lower case, so
+/// a comparison of the `latin1` column under its own `PAD SPACE`, case-insensitive
+/// collation differs from one under `utf8mb4_0900_bin`.
 pub const ROWS: [Item; 8] = [
     Item {
         id: 1,
@@ -101,7 +109,7 @@ pub const ROWS: [Item; 8] = [
         quantity: Some(1),
         rank_key: 4,
         tie_break: 2,
-        region: "North",
+        region: "North ",
     },
     Item {
         id: 6,
@@ -111,7 +119,7 @@ pub const ROWS: [Item; 8] = [
         quantity: None,
         rank_key: 4,
         tie_break: 1,
-        region: "South",
+        region: "south",
     },
     Item {
         id: 7,
@@ -132,6 +140,35 @@ pub const ROWS: [Item; 8] = [
         rank_key: 2,
         tie_break: 1,
         region: "West",
+    },
+];
+
+/// The two rows only [`CODE_POINT_ITEMS`](super::mysql::CODE_POINT_ITEMS)
+/// holds, whose `batch` is a `LIKE` pattern's `%` and its look-alike: `5%x` is
+/// matched by the pattern `5\%x` when a backslash escapes the `%`, and `5\yx`
+/// is matched when the backslash is an ordinary character. They carry their own
+/// category, `Zeta`, which sorts between `Widget` and `widget` in code-point order,
+/// so the `MIN` and `MAX` over `category` are the same with or without them.
+pub const CODE_POINT_ONLY_ROWS: [Item; 2] = [
+    Item {
+        id: 9,
+        category: "Zeta",
+        code: "ITEM0009",
+        batch: "5%x",
+        quantity: Some(4),
+        rank_key: 5,
+        tie_break: 1,
+        region: "North",
+    },
+    Item {
+        id: 10,
+        category: "Zeta",
+        code: "ITEM0010",
+        batch: "5\\yx",
+        quantity: Some(5),
+        rank_key: 5,
+        tie_break: 2,
+        region: "South",
     },
 ];
 
@@ -173,32 +210,35 @@ pub const NOTES: [Note; 8] = [
     },
 ];
 
-/// The `VALUES` tuple list of every row in the source's column order:
+/// The `VALUES` tuple list of every `items` row as MySQL reads it, in the
+/// source's column order:
 /// `id, category, code, batch, quantity, rank_key, tie_break, region`.
 pub fn source_values() -> String {
-    tuple_list(ROWS.iter().map(|row| {
-        format!(
-            "{}, {}, {}, {}",
-            shared_fields(row),
-            row.rank_key,
-            row.tie_break,
-            text(row.region)
-        )
-    }))
+    tuple_list(ROWS.iter().map(|row| row_fields(row, mysql_text)))
 }
 
-/// The `VALUES` tuple list of every row in the mirror's column order, which
-/// is the source's without `region`:
-/// `id, category, code, batch, quantity, rank_key, tie_break`.
+/// The `VALUES` tuple list of every `items` row as Exasol reads it, in the
+/// order [`source_values`] renders them.
 pub fn mirror_values() -> String {
-    tuple_list(ROWS.iter().map(|row| {
-        format!(
-            "{}, {}, {}",
-            shared_fields(row),
-            row.rank_key,
-            row.tie_break
-        )
-    }))
+    tuple_list(ROWS.iter().map(|row| row_fields(row, exasol_text)))
+}
+
+/// [`source_values`] followed by the rows only the code-point table holds.
+pub fn code_point_source_values() -> String {
+    tuple_list(
+        ROWS.iter()
+            .chain(CODE_POINT_ONLY_ROWS.iter())
+            .map(|row| row_fields(row, mysql_text)),
+    )
+}
+
+/// [`mirror_values`] followed by the rows only the code-point table holds.
+pub fn code_point_mirror_values() -> String {
+    tuple_list(
+        ROWS.iter()
+            .chain(CODE_POINT_ONLY_ROWS.iter())
+            .map(|row| row_fields(row, exasol_text)),
+    )
 }
 
 /// The `VALUES` tuple list of every join-partner row, in the order
@@ -211,18 +251,18 @@ pub fn note_values() -> String {
     )
 }
 
-/// The fields every consumer renders identically, up to and including
-/// `quantity`. Keeping them in one place is what makes the mirror's tuple the
-/// source's tuple with a column removed rather than a second authoring of the
-/// same values.
-fn shared_fields(row: &Item) -> String {
+/// One row's fields, each text value rendered by `literal`.
+fn row_fields(row: &Item, literal: fn(&str) -> String) -> String {
     format!(
-        "{}, {}, {}, {}, {}",
+        "{}, {}, {}, {}, {}, {}, {}, {}",
         row.id,
-        text(row.category),
-        text(row.code),
-        text(row.batch),
-        number_or_null(row.quantity)
+        literal(row.category),
+        literal(row.code),
+        literal(row.batch),
+        number_or_null(row.quantity),
+        row.rank_key,
+        row.tie_break,
+        literal(row.region)
     )
 }
 
@@ -233,22 +273,29 @@ fn tuple_list(tuples: impl Iterator<Item = String>) -> String {
         .join(", ")
 }
 
-/// One value's SQL literal form, identical in both engines.
+/// One value's SQL literal form where both engines read it alike.
 ///
-/// A doubled quote is the one escape MySQL and Exasol read the same way. A
-/// backslash is not: MySQL's default `sql_mode` reads it as an escape
-/// introducer and Exasol reads it as an ordinary character, which decision-log
-/// `[8]` measured, so a value carrying one would leave the two fixtures
-/// holding different bytes. Rejecting it keeps that divergence from being
-/// seeded silently.
+/// A doubled quote is the one escape MySQL and Exasol read the same way, and a
+/// backslash is read differently, so a value carrying one is rejected here and
+/// rendered by [`mysql_text`] or [`exasol_text`] instead.
 fn text(value: &str) -> String {
     assert!(
         !value.contains('\\'),
         "fixture value {value:?} carries a backslash: MySQL's default sql_mode reads it as an \
-         escape introducer and Exasol reads it as a character, so the source and the mirror \
-         would hold different values"
+         escape introducer and Exasol reads it as a character, so render it per engine"
     );
+    exasol_text(value)
+}
+
+/// One value's literal as Exasol reads it: only the quote is special.
+fn exasol_text(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// One value's literal as MySQL reads it under its default `sql_mode`, where a
+/// backslash introduces an escape.
+fn mysql_text(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 /// A nullable number's SQL literal form.
@@ -283,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_values_renders_every_row_without_the_unmapped_region_column() {
+    fn mirror_values_renders_every_row_with_its_region_in_the_sources_order() {
         let values = mirror_values();
 
         assert_eq!(
@@ -292,13 +339,45 @@ mod tests {
             "every seeded row must be rendered: {values}"
         );
         assert!(
-            !values.contains("'North'") && !values.contains("'West'"),
-            "the mirror has no counterpart for the latin1 region column, which metadata \
-             discovery unmaps: {values}"
+            values.starts_with("(1, 'Widget', 'ITEM0001', 'ab ', 10, 3, 2, 'North')"),
+            "the mirror's tuple must follow the source's column order, region included, since \
+             a MySQL latin1 column maps and so has a mirror column: {values}"
+        );
+    }
+
+    #[test]
+    fn the_code_point_table_holds_the_two_like_rows_the_plain_table_lacks() {
+        for values in [code_point_source_values(), code_point_mirror_values()] {
+            assert_eq!(
+                values.matches("ITEM").count(),
+                ROWS.len() + CODE_POINT_ONLY_ROWS.len(),
+                "every row, including the two `LIKE` rows, must be rendered: {values}"
+            );
+            assert!(
+                values.contains("'5%x'"),
+                "the row a backslash-escaped `%` matches must be seeded: {values}"
+            );
+        }
+        assert_eq!(
+            source_values().matches("ITEM").count(),
+            ROWS.len(),
+            "the plain table must not gain the two `LIKE` rows: every other differential test \
+             counts its eight rows"
+        );
+    }
+
+    #[test]
+    fn a_backslash_reaches_each_engine_as_one_character() {
+        assert!(
+            code_point_source_values().contains("'5\\\\yx'"),
+            "MySQL reads a backslash as an escape introducer, so the literal doubles it: {}",
+            code_point_source_values()
         );
         assert!(
-            values.starts_with("(1, 'Widget', 'ITEM0001', 'ab ', 10, 3, 2)"),
-            "the tuple must follow the mirror's own column order: {values}"
+            code_point_mirror_values().contains("'5\\yx'")
+                && !code_point_mirror_values().contains("'5\\\\yx'"),
+            "Exasol reads a backslash as a character, so the literal keeps one: {}",
+            code_point_mirror_values()
         );
     }
 
@@ -369,7 +448,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "carries a backslash")]
-    fn a_backslash_in_a_value_is_rejected_rather_than_rendered() {
+    fn a_backslash_in_a_value_both_engines_must_read_alike_is_rejected() {
         text("a\\b");
     }
 }

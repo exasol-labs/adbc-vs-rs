@@ -1,7 +1,7 @@
 use arrow::array::{Int64Array, StringArray, UInt64Array};
 
 use super::*;
-use crate::type_mapping::MappedType;
+use crate::exa_type::ExasolType;
 
 /// A catalog row belonging to no technology: the four fields the assembler
 /// reads and nothing else, so the rules it enforces are asserted without any
@@ -37,7 +37,8 @@ impl CatalogRow for Row {
 fn map_only_dates(row: Row) -> Result<MappedColumn, String> {
     if row.source_type == "date" {
         return Ok(MappedColumn {
-            exasol_type: MappedType::Date,
+            exasol_type: ExasolType::Date,
+            source_type: row.source_type.to_string(),
             is_nullable: true,
         });
     }

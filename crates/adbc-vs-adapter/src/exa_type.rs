@@ -1,29 +1,24 @@
-//! The Exasol data type an `EMITS` column may declare, and the two encodings
-//! Exasol's Virtual Schema wire protocol carries it in: the DDL fragment
-//! `CREATE VIRTUAL SCHEMA` and the `EMITS` clause both need, and the JSON
-//! `dataType` object `schemaMetadata`, `involvedTables[].columns[].dataType`,
-//! and `selectListDataTypes` all use.
+//! The closed set of Exasol types a virtual column or an `EMITS` column may
+//! declare, and the two encodings Exasol's Virtual Schema wire protocol
+//! carries it in: the DDL fragment `CREATE VIRTUAL SCHEMA` and the `EMITS`
+//! clause both need, and the JSON `dataType` object `schemaMetadata`,
+//! `involvedTables[].columns[].dataType`, and `selectListDataTypes` all use.
 //!
-//! This is the declarable set, and it is deliberately wider in both
-//! directions than [`MappedType`](crate::type_mapping::MappedType), the set a
-//! MySQL column may map to. It adds `Boolean`, which Exasol declares for a
-//! predicate it delegated into the select list and which no MySQL column this
-//! adapter maps can be. It keeps `Char`, which no mapping produces since
-//! MySQL `CHAR` began mapping to Exasol `VARCHAR`, because a virtual schema
-//! release 0.1 created still declares Exasol `CHAR` in the
-//! `involvedTables[].columns[].dataType` every pushdown echoes back until an
-//! operator refreshes it.
-//!
-//! Nothing here touches MySQL. The widening from the mapped set lives with
-//! the mapping that produces it, and there is no conversion back: the two
-//! extra variants answer to no MySQL column.
+//! A mapped column and a select-list entry draw their declared type from this
+//! one set, so the parser, every dialect, and the scan share one vocabulary. A
+//! `TIMESTAMP` carries its fractional-second precision, because a declaration
+//! without one holds only Exasol's default of 3 digits.
 
 use serde_json::{json, Value};
+
+/// The fractional-second precision Exasol gives a `TIMESTAMP` declared without
+/// one.
+pub(crate) const DEFAULT_TIMESTAMP_PRECISION: u32 = 3;
 
 /// The `type` field spelling [`from_json`] accepts, in the order its `match`
 /// tries them. Declaring the error message from this list rather than
 /// spelling the count in prose keeps the message honest when a variant is
-/// added or removed, as `MappedType` just was.
+/// added or removed.
 const DECLARABLE_TYPE_NAMES: &[&str] = &[
     "DECIMAL",
     "VARCHAR",
@@ -42,7 +37,7 @@ pub enum ExasolType {
     Varchar { size: u32 },
     Char { size: u32 },
     Date,
-    Timestamp,
+    Timestamp { precision: u32 },
     Double,
     Boolean,
 }
@@ -55,7 +50,7 @@ pub fn to_ddl(exasol_type: ExasolType) -> String {
         ExasolType::Varchar { size } => format!("VARCHAR({size}) UTF8"),
         ExasolType::Char { size } => format!("CHAR({size}) UTF8"),
         ExasolType::Date => "DATE".to_string(),
-        ExasolType::Timestamp => "TIMESTAMP".to_string(),
+        ExasolType::Timestamp { precision } => format!("TIMESTAMP({precision})"),
         ExasolType::Double => "DOUBLE".to_string(),
         ExasolType::Boolean => "BOOLEAN".to_string(),
     }
@@ -73,7 +68,11 @@ pub fn to_json(exasol_type: ExasolType) -> Value {
         }
         ExasolType::Char { size } => json!({"type": "CHAR", "size": size, "characterSet": "UTF8"}),
         ExasolType::Date => json!({"type": "DATE"}),
-        ExasolType::Timestamp => json!({"type": "TIMESTAMP"}),
+        ExasolType::Timestamp { precision } => json!({
+            "type": "TIMESTAMP",
+            "withLocalTimeZone": false,
+            "fractionalSecondsPrecision": precision
+        }),
         ExasolType::Double => json!({"type": "DOUBLE"}),
         ExasolType::Boolean => json!({"type": "BOOLEAN"}),
     }
@@ -86,12 +85,12 @@ pub fn to_json(exasol_type: ExasolType) -> Value {
 /// the adapter never mapped.
 ///
 /// Those two sources spell the same type differently, and only the fields
-/// this function reads are load-bearing. A `TIMESTAMP` from
-/// `selectListDataTypes` also carries `fractionalSecondsPrecision`, which is
-/// read past: [`ExasolType`] holds no precision, so [`to_ddl`] renders a bare
-/// `TIMESTAMP` and Exasol's own default of 3 applies — the only precision a
-/// virtual table this adapter declared can echo back. A `VARCHAR` from the
-/// same source carries no `characterSet`, so it is not required.
+/// this function reads are load-bearing. A `TIMESTAMP` without
+/// `fractionalSecondsPrecision`, as a column declared as a bare `TIMESTAMP`
+/// echoes it, reads as Exasol's default precision of 3. A `TIMESTAMP` carrying
+/// `withLocalTimeZone: true` fails rather than reading as `TIMESTAMP`, because
+/// Exasol compares it in the session time zone. A `VARCHAR` from
+/// `selectListDataTypes` carries no `characterSet`, so it is not required.
 pub fn from_json(value: &Value) -> Result<ExasolType, String> {
     let type_name = value
         .get("type")
@@ -110,13 +109,32 @@ pub fn from_json(value: &Value) -> Result<ExasolType, String> {
             size: required_u32(value, "size")?,
         }),
         "DATE" => Ok(ExasolType::Date),
-        "TIMESTAMP" => Ok(ExasolType::Timestamp),
+        "TIMESTAMP" if has_local_time_zone(value) => Err(format!(
+            "dataType `TIMESTAMP WITH LOCAL TIME ZONE` ({value}) is not one of the Exasol types \
+             an EMITS column may declare: {}",
+            DECLARABLE_TYPE_NAMES.join(", ")
+        )),
+        "TIMESTAMP" => Ok(ExasolType::Timestamp {
+            precision: timestamp_precision(value)?,
+        }),
         "DOUBLE" => Ok(ExasolType::Double),
         "BOOLEAN" => Ok(ExasolType::Boolean),
         other => Err(format!(
             "dataType `{other}` is not one of the Exasol types an EMITS column may declare: {}",
             DECLARABLE_TYPE_NAMES.join(", ")
         )),
+    }
+}
+
+fn has_local_time_zone(value: &Value) -> bool {
+    value.get("withLocalTimeZone").and_then(Value::as_bool) == Some(true)
+}
+
+fn timestamp_precision(value: &Value) -> Result<u32, String> {
+    const FIELD: &str = "fractionalSecondsPrecision";
+    match value.get(FIELD) {
+        None => Ok(DEFAULT_TIMESTAMP_PRECISION),
+        Some(_) => required_u32(value, FIELD),
     }
 }
 

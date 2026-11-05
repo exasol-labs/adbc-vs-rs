@@ -38,9 +38,12 @@
 //! source or wraps the operand in an expression no dialect advertises, as
 //! `vs-adapter/postgresql-collation` states.
 //!
-//! A grouping key and its select-list occurrence render as the same bare
-//! expression, so PostgreSQL's full-group-by rule is satisfied with no
-//! coordination between the `GROUP BY` clause and the select list.
+//! Every column reference renders through the read expression PostgreSQL's
+//! type mapping names for its recorded source type, in every position. A
+//! grouping key and its select-list occurrence therefore render as the same
+//! expression, and PostgreSQL accepts a select-list expression over a grouped
+//! one, so its full-group-by rule is satisfied with no coordination between
+//! the `GROUP BY` clause and the select list.
 //!
 //! A join adds the one decision no column reference can answer alone: which
 //! table it belongs to. Every table of a join renders under an alias this
@@ -71,6 +74,8 @@
 
 use adbc_vs_scan::driver::Driver;
 
+use crate::exa_type::ExasolType;
+use crate::postgres_type_mapping;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
     InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
@@ -244,7 +249,7 @@ impl<'a> AliasedFrom<'a> {
 /// It is also the *only* such decision here, where the MySQL dialect carries a
 /// second: which columns the query groups by. That question decides nothing in
 /// this dialect, because a grouping key and its select-list occurrence render
-/// identically whatever the query groups by.
+/// as the same read expression whatever the query groups by.
 enum Statement<'a> {
     /// One table, named by nothing: a single table's column reference cannot
     /// be ambiguous, so the statement carries no alias and no qualifier even
@@ -280,7 +285,8 @@ impl<'a> Statement<'a> {
     /// predicate renderer a `WHERE` clause uses, because a condition compared
     /// one way in `ON` and another way in `WHERE` would be two answers to one
     /// question — and since a join condition is an equality, that renderer
-    /// leaves a character join key bare and the source's index on it usable.
+    /// leaves a join key that reads without a conversion bare and the source's
+    /// index on it usable.
     fn render_join_tree(&self, from: &AliasedFrom<'_>) -> Result<String, RenderError> {
         match from {
             AliasedFrom::Table { table, alias } => Ok(format!(
@@ -308,9 +314,9 @@ impl<'a> Statement<'a> {
     ///
     /// Every entry renders through the one expression renderer every other
     /// position uses. Unlike the MySQL dialect, no entry is special-cased on
-    /// what the query groups by: a grouping key renders bare here, so a
-    /// grouped column's select-list occurrence is the same expression as its
-    /// `GROUP BY` key with nothing to coordinate.
+    /// what the query groups by: a grouped column's select-list occurrence is
+    /// the same read expression as its `GROUP BY` key with nothing to
+    /// coordinate.
     fn render_projection(&self, select_list: &[SelectItem]) -> Result<String, RenderError> {
         if select_list.is_empty() {
             return Err(RenderError::new(
@@ -336,7 +342,7 @@ impl<'a> Statement<'a> {
     ///
     /// Each key renders through the same column renderer its select-list
     /// occurrence takes, so the two occurrences carry the same alias and are the
-    /// same bare expression.
+    /// same read expression.
     fn render_grouping(&self, aggregation: &Aggregation) -> Result<String, RenderError> {
         let Aggregation::GroupBy(columns) = aggregation else {
             return Ok(String::new());
@@ -360,6 +366,7 @@ impl<'a> Statement<'a> {
 
     fn render_predicate(&self, predicate: &Predicate) -> Result<String, RenderError> {
         match predicate {
+            Predicate::BooleanColumn(column) => self.render_column(column),
             Predicate::And(predicates) => self.render_junction(predicates, "AND"),
             Predicate::Or(predicates) => self.render_junction(predicates, "OR"),
             Predicate::Not(inner) => Ok(format!("(NOT {})", self.render_predicate(inner)?)),
@@ -396,8 +403,8 @@ impl<'a> Statement<'a> {
         Ok(format!("({})", operands.join(&format!(" {operator} "))))
     }
 
-    /// Renders a comparison, equality and ordering alike, with both operands
-    /// bare.
+    /// Renders a comparison, equality and ordering alike, with no collation
+    /// suffix on either operand.
     ///
     /// The source compares character operands under the collation it applies
     /// to the column, so an ordering comparison follows that collation's sort
@@ -430,8 +437,8 @@ impl<'a> Statement<'a> {
     /// Renders a `LIKE`, with an `ESCAPE` clause exactly when the request
     /// carries an `escapeChar`.
     ///
-    /// Every operand renders bare, so the match runs under the collation the
-    /// source applies to the column.
+    /// No operand carries a collation suffix, so the match runs under the
+    /// collation the source applies to the column.
     fn render_like(&self, like: &LikePredicate) -> Result<String, RenderError> {
         let escape = match &like.escape_char {
             Some(escape_char) => format!(" ESCAPE {}", self.render_expression(escape_char)?),
@@ -445,7 +452,7 @@ impl<'a> Statement<'a> {
         ))
     }
 
-    /// Renders a `BETWEEN` with its compared operand and both bounds bare, so
+    /// Renders a `BETWEEN` with no collation suffix on any operand, so
     /// the source's own collation decides the range.
     fn render_between(&self, between: &BetweenPredicate) -> Result<String, RenderError> {
         Ok(format!(
@@ -456,7 +463,7 @@ impl<'a> Statement<'a> {
         ))
     }
 
-    /// Renders an `IN` list with every operand bare.
+    /// Renders an `IN` list with no collation suffix on any operand.
     fn render_in_const_list(
         &self,
         in_const_list: &InConstListPredicate,
@@ -488,15 +495,22 @@ impl<'a> Statement<'a> {
     /// spelling whatever case Exasol sent. The argument's absence, not a
     /// separate field, is what tells `COUNT(*)` apart from `COUNT(column)`.
     ///
-    /// The argument renders bare whatever the function and whatever `DISTINCT`
-    /// it carries, so `MIN` and `MAX` over a character column return the value
-    /// the source's collation sorts first or last.
+    /// The argument carries no collation suffix whatever the function and
+    /// whatever `DISTINCT` it carries, so `MIN` and `MAX` over a character
+    /// column return the value the source's collation sorts first or last.
+    /// Over a `BOOLEAN` operand, which PostgreSQL defines neither for, `MIN` is
+    /// `bool_and` and `MAX` is `bool_or`.
     fn render_aggregate(&self, call: &AggregateCall) -> Result<String, RenderError> {
         let function = renderable_function(&call.function)?;
         let Some(argument) = &call.argument else {
             return render_star_aggregate(function, call);
         };
 
+        let function = if is_boolean_operand(argument) {
+            boolean_aggregate(function)
+        } else {
+            function
+        };
         let distinct = if call.distinct { "DISTINCT " } else { "" };
         let operand = self.render_expression(argument)?;
 
@@ -515,12 +529,24 @@ impl<'a> Statement<'a> {
 
     /// Renders one column reference. Every reference goes through here — a
     /// projected one, a predicate operand, an aggregate's argument, a join
-    /// condition operand, and a grouping column — so how a column is named is
-    /// one decision, made once.
+    /// condition operand, and a grouping column — so how a column is named and
+    /// read is one decision, made once.
     ///
-    /// A join qualifies the reference by the alias of the table it resolves
-    /// to, and a single-table statement names the column alone.
+    /// The named column renders through its read expression, so every
+    /// position acts on the value the scan emits for it.
     fn render_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
+        let named = self.name_column(column)?;
+
+        Ok(postgres_type_mapping::column_read_sql(
+            column.source_type.as_deref(),
+            column.declared_type,
+            &named,
+        ))
+    }
+
+    /// Names `column`: qualified by the alias of the table it resolves to in a
+    /// join, alone in a single-table statement.
+    fn name_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
         let Self::Joined(from) = self else {
             return Ok(quote_identifier(&column.name));
         };
@@ -637,6 +663,30 @@ fn renderable_function(function: &str) -> Result<&'static str, RenderError> {
                 AGGREGATE_FUNCTIONS.join(", ")
             ))
         })
+}
+
+/// Whether `operand` is a `BOOLEAN` value: a column declared `BOOLEAN`, or a
+/// predicate, which is boolean by construction and carries no declared type of
+/// its own.
+fn is_boolean_operand(operand: &Expression) -> bool {
+    match operand {
+        Expression::Column(column) => column.declared_type == ExasolType::Boolean,
+        Expression::Predicate(_) => true,
+        Expression::RowMarker | Expression::Literal(_) | Expression::Aggregate(_) => false,
+    }
+}
+
+/// The aggregate PostgreSQL spells for `function` over a `BOOLEAN` operand.
+///
+/// Exasol orders `false` before `true`, so its `MIN` is true only when every
+/// value is, and its `MAX` when any is: `bool_and` and `bool_or`. `COUNT`
+/// takes any operand and keeps its name.
+fn boolean_aggregate(function: &'static str) -> &'static str {
+    match function {
+        "MIN" => "bool_and",
+        "MAX" => "bool_or",
+        other => other,
+    }
 }
 
 /// Renders the aggregate PostgreSQL writes over no argument.

@@ -93,6 +93,18 @@ pub(crate) fn less(left: Value, right: Value) -> Value {
     json!({"type": "predicate_less", "left": left, "right": right})
 }
 
+pub(crate) fn not(expression: Value) -> Value {
+    json!({"type": "predicate_not", "expression": expression})
+}
+
+pub(crate) fn and(expressions: Value) -> Value {
+    json!({"type": "predicate_and", "expressions": expressions})
+}
+
+pub(crate) fn or(expressions: Value) -> Value {
+    json!({"type": "predicate_or", "expressions": expressions})
+}
+
 /// The statement `request` renders to through `dialect`, parsed first so every
 /// assertion covers the request shape Exasol sends.
 pub(crate) fn render_statement(
@@ -133,6 +145,124 @@ pub(crate) fn where_clause_over(
     clause.to_string()
 }
 
+/// The source types a converted table's `VARCHAR(36)` `uid` and `BOOLEAN`
+/// `flag` columns record, so a dialect's tests drive every position through a
+/// real read expression of their own technology.
+#[derive(Clone, Copy)]
+pub(crate) struct ConvertedNotes {
+    pub uid: &'static str,
+    pub flag: &'static str,
+}
+
+/// An involved table whose `uid` and `flag` columns record `notes` and whose
+/// `id`, `note`, and `BOOLEAN` `active` columns carry no notes.
+fn converted_table(name: &str, notes: ConvertedNotes) -> Value {
+    json!({
+        "name": name,
+        "columns": [
+            {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+            {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
+            {
+                "name": "uid",
+                "dataType": {"type": "VARCHAR", "size": 36, "characterSet": "UTF8"},
+                "adapterNotes": json!({"sourceType": notes.uid}).to_string(),
+            },
+            {
+                "name": "flag",
+                "dataType": {"type": "BOOLEAN"},
+                "adapterNotes": json!({"sourceType": notes.flag}).to_string(),
+            },
+            {"name": "active", "dataType": {"type": "BOOLEAN"}},
+        ],
+    })
+}
+
+/// A request over the converted `orders` table carrying `pushdown_request`'s
+/// elements beside its `from` element.
+fn converted_request(notes: ConvertedNotes, mut pushdown_request: Value) -> Value {
+    pushdown_request["type"] = json!("select");
+    pushdown_request["from"] = json!({"type": "table", "name": "orders"});
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": pushdown_request,
+        "involvedTables": [converted_table("orders", notes)],
+    })
+}
+
+/// A request over the converted `orders` table projecting `id`, filtered by
+/// `filter`.
+pub(crate) fn converted_table_filtered_request(notes: ConvertedNotes, filter: Value) -> Value {
+    converted_request(
+        notes,
+        json!({"selectList": [column("id")], "filter": filter}),
+    )
+}
+
+/// `SELECT uid FROM orders WHERE uid = 'a'`, over a converted `uid`.
+pub(crate) fn converted_column_filtered_request(notes: ConvertedNotes) -> Value {
+    converted_request(
+        notes,
+        json!({
+            "selectList": [column("uid")],
+            "filter": equal(column("uid"), string_literal("a")),
+        }),
+    )
+}
+
+/// A request grouping by `group_by` over the converted `orders` table,
+/// projecting `select_list` declared as `data_types`.
+pub(crate) fn converted_column_grouped_request(
+    notes: ConvertedNotes,
+    select_list: Value,
+    data_types: Value,
+    group_by: &str,
+) -> Value {
+    converted_request(
+        notes,
+        json!({
+            "selectList": select_list,
+            "selectListDataTypes": data_types,
+            "aggregationType": "group_by",
+            "groupBy": [column(group_by)],
+        }),
+    )
+}
+
+/// A `function_aggregate` entry over `column_name`.
+pub(crate) fn aggregate_over(function: &str, column_name: &str, distinct: bool) -> Value {
+    json!({
+        "type": "function_aggregate",
+        "name": function,
+        "arguments": [column(column_name)],
+        "distinct": distinct,
+    })
+}
+
+/// `orders` joined to `customers` on their converted `uid` columns,
+/// projecting `orders.id`, which carries no notes.
+pub(crate) fn converted_column_joined_request(notes: ConvertedNotes) -> Value {
+    let qualified =
+        |name: &str, table: &str| json!({"type": "column", "name": name, "tableName": table});
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": {
+            "type": "select",
+            "from": {
+                "type": "join",
+                "join_type": "inner",
+                "left": {"type": "table", "name": "orders"},
+                "right": {"type": "table", "name": "customers"},
+                "condition": equal(qualified("uid", "orders"), qualified("uid", "customers")),
+            },
+            "selectList": [qualified("id", "orders")],
+        },
+        "involvedTables": [
+            converted_table("orders", notes),
+            converted_table("customers", notes),
+        ],
+    })
+}
+
 pub(crate) fn decimal_column() -> pushdown_query::ColumnRef {
     pushdown_query::ColumnRef {
         name: "id".to_string(),
@@ -140,6 +270,7 @@ pub(crate) fn decimal_column() -> pushdown_query::ColumnRef {
             precision: 19,
             scale: 0,
         },
+        source_type: None,
         table_name: None,
         table_alias: None,
     }
@@ -149,6 +280,7 @@ pub(crate) fn varchar_column() -> pushdown_query::ColumnRef {
     pushdown_query::ColumnRef {
         name: "note".to_string(),
         declared_type: ExasolType::Varchar { size: 100 },
+        source_type: None,
         table_name: None,
         table_alias: None,
     }
@@ -158,6 +290,7 @@ pub(crate) fn date_column() -> pushdown_query::ColumnRef {
     pushdown_query::ColumnRef {
         name: "shipped".to_string(),
         declared_type: ExasolType::Date,
+        source_type: None,
         table_name: None,
         table_alias: None,
     }
@@ -166,7 +299,8 @@ pub(crate) fn date_column() -> pushdown_query::ColumnRef {
 pub(crate) fn timestamp_column() -> pushdown_query::ColumnRef {
     pushdown_query::ColumnRef {
         name: "logged".to_string(),
-        declared_type: ExasolType::Timestamp,
+        declared_type: ExasolType::Timestamp { precision: 3 },
+        source_type: None,
         table_name: None,
         table_alias: None,
     }
@@ -254,6 +388,7 @@ pub(crate) fn joined_column_ref(name: &str, table: &str) -> pushdown_query::Colu
             precision: 19,
             scale: 0,
         },
+        source_type: None,
         table_name: Some(table.to_string()),
         table_alias: None,
     }

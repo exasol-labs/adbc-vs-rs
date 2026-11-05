@@ -1001,3 +1001,108 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
         ),
     }
 }
+
+/// Trino source types a column records. Trino's read expression is the bare
+/// column for every type, so a recorded type changes no position.
+const CONVERTED_NOTES: fixtures::ConvertedNotes = fixtures::ConvertedNotes {
+    uid: "varchar(36)",
+    flag: "boolean",
+};
+
+/// `vs-adapter/pushdown-dialect`, scenario "A column reference renders through
+/// its read expression in every position": a column recording its source type
+/// reads as the bare quoted column in the select list, a `WHERE` comparison, a
+/// `GROUP BY` key, a `MIN` and a `COUNT(DISTINCT)` operand, and an equi-join
+/// condition, as a column without notes does.
+#[test]
+fn column_reference_renders_identically_in_every_position() {
+    let filtered = render_statement(&fixtures::converted_column_filtered_request(
+        CONVERTED_NOTES,
+    ));
+    assert_eq!(
+        filtered,
+        r#"SELECT "uid" FROM "memory"."adbc_vs"."orders" WHERE ("uid" = 'a')"#
+    );
+
+    let grouped = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            column("uid"),
+            fixtures::aggregate_over("MIN", "uid", false),
+            fixtures::aggregate_over("COUNT", "uid", true),
+        ]),
+        json!([
+            {"type": "VARCHAR", "size": 36},
+            {"type": "VARCHAR", "size": 36},
+            {"type": "DECIMAL", "precision": 18, "scale": 0},
+        ]),
+        "uid",
+    ));
+    assert_eq!(
+        grouped,
+        r#"SELECT "uid", MIN("uid"), COUNT(DISTINCT "uid") FROM "memory"."adbc_vs"."orders" GROUP BY "uid""#
+    );
+
+    let joined = render_statement(&fixtures::converted_column_joined_request(CONVERTED_NOTES));
+    assert_eq!(
+        joined,
+        r#"SELECT "t1"."id" FROM ("memory"."adbc_vs"."orders" AS "t1" INNER JOIN "memory"."adbc_vs"."customers" AS "t2" ON ("t1"."uid" = "t2"."uid"))"#
+    );
+}
+
+/// `vs-adapter/pushdown-filter`, scenario "BOOLEAN column is a predicate on its
+/// own": the predicate is the column's read expression, with no comparison
+/// added, alone and under `NOT`, `AND`, and `OR`.
+#[test]
+fn boolean_column_predicate_renders_through_its_read_expression() {
+    for (filter, expected) in [
+        (column("flag"), r#""flag""#),
+        (column("active"), r#""active""#),
+        (fixtures::not(column("flag")), r#"(NOT "flag")"#),
+        (
+            fixtures::and(json!([column("flag"), column("active")])),
+            r#"("flag" AND "active")"#,
+        ),
+        (
+            fixtures::or(json!([
+                column("active"),
+                less(numeric_literal("5"), column("id"))
+            ])),
+            r#"("active" OR (5 < "id"))"#,
+        ),
+    ] {
+        let sql = render_statement(&fixtures::converted_table_filtered_request(
+            CONVERTED_NOTES,
+            filter,
+        ));
+
+        assert_eq!(
+            sql,
+            format!(r#"SELECT "id" FROM "memory"."adbc_vs"."orders" WHERE {expected}"#)
+        );
+    }
+}
+
+/// Measured on Exasol 2025.1.11, `WHERE b = (d > 5)` arrives delegated with a
+/// predicate as the comparison's right operand.
+#[test]
+fn predicate_operand_of_a_comparison_renders_parenthesized() {
+    let columns = json!([
+        {"name": "active", "dataType": {"type": "BOOLEAN"}},
+        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+    ]);
+    for (operand, expected) in [
+        (
+            less(numeric_literal("5"), column("id")),
+            r#"("active" = (5 < "id"))"#,
+        ),
+        (
+            fixtures::not(column("active")),
+            r#"("active" = (NOT "active"))"#,
+        ),
+    ] {
+        let clause = where_clause_over(columns.clone(), equal(column("active"), operand));
+
+        assert_eq!(clause, expected);
+    }
+}

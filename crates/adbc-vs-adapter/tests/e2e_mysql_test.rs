@@ -70,6 +70,9 @@ const STABILITY_RUN_COUNT: u32 = 3;
 /// reads [`mysql::CODE_POINT_ITEMS`] on the virtual side instead.
 const ITEMS: &str = "items";
 
+/// The table holding one column per mapped MySQL type.
+const TYPE_COVERAGE: &str = "type_coverage";
+
 /// This test deletes the driver every other test in this file reads, so it
 /// puts the stack back as it found it before it asserts anything: its own
 /// `CREATE VIRTUAL SCHEMA` is the reinstall, and an assertion panicking ahead
@@ -636,8 +639,8 @@ fn exasol_supplies_the_measured_type_shapes() {
     let timestamp_entry = &declared[0];
     assert_eq!(
         exa_type::from_json(timestamp_entry),
-        Ok(ExasolType::Timestamp),
-        "a TIMESTAMP entry must still parse as the declarable Timestamp type: {declared:?}"
+        Ok(ExasolType::Timestamp { precision: 3 }),
+        "a TIMESTAMP entry must parse as the precision-3 Timestamp type: {declared:?}"
     );
     assert_eq!(
         timestamp_entry.get("fractionalSecondsPrecision"),
@@ -782,7 +785,7 @@ fn create_exposes_source_tables() {
     assert_eq!(types["id"], "DECIMAL(10,0)");
     assert_eq!(types["amount"], "DECIMAL(12,4)");
     assert_eq!(types["name"], "VARCHAR(100) UTF8");
-    assert_eq!(types["code"], "VARCHAR(8) UTF8");
+    assert_eq!(types["code"], "CHAR(8) UTF8");
     assert_eq!(types["order_date"], "DATE");
     assert!(types["created_at"].starts_with("TIMESTAMP"));
     assert_eq!(types["price"], "DOUBLE");
@@ -854,44 +857,20 @@ fn unmappable_column_omitted_and_recorded() {
     assert_eq!(
         columns,
         vec!["id", "label"],
-        "the JSON column must be left out of the virtual table"
+        "the BLOB column must be left out of the virtual table"
     );
     let omitted = adapter_notes(VIRTUAL_SCHEMA)["omitted"].clone();
     let entry = omitted
         .as_array()
         .expect("omitted is an array")
         .iter()
-        .find(|entry| entry["column"] == "payload")
-        .expect("the omitted JSON column must be recorded");
+        .find(|entry| entry["column"] == "photo")
+        .expect("the omitted BLOB column must be recorded");
     assert_eq!(entry["table"], "mixed_types");
-    assert_eq!(entry["sourceType"], "json");
+    assert_eq!(entry["sourceType"], "blob");
     assert!(
         entry["reason"].as_str().is_some_and(|r| !r.is_empty()),
         "the omission must carry a reason: {entry}"
-    );
-}
-
-#[test]
-fn latin1_column_omitted_and_recorded() {
-    let columns = column_names("items");
-
-    assert!(
-        !columns.contains(&"region".to_string()),
-        "the latin1 column must be left out of the virtual table: {columns:?}"
-    );
-    let omitted = adapter_notes(VIRTUAL_SCHEMA)["omitted"].clone();
-    let entry = omitted
-        .as_array()
-        .expect("omitted is an array")
-        .iter()
-        .find(|entry| entry["table"] == "items" && entry["column"] == "region")
-        .expect("the omitted latin1 column must be recorded");
-    assert_eq!(entry["sourceType"], "varchar");
-    assert!(
-        entry["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("latin1")),
-        "the reason must name the column's character set: {entry}"
     );
 }
 
@@ -1057,7 +1036,7 @@ fn mirror_holds_every_fixture_item_row_as_authored() {
 
     let rows = stack.exasol.query_rows(&format!(
         "SELECT \"id\", \"category\", \"code\", \"batch\", \"quantity\", \"rank_key\", \
-         \"tie_break\" FROM {}.\"items\" ORDER BY \"id\"",
+         \"tie_break\", \"region\" FROM {}.\"items\" ORDER BY \"id\"",
         mirror::SCHEMA
     ));
 
@@ -1091,7 +1070,28 @@ fn mirror_holds_every_fixture_item_row_as_authored() {
         );
         assert_eq!(cell(row, "rank_key"), Some(expected.rank_key.to_string()));
         assert_eq!(cell(row, "tie_break"), Some(expected.tie_break.to_string()));
+        assert_eq!(
+            cell(row, "region"),
+            Some(expected.region.to_string()),
+            "row {id}'s region must keep its trailing space and its case, which only the \
+             converted view tells apart"
+        );
     }
+
+    let code_point_rows = stack.exasol.query_rows(&format!(
+        "SELECT \"id\", \"batch\" FROM {}.\"{}\" WHERE \"id\" > {} ORDER BY \"id\"",
+        mirror::SCHEMA,
+        mysql::CODE_POINT_ITEMS,
+        items::ROWS.len()
+    ));
+    assert_eq!(
+        code_point_rows
+            .iter()
+            .filter_map(|row| cell(row, "batch"))
+            .collect::<Vec<_>>(),
+        vec!["5%x".to_string(), "5\\yx".to_string()],
+        "the code-point mirror must hold the two `LIKE` rows, the second with one backslash"
+    );
 }
 
 #[test]
@@ -1136,29 +1136,25 @@ fn mirror_holds_every_join_partner_row_including_the_unmatched_ones() {
     );
 }
 
-/// [`mysql::CODE_POINT_ITEMS`] is compared against the mirror of `items`, so
-/// it has to declare what that mirror declares too, including leaving out the
-/// `latin1` `region` column.
+/// Every mirror table is compared against the virtual table of the same name,
+/// so each has to declare what that virtual table declares, `latin1` `region`
+/// column included.
 #[test]
 fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
-    for (table, mirrored_table) in [
-        (ITEMS, ITEMS),
-        ("item_notes", "item_notes"),
-        (mysql::CODE_POINT_ITEMS, ITEMS),
-    ] {
-        let mirrored = declared_columns(mirror::SCHEMA, mirrored_table);
+    for table in [ITEMS, "item_notes", mysql::CODE_POINT_ITEMS, TYPE_COVERAGE] {
+        let mirrored = declared_columns(mirror::SCHEMA, table);
         let virtual_table = declared_columns(VIRTUAL_SCHEMA, table);
 
         assert!(
             !mirrored.is_empty(),
-            "the mirror must declare table {mirrored_table}"
+            "the mirror must declare table {table}"
         );
         assert_eq!(
             mirrored, virtual_table,
-            "the mirror {mirrored_table} of {table} must declare the same column names in the \
-             same order with the same Exasol types as the virtual table, or a differential \
-             comparison compares two different things and an aggregate's declared type differs \
-             between the two sides for a reason that is not a pushdown defect"
+            "the mirror {table} must declare the same column names in the same order with the \
+             same Exasol types as the virtual table, or a differential comparison compares two \
+             different things and an aggregate's declared type differs between the two sides \
+             for a reason that is not a pushdown defect"
         );
     }
 }
@@ -1210,15 +1206,14 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
     );
 }
 
-/// Runs `query(schema, items)` against the virtual schema and against its
+/// Runs `query(schema, table)` against the virtual schema and against its
 /// local mirror and asserts the two answers are identical.
 ///
-/// `items` is the table standing for the `items` rows on each side:
-/// `virtual_items` on the virtual schema, and [`ITEMS`] on the mirror, which
-/// holds those rows once. A query over a character column passes
-/// [`mysql::CODE_POINT_ITEMS`] as `virtual_items`, because only a column
-/// declaring `utf8mb4_0900_bin` compares the way Exasol does; any other query
-/// passes [`ITEMS`].
+/// `virtual_items` names the table on the virtual schema, and the mirror holds
+/// a table of the same name. A query over a character column passes
+/// [`mysql::CODE_POINT_ITEMS`], because only a column declaring
+/// `utf8mb4_0900_bin` compares the way Exasol does; any other query passes
+/// [`ITEMS`] or [`TYPE_COVERAGE`].
 ///
 /// A correctly delegated fragment returns exactly what Exasol's own
 /// evaluation over the mirror returns. The two sides are independent
@@ -1230,11 +1225,25 @@ fn assert_matches_mirror(
     virtual_items: &str,
     query: impl Fn(&str, &str) -> String,
 ) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    assert_matches_mirror_of(virtual_items, virtual_items, query)
+}
+
+/// Runs `query(schema, table)` against `virtual_table` on the virtual schema
+/// and against `mirror_table` on the local mirror, and asserts the two answers
+/// are identical, for a virtual table whose rows the mirror holds under
+/// another name.
+fn assert_matches_mirror_of(
+    virtual_table: &str,
+    mirror_table: &str,
+    query: impl Fn(&str, &str) -> String,
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
     let stack = stack::shared();
     let virtual_rows = stack
         .exasol
-        .query_rows(&query(VIRTUAL_SCHEMA, virtual_items));
-    let mirror_rows = stack.exasol.query_rows(&query(mirror::SCHEMA, ITEMS));
+        .query_rows(&query(VIRTUAL_SCHEMA, virtual_table));
+    let mirror_rows = stack
+        .exasol
+        .query_rows(&query(mirror::SCHEMA, mirror_table));
     assert_eq!(
         virtual_rows, mirror_rows,
         "the delegated query must return exactly the rows the local Exasol mirror returns: \
@@ -1305,8 +1314,30 @@ fn filter_matches_local_exasol_result() {
     );
     assert_eq!(
         column_types(mysql::CODE_POINT_ITEMS)["code"],
-        "VARCHAR(8) UTF8",
-        "MySQL CHAR must surface as Exasol VARCHAR rather than the blank-padded CHAR"
+        "CHAR(8) UTF8",
+        "MySQL CHAR must surface as Exasol CHAR"
+    );
+
+    let like_query = |schema: &str, items: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{items}\" WHERE \"batch\" LIKE '5\\%x' ORDER BY \"id\""
+        )
+    };
+    let like_statement = pushdown_statement(&like_query(VIRTUAL_SCHEMA, mysql::CODE_POINT_ITEMS));
+    assert!(
+        like_statement.contains("LIKE") && !like_statement.contains("ESCAPE"),
+        "a pattern the query gave no ESCAPE clause for must reach MySQL with none, so MySQL's \
+         own backslash rule reads it: {like_statement}"
+    );
+    let like_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, like_query);
+    assert_eq!(
+        like_rows
+            .iter()
+            .filter_map(|row| cell(row, "id"))
+            .collect::<Vec<_>>(),
+        vec!["9".to_string()],
+        "the backslash escapes the `%`, so only the row holding `5%x` matches, and the row \
+         holding `5\\yx` does not: {like_rows:?}"
     );
 }
 
@@ -1344,7 +1375,7 @@ fn aggregation_matches_local_exasol_result() {
         .expect("single-group aggregation returns exactly one row");
     let mirror_row = stack
         .exasol
-        .query_rows(&single_group_query(mirror::SCHEMA, ITEMS))
+        .query_rows(&single_group_query(mirror::SCHEMA, mysql::CODE_POINT_ITEMS))
         .into_iter()
         .next()
         .expect("single-group aggregation returns exactly one row");
@@ -1356,8 +1387,8 @@ fn aggregation_matches_local_exasol_result() {
              mirror {mirror_row:?}"
         );
     }
-    assert_eq!(cell(&virtual_row, "N"), Some("8".to_string()));
-    assert_eq!(cell(&virtual_row, "QN"), Some("6".to_string()));
+    assert_eq!(cell(&virtual_row, "N"), Some("10".to_string()));
+    assert_eq!(cell(&virtual_row, "QN"), Some("8".to_string()));
     assert_eq!(
         cell(&virtual_row, "MINCAT"),
         Some("Gizmo".to_string()),
@@ -1386,8 +1417,8 @@ fn aggregation_matches_local_exasol_result() {
     let grouped_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, grouped_query);
     assert_eq!(
         grouped_rows.len(),
-        4,
-        "four distinct categories, each seeded onto two rows: {grouped_rows:?}"
+        5,
+        "five distinct categories, each seeded onto two rows: {grouped_rows:?}"
     );
     assert!(
         grouped_rows
@@ -1586,7 +1617,8 @@ fn projected_predicate_matches_local_exasol_result() {
 
 /// Runs over [`mysql::CODE_POINT_ITEMS`]: `utf8mb4_0900_bin` keeps the case
 /// and accent variants apart, so the delegated grouping and distinct count
-/// return Exasol's four values. `items` returns two for both, which
+/// return Exasol's five values, four of them the case and accent variants.
+/// `items` returns two for both, which
 /// `comparison_and_grouping_follow_the_columns_own_collation` asserts.
 #[test]
 fn grouping_over_character_variants_matches_local_exasol_result() {
@@ -1606,7 +1638,7 @@ fn grouping_over_character_variants_matches_local_exasol_result() {
     let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, group_by_query);
     assert_eq!(
         rows.len(),
-        4,
+        5,
         "utf8mb4_0900_bin keeps Widget/widget and Gizmo/Gîzmo apart, matching Exasol: {rows:?}"
     );
 
@@ -1621,7 +1653,7 @@ fn grouping_over_character_variants_matches_local_exasol_result() {
          {distinct_statement}"
     );
     let distinct_rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, distinct_query);
-    assert_eq!(cell(&distinct_rows[0], "N"), Some("4".to_string()));
+    assert_eq!(cell(&distinct_rows[0], "N"), Some("5".to_string()));
 }
 
 #[test]
@@ -1643,7 +1675,7 @@ fn two_column_group_by_is_not_delegated() {
     let rows = assert_matches_mirror(mysql::CODE_POINT_ITEMS, query);
     assert_eq!(
         rows.len(),
-        8,
+        10,
         "code is unique per row, so grouping by both columns yields one group per row: {rows:?}"
     );
 }
@@ -1676,7 +1708,8 @@ fn select_list_predicate_over_grouped_character_column_delegates_and_matches_the
             .find(|row| cell(row, "CATEGORY") == Some(category.to_string()))
             .and_then(|row| cell(row, "LATE"))
     };
-    assert_eq!(rows.len(), 4, "one row per code-point group: {rows:?}");
+    assert_eq!(rows.len(), 5, "one row per code-point group: {rows:?}");
+    assert_eq!(late("Zeta"), Some("true".to_string()), "{rows:?}");
     assert_eq!(late("Gizmo"), Some("false".to_string()), "{rows:?}");
     assert_eq!(late("Gîzmo"), Some("false".to_string()), "{rows:?}");
     assert_eq!(late("Widget"), Some("true".to_string()), "{rows:?}");
@@ -1824,7 +1857,7 @@ fn trailing_space_values_compare_and_order_as_in_exasol() {
     let extremes = |schema: &str, items: &str| {
         format!(
             "SELECT MIN(\"batch\") AS MIN_BATCH, MAX(\"batch\") AS MAX_BATCH \
-             FROM {schema}.\"{items}\""
+             FROM {schema}.\"{items}\" WHERE \"batch\" LIKE 'ab%'"
         )
     };
 
@@ -1865,6 +1898,837 @@ fn trailing_space_values_compare_and_order_as_in_exasol() {
         vec!["2".to_string(), "5".to_string(), "8".to_string()],
         "only the rows holding 'ab' match; the 'ab ' rows differ by a trailing space: {rows:?}"
     );
+}
+
+/// Asserts that `table.column` is declared `exasol_type` on the virtual schema.
+fn assert_declares(table: &str, column: &str, exasol_type: &str) {
+    let declared = declared_columns(VIRTUAL_SCHEMA, table);
+    assert!(
+        declared.contains(&(column.to_string(), exasol_type.to_string())),
+        "{table}.{column} must be declared {exasol_type}: {declared:?}"
+    );
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+/// The values of `column` across `rows`, in the order the query returned them.
+fn column_values(rows: &[serde_json::Map<String, serde_json::Value>], column: &str) -> Vec<String> {
+    rows.iter().filter_map(|row| cell(row, column)).collect()
+}
+
+/// Fails, naming the zone, unless the MySQL session runs in UTC.
+///
+/// A `TIMESTAMP` is read in the session `time_zone`, which the adapter never
+/// sets, so a test that compares one with a literal holds only under UTC, the
+/// zone the Compose MySQL starts in.
+fn assert_session_time_zone_is_utc() {
+    let offset = stack::shared()
+        .mysql
+        .query_scalar("SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP())");
+    assert_eq!(
+        offset, "00:00:00",
+        "the test MySQL must run its session in UTC, but its session time_zone is offset {offset} \
+         from UTC"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `DATETIME` and a `TIME` declare their
+/// own fractional-second digits, and the scan keeps every digit.
+#[test]
+fn datetime_precision_carries_into_the_declared_timestamp() {
+    assert_declares("orders", "created_at", "TIMESTAMP(0)");
+    assert_declares(TYPE_COVERAGE, "at_second", "TIMESTAMP(0)");
+    assert_declares(TYPE_COVERAGE, "at_micro", "TIMESTAMP(6)");
+    assert_declares(TYPE_COVERAGE, "happened_at", "TIMESTAMP(6)");
+    assert_declares(TYPE_COVERAGE, "elapsed", "TIMESTAMP(3)");
+
+    let digits = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", TO_CHAR(\"at_micro\", 'YYYY-MM-DD HH24:MI:SS.FF6') AS TEXT_AT \
+             FROM {schema}.\"{table}\" WHERE \"at_micro\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, digits);
+    assert_eq!(
+        column_values(&rows, "TEXT_AT"),
+        strings(&["2024-01-01 12:00:00.123456", "2024-06-15 08:30:00.500000"]),
+        "a DATETIME(6) keeps its microseconds: {rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: `TINYINT`, `SMALLINT`, `MEDIUMINT`, `INT`,
+/// and `BIGINT` map to `DECIMAL` of their digits, and a `TINYINT(1)` is a
+/// number.
+#[test]
+fn narrow_integer_columns_match_the_mirror() {
+    for (column, declared) in [
+        ("tiny_value", "DECIMAL(3,0)"),
+        ("small_value", "DECIMAL(5,0)"),
+        ("medium_value", "DECIMAL(7,0)"),
+        ("int_value", "DECIMAL(10,0)"),
+        ("big_value", "DECIMAL(19,0)"),
+        ("flag_value", "DECIMAL(3,0)"),
+    ] {
+        assert_declares(TYPE_COVERAGE, column, declared);
+    }
+
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"tiny_value\", \"small_value\", \"medium_value\", \"int_value\", \
+             \"big_value\", \"flag_value\" FROM {schema}.\"{table}\" ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(
+        cell(&rows[0], "flag_value"),
+        Some("5".to_string()),
+        "a TINYINT(1) holding 5 is emitted as 5, because BOOL is an alias for it: {rows:?}"
+    );
+    assert_eq!(
+        cell(&rows[1], "big_value"),
+        Some("-9223372036854775808".to_string()),
+        "{rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: an unsigned integer declares the digits of
+/// its unsigned range, so a `BIGINT UNSIGNED` keeps all twenty.
+#[test]
+fn unsigned_integer_columns_match_the_mirror() {
+    for (column, declared) in [
+        ("utiny_value", "DECIMAL(3,0)"),
+        ("usmall_value", "DECIMAL(5,0)"),
+        ("umedium_value", "DECIMAL(8,0)"),
+        ("uint_value", "DECIMAL(10,0)"),
+        ("ubig_value", "DECIMAL(20,0)"),
+    ] {
+        assert_declares(TYPE_COVERAGE, column, declared);
+    }
+
+    let query = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"utiny_value\", \"usmall_value\", \"umedium_value\", \
+             \"uint_value\", \"ubig_value\" FROM {schema}.\"{table}\" ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+    assert_eq!(
+        cell(&rows[0], "ubig_value"),
+        Some("18446744073709551615".to_string()),
+        "the largest BIGINT UNSIGNED must keep its digits: {rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `DECIMAL` beyond 36 digits is read as the
+/// text MySQL prints for it, and a comparison follows that text.
+#[test]
+fn wide_decimal_reads_as_text_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "wide_amount", "VARCHAR(2000000) UTF8");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"wide_amount\" FROM {schema}.\"{table}\" \
+             WHERE \"wide_amount\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let statement = pushdown_statement(&projection(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("CAST(`wide_amount` AS CHAR)"),
+        "the column must be read as its text: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    assert_eq!(
+        column_values(&rows, "wide_amount"),
+        strings(&["12345678901234567890123456789012345678.90", "-0.05"]),
+        "{rows:?}"
+    );
+
+    let equality = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"wide_amount\" = '-0.05' \
+             ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+    assert_eq!(column_values(&rows, "id"), strings(&["2"]), "{rows:?}");
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `FLOAT` is emitted as its single-precision
+/// value widened to double precision, so a stored `0.1` equals no decimal
+/// literal `0.1`, and `1.5`, which single precision holds exactly, does.
+#[test]
+fn float_column_holds_the_widened_single_precision_value() {
+    assert_declares(TYPE_COVERAGE, "approx", "DOUBLE");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"approx\" FROM {schema}.\"{table}\" WHERE \"approx\" IS NOT NULL \
+             ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    let widened: f64 = cell(&rows[0], "approx")
+        .expect("row 1 holds a FLOAT")
+        .parse()
+        .expect("Exasol returns a DOUBLE as a number");
+    assert_eq!(widened, f64::from(0.1_f32), "{rows:?}");
+
+    for (literal, expected_ids) in [("0.1", &[][..]), ("1.5", &["2"][..])] {
+        let equality = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"approx\" = {literal} \
+                 ORDER BY \"id\""
+            )
+        };
+        let statement = pushdown_statement(&equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("WHERE") && statement.contains("`approx`"),
+            "the equality must reach MySQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`approx` = {literal}: {rows:?}"
+        );
+    }
+}
+
+/// `vs-adapter/mysql-type-mapping` and `vs-adapter/pushdown-filter`: a `CHAR`
+/// value is emitted padded, equals a string literal as Exasol's does, and
+/// otherwise compares as MySQL compares it.
+#[test]
+fn char_column_emits_padded_and_compares_like_the_source() {
+    assert_declares(TYPE_COVERAGE, "fixed", "CHAR(10) UTF8");
+
+    let length = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", LENGTH(\"fixed\") AS LEN FROM {schema}.\"{table}\" \
+             WHERE \"fixed\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, length);
+    assert_eq!(
+        column_values(&rows, "LEN"),
+        strings(&["10", "10"]),
+        "Exasol pads the unpadded value the scan emits to the declared size: {rows:?}"
+    );
+
+    let literal_equality = |schema: &str, table: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"fixed\" = 'ab' ORDER BY \"id\"")
+    };
+    let statement = pushdown_statement(&literal_equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("WHERE"),
+        "the equality must reach MySQL: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, literal_equality);
+    assert_eq!(column_values(&rows, "id"), strings(&["1"]), "{rows:?}");
+
+    let stack = stack::shared();
+    let varchar_operand = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"fixed\" = \"tiny_text\" \
+             ORDER BY \"id\""
+        )
+    };
+    let statement = pushdown_statement(&varchar_operand(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("WHERE"),
+        "the comparison with a VARCHAR operand must reach MySQL: {statement}"
+    );
+    let source_rows = stack
+        .exasol
+        .query_rows(&varchar_operand(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    let exasol_rows = stack
+        .exasol
+        .query_rows(&varchar_operand(mirror::SCHEMA, TYPE_COVERAGE));
+    assert_eq!(
+        column_values(&source_rows, "id"),
+        strings(&["1"]),
+        "MySQL ignores the blanks of a fixed-width value, so `ab` equals `ab`: {source_rows:?}"
+    );
+    assert!(
+        exasol_rows.is_empty(),
+        "Exasol's CHAR equals no VARCHAR holding the same text: {exasol_rows:?}"
+    );
+
+    let pattern = |schema: &str, table: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"fixed\" LIKE 'ab' ORDER BY \"id\"")
+    };
+    let statement = pushdown_statement(&pattern(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("LIKE"),
+        "the pattern must reach MySQL: {statement}"
+    );
+    let source_rows = stack
+        .exasol
+        .query_rows(&pattern(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    let exasol_rows = stack
+        .exasol
+        .query_rows(&pattern(mirror::SCHEMA, TYPE_COVERAGE));
+    assert_eq!(
+        column_values(&source_rows, "id"),
+        strings(&["1"]),
+        "MySQL matches the unpadded value: {source_rows:?}"
+    );
+    assert!(
+        exasol_rows.is_empty(),
+        "Exasol's own LIKE 'ab' over a CHAR(10) holding `ab` matches no row: {exasol_rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: an `ENUM` and a `SET` map to `CHAR` of
+/// their catalog length and behave as a `CHAR` column does.
+#[test]
+fn enum_and_set_columns_emit_padded_and_compare_like_the_source() {
+    assert_declares(TYPE_COVERAGE, "kind", "CHAR(5) UTF8");
+    assert_declares(TYPE_COVERAGE, "tags", "CHAR(4) UTF8");
+
+    let length = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", LENGTH(\"kind\") AS LEN, \"tags\" FROM {schema}.\"{table}\" \
+             WHERE \"kind\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, length);
+    assert_eq!(
+        column_values(&rows, "LEN"),
+        strings(&["5", "5"]),
+        "an ENUM value is emitted padded to five characters: {rows:?}"
+    );
+
+    let equality = |schema: &str, table: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"kind\" = 'ab' ORDER BY \"id\"")
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+    assert_eq!(column_values(&rows, "id"), strings(&["1"]), "{rows:?}");
+
+    let pattern = |schema: &str, table: &str| {
+        format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"kind\" LIKE 'ab' ORDER BY \"id\"")
+    };
+    let stack = stack::shared();
+    let source_rows = stack
+        .exasol
+        .query_rows(&pattern(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    let exasol_rows = stack
+        .exasol
+        .query_rows(&pattern(mirror::SCHEMA, TYPE_COVERAGE));
+    assert_eq!(
+        column_values(&source_rows, "id"),
+        strings(&["1"]),
+        "MySQL matches the unpadded member: {source_rows:?}"
+    );
+    assert!(
+        exasol_rows.is_empty(),
+        "Exasol's own LIKE 'ab' over a CHAR(5) holding `ab` matches no row: {exasol_rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `latin1` column maps like a `utf8mb4` one
+/// and emits its text intact, and a delegated comparison with a character
+/// `latin1` cannot hold fails rather than selecting or dropping rows.
+#[test]
+fn latin1_columns_emit_and_compare_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "latin_varchar", "VARCHAR(20) UTF8");
+    assert_declares(TYPE_COVERAGE, "latin_char", "CHAR(10) UTF8");
+    assert_declares(TYPE_COVERAGE, "latin_text", "VARCHAR(65535) UTF8");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"latin_varchar\", \"latin_char\", \"latin_text\" \
+             FROM {schema}.\"{table}\" WHERE \"id\" = 1"
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    for column in ["latin_varchar", "latin_char", "latin_text"] {
+        assert_eq!(
+            cell(&rows[0], column),
+            Some(match column {
+                "latin_char" => "café      ".to_string(),
+                _ => "café".to_string(),
+            }),
+            "{column} must emit its accented character intact: {rows:?}"
+        );
+    }
+
+    for column in ["latin_varchar", "latin_char", "latin_text"] {
+        let equality = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"{column}\" = 'café' \
+                 ORDER BY \"id\""
+            )
+        };
+        let statement = pushdown_statement(&equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("WHERE"),
+            "the equality over {column} must reach MySQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(&["1"]),
+            "{column} = 'café': {rows:?}"
+        );
+
+        let outside = format!(
+            "SELECT \"id\" FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" WHERE \"{column}\" = 'ł'"
+        );
+        let error = stack::shared().exasol.execute_expecting_failure(&outside);
+        assert!(
+            error.contains("Illegal mix of collations"),
+            "a literal outside latin1 must fail with MySQL's collation error: {error}"
+        );
+    }
+}
+
+/// `vs-adapter/mysql-collation`: a `latin1` column converted to
+/// `utf8mb4_0900_bin` in a view compares by code point, as Exasol does.
+#[test]
+fn latin1_column_converted_to_utf8mb4_0900_bin_in_a_view_returns_exasols_answers() {
+    let view = mysql::CONVERTED_REGION_VIEW;
+
+    let equality = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"region\" = 'North' ORDER BY \"id\""
+        )
+    };
+    let statement = pushdown_statement(&equality(VIRTUAL_SCHEMA, view));
+    assert!(
+        statement.contains("WHERE"),
+        "the equality must reach MySQL: {statement}"
+    );
+    let rows = assert_matches_mirror_of(view, ITEMS, equality);
+    assert_eq!(
+        column_values(&rows, "id"),
+        strings(&["1"]),
+        "`North ` with its trailing space differs from `North`, as in Exasol: {rows:?}"
+    );
+
+    let grouped = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"region\" AS REGION, COUNT(*) AS N FROM {schema}.\"{table}\" \
+             GROUP BY \"region\" ORDER BY \"region\""
+        )
+    };
+    let statement = pushdown_statement(&grouped(VIRTUAL_SCHEMA, view));
+    assert!(
+        statement.contains("GROUP BY `region`"),
+        "the grouping must reach MySQL: {statement}"
+    );
+    let rows = assert_matches_mirror_of(view, ITEMS, grouped);
+    assert_eq!(rows.len(), 6, "{rows:?}");
+
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT COUNT(DISTINCT \"region\") AS DISTINCT_REGIONS, MIN(\"region\") AS MIN_REGION, \
+             MAX(\"region\") AS MAX_REGION FROM {schema}.\"{table}\""
+        )
+    };
+    let statement = pushdown_statement(&aggregates(VIRTUAL_SCHEMA, view));
+    for fragment in ["COUNT(DISTINCT `region`)", "MIN(`region`)", "MAX(`region`)"] {
+        assert!(
+            statement.contains(fragment),
+            "the aggregate {fragment} must reach MySQL: {statement}"
+        );
+    }
+    let rows = assert_matches_mirror_of(view, ITEMS, aggregates);
+    for (name, expected) in [
+        ("DISTINCT_REGIONS", "6"),
+        ("MIN_REGION", "East"),
+        ("MAX_REGION", "south"),
+    ] {
+        assert_eq!(
+            cell(&rows[0], name),
+            Some(expected.to_string()),
+            "{name}: {rows:?}"
+        );
+    }
+}
+
+/// `vs-adapter/mysql-type-mapping`: a text value beyond Exasol's `VARCHAR`
+/// maximum fails the query rather than returning a truncated value.
+#[test]
+fn text_value_beyond_the_varchar_maximum_fails_the_query() {
+    assert_declares("text_overflow", "body", "VARCHAR(2000000) UTF8");
+    for (column, declared) in [
+        ("tiny_text", "VARCHAR(255) UTF8"),
+        ("plain_text", "VARCHAR(65535) UTF8"),
+        ("medium_text", "VARCHAR(2000000) UTF8"),
+        ("long_text", "VARCHAR(2000000) UTF8"),
+    ] {
+        assert_declares(TYPE_COVERAGE, column, declared);
+    }
+
+    let error = stack::shared().exasol.execute_expecting_failure(&format!(
+        "SELECT \"body\" FROM {VIRTUAL_SCHEMA}.\"text_overflow\""
+    ));
+    assert!(
+        error.contains("string data, right truncation: max length: 2000000, emitted: 2000001"),
+        "a value of 2000001 characters must fail the query naming the overflow: {error}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping` and `vs-adapter/pushdown-filter`: `BIT` of
+/// every width is `BOOLEAN` read as whether any bit is set, and a delegated
+/// filter, `MIN`, `MAX`, `COUNT(DISTINCT)`, and `GROUP BY` over each return what
+/// Exasol returns over the emitted values.
+#[test]
+fn bit_columns_filter_group_and_aggregate_like_the_mirror() {
+    for column in ["bit_flag", "bits", "wide_bits"] {
+        assert_declares(TYPE_COVERAGE, column, "BOOLEAN");
+    }
+
+    for (predicate, fragment, expected_ids) in [
+        ("\"bit_flag\"", "WHERE (`bit_flag` <> 0)", &["1"][..]),
+        ("NOT \"bit_flag\"", "(NOT (`bit_flag` <> 0))", &["2"][..]),
+        ("\"bits\"", "WHERE (`bits` <> 0)", &["1", "2"][..]),
+        ("NOT \"bits\"", "(NOT (`bits` <> 0))", &["3"][..]),
+        ("\"wide_bits\"", "WHERE (`wide_bits` <> 0)", &["1", "2"][..]),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains(fragment),
+            "`WHERE {predicate}` must reach MySQL as {fragment}: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`WHERE {predicate}`: {rows:?}"
+        );
+    }
+
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT MIN(\"bit_flag\") AS MIN_BIT, MAX(\"bit_flag\") AS MAX_BIT, \
+             MIN(\"bits\") AS MIN_BITS, MAX(\"bits\") AS MAX_BITS, \
+             COUNT(DISTINCT \"bits\") AS DISTINCT_BITS FROM {schema}.\"{table}\""
+        )
+    };
+    let statement = pushdown_statement(&aggregates(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    for fragment in [
+        "MIN((`bits` <> 0))",
+        "MAX((`bits` <> 0))",
+        "COUNT(DISTINCT (`bits` <> 0))",
+    ] {
+        assert!(
+            statement.contains(fragment),
+            "the aggregates must reach MySQL as {fragment}: {statement}"
+        );
+    }
+    let rows = assert_matches_mirror(TYPE_COVERAGE, aggregates);
+    for (name, expected) in [
+        ("MIN_BIT", "false"),
+        ("MAX_BIT", "true"),
+        ("MIN_BITS", "false"),
+        ("MAX_BITS", "true"),
+        ("DISTINCT_BITS", "2"),
+    ] {
+        assert_eq!(
+            cell(&rows[0], name),
+            Some(expected.to_string()),
+            "{name}: {rows:?}"
+        );
+    }
+
+    for column in ["bit_flag", "bits"] {
+        let grouped = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"{column}\" AS GROUP_KEY, COUNT(*) AS N FROM {schema}.\"{table}\" \
+                 GROUP BY \"{column}\" ORDER BY \"{column}\""
+            )
+        };
+        let statement = pushdown_statement(&grouped(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains(&format!("GROUP BY (`{column}` <> 0)")),
+            "the grouping over {column} must reach MySQL by its read expression: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, grouped);
+        assert_eq!(rows.len(), if column == "bits" { 2 } else { 3 }, "{rows:?}");
+    }
+    let bits_groups = stack::shared().exasol.query_rows(&format!(
+        "SELECT \"bits\" AS GROUP_KEY, COUNT(*) AS N FROM {VIRTUAL_SCHEMA}.\"{TYPE_COVERAGE}\" \
+         GROUP BY \"bits\""
+    ));
+    let true_group = bits_groups
+        .iter()
+        .find(|row| cell(row, "GROUP_KEY") == Some("true".to_string()))
+        .expect("a group of the set-bit values");
+    assert_eq!(
+        cell(true_group, "N"),
+        Some("2".to_string()),
+        "00000101 and 00001001 are one group: {bits_groups:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: a select-list predicate over a grouped
+/// converted column is delegated, reading the key through `ANY_VALUE`, and
+/// MySQL executes it rather than rejecting it with error 1055.
+#[test]
+fn select_list_predicates_over_grouped_converted_columns_match_the_mirror() {
+    for (query_text, expected_fragments, groups) in [
+        (
+            "SELECT NOT \"bits\" AS NOT_BITS, COUNT(*) AS N FROM {schema}.\"type_coverage\" \
+             GROUP BY \"bits\" ORDER BY NOT_BITS",
+            &["ANY_VALUE((`bits` <> 0))", "GROUP BY (`bits` <> 0)"][..],
+            2,
+        ),
+        (
+            "SELECT \"y\" = DATE '2024-01-01' AS IS_2024, COUNT(*) AS N \
+             FROM {schema}.\"type_coverage\" GROUP BY \"y\" ORDER BY IS_2024",
+            &["ANY_VALUE(MAKEDATE(`y`, 1))", "GROUP BY MAKEDATE(`y`, 1)"][..],
+            3,
+        ),
+    ] {
+        let query = |schema: &str, _table: &str| query_text.replace("{schema}", schema);
+
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        for fragment in expected_fragments {
+            assert!(
+                statement.contains(fragment),
+                "the statement must carry {fragment}: {statement}"
+            );
+        }
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(rows.len(), groups, "one row per group: {rows:?}");
+    }
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `TIME` is a `TIMESTAMP` on 1970-01-01 and
+/// a `YEAR` is a `DATE`, each read through its own expression.
+#[test]
+fn time_and_year_columns_read_and_compare_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "elapsed", "TIMESTAMP(3)");
+    assert_declares(TYPE_COVERAGE, "y", "DATE");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"elapsed\", \"y\" FROM {schema}.\"{table}\" \
+             WHERE \"elapsed\" IS NOT NULL ORDER BY \"id\""
+        )
+    };
+    let statement = pushdown_statement(&projection(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    for fragment in [
+        "TIMESTAMP(DATE ''1970-01-01'', `elapsed`)",
+        "MAKEDATE(`y`, 1)",
+    ] {
+        assert!(
+            statement.contains(fragment),
+            "the select list must carry {fragment}: {statement}"
+        );
+    }
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    assert_eq!(
+        column_values(&rows, "elapsed"),
+        strings(&["1970-01-01T16:59:59.123", "1970-01-02T01:00:00"]),
+        "{rows:?}"
+    );
+    assert_eq!(
+        column_values(&rows, "y"),
+        strings(&["2024-01-01", "2023-01-01"]),
+        "{rows:?}"
+    );
+
+    for (predicate, expected_ids) in [
+        (
+            "\"elapsed\" = TIMESTAMP '1970-01-01 16:59:59.123'",
+            &["1"][..],
+        ),
+        ("\"y\" = DATE '2024-01-01'", &["1"][..]),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("WHERE"),
+            "`{predicate}` must reach MySQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`{predicate}`: {rows:?}"
+        );
+    }
+}
+
+/// Task 3.7: `MAKEDATE` reads the year 0 as 2000, so a `YEAR` of `0000` is
+/// emitted as 2000-01-01.
+#[test]
+fn a_zero_year_is_emitted_as_the_first_of_the_year_2000() {
+    let rows = stack::shared().exasol.query_rows(&format!(
+        "SELECT \"id\", \"y\" FROM {VIRTUAL_SCHEMA}.\"year_edges\" ORDER BY \"id\""
+    ));
+
+    assert_eq!(
+        column_values(&rows, "y"),
+        strings(&["2024-01-01", "2000-01-01"]),
+        "{rows:?}"
+    );
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `JSON` column is `VARCHAR` read as the
+/// text MySQL prints, and a delegated comparison compares that text.
+#[test]
+fn json_column_compares_as_its_text_like_the_mirror() {
+    assert_declares(TYPE_COVERAGE, "doc", "VARCHAR(2000000) UTF8");
+
+    let projection = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"id\", \"doc\" FROM {schema}.\"{table}\" WHERE \"doc\" IS NOT NULL \
+             ORDER BY \"id\""
+        )
+    };
+    let rows = assert_matches_mirror(TYPE_COVERAGE, projection);
+    assert_eq!(
+        column_values(&rows, "doc"),
+        strings(&["{\"a\": 1}", "{\"a\": 2}"]),
+        "{rows:?}"
+    );
+
+    for (literal, expected_ids) in [("{\"a\": 1}", &["1"][..]), ("{\"a\":1}", &[][..])] {
+        let equality = |schema: &str, table: &str| {
+            format!(
+                "SELECT \"id\" FROM {schema}.\"{table}\" WHERE \"doc\" = '{literal}' \
+                 ORDER BY \"id\""
+            )
+        };
+        let statement = pushdown_statement(&equality(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("CAST(`doc` AS CHAR)"),
+            "the comparison must read the column as its text: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, equality);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`doc` = '{literal}': {rows:?}"
+        );
+    }
+}
+
+/// `vs-adapter/mysql-type-mapping`: a `TIMESTAMP` is a `TIMESTAMP` of its own
+/// precision in the session time zone, and under UTC every delegated comparison,
+/// aggregate, grouping, and join returns what Exasol returns over the emitted
+/// values.
+#[test]
+fn timestamp_column_compares_groups_and_joins_like_the_mirror_under_a_utc_session() {
+    assert_session_time_zone_is_utc();
+    assert_declares(TYPE_COVERAGE, "happened_at", "TIMESTAMP(6)");
+
+    for (predicate, expected_ids) in [
+        (
+            "\"happened_at\" = TIMESTAMP '2024-01-01 12:00:00.123456'",
+            &["1"][..],
+        ),
+        ("\"happened_at\" > DATE '2024-03-01'", &["2"][..]),
+        (
+            "\"happened_at\" < TIMESTAMP '2024-01-01 12:00:00.123457'",
+            &["1"][..],
+        ),
+    ] {
+        let query = |schema: &str, table: &str| {
+            format!("SELECT \"id\" FROM {schema}.\"{table}\" WHERE {predicate} ORDER BY \"id\"")
+        };
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+        assert!(
+            statement.contains("WHERE"),
+            "`{predicate}` must reach MySQL: {statement}"
+        );
+        let rows = assert_matches_mirror(TYPE_COVERAGE, query);
+        assert_eq!(
+            column_values(&rows, "id"),
+            strings(expected_ids),
+            "`{predicate}`: {rows:?}"
+        );
+    }
+
+    let aggregates = |schema: &str, table: &str| {
+        format!(
+            "SELECT MIN(\"happened_at\") AS MIN_AT, MAX(\"happened_at\") AS MAX_AT, \
+             COUNT(DISTINCT \"happened_at\") AS DISTINCT_AT FROM {schema}.\"{table}\""
+        )
+    };
+    let statement = pushdown_statement(&aggregates(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    for fragment in [
+        "MIN(`happened_at`)",
+        "MAX(`happened_at`)",
+        "COUNT(DISTINCT `happened_at`)",
+    ] {
+        assert!(
+            statement.contains(fragment),
+            "the aggregate {fragment} must reach MySQL: {statement}"
+        );
+    }
+    assert_matches_mirror(TYPE_COVERAGE, aggregates);
+
+    let grouped = |schema: &str, table: &str| {
+        format!(
+            "SELECT \"happened_at\" AS HAPPENED, COUNT(*) AS N FROM {schema}.\"{table}\" \
+             GROUP BY \"happened_at\" ORDER BY \"happened_at\""
+        )
+    };
+    let statement = pushdown_statement(&grouped(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("GROUP BY `happened_at`"),
+        "the grouping must reach MySQL: {statement}"
+    );
+    assert_matches_mirror(TYPE_COVERAGE, grouped);
+
+    let join = |schema: &str, table: &str| {
+        format!(
+            "SELECT t.\"id\" AS ID FROM {schema}.\"{table}\" t JOIN {schema}.\"{table}\" u \
+             ON t.\"happened_at\" = u.\"local_at\" ORDER BY t.\"id\""
+        )
+    };
+    let statement = pushdown_statement(&join(VIRTUAL_SCHEMA, TYPE_COVERAGE));
+    assert!(
+        statement.contains("JOIN"),
+        "the join must reach MySQL: {statement}"
+    );
+    let rows = assert_matches_mirror(TYPE_COVERAGE, join);
+    assert_eq!(
+        column_values(&rows, "ID"),
+        strings(&["1"]),
+        "only the first row's happened_at equals its local_at: {rows:?}"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`: an aggregation Exasol cannot delegate
+/// whole is computed by Exasol over the rows MySQL returns.
+#[test]
+fn aggregation_not_delegable_whole_is_withdrawn_and_matches_local_exasol_result() {
+    for (label, query_text) in [
+        (
+            "an expression over an aggregate",
+            "SELECT COUNT(\"quantity\") + 1 AS VAL FROM {schema}.\"items\"",
+        ),
+        (
+            "a withheld aggregate beside a delegable one",
+            "SELECT SUM(\"quantity\") AS S, COUNT(*) AS N FROM {schema}.\"items\"",
+        ),
+    ] {
+        let query = |schema: &str, _items: &str| query_text.replace("{schema}", schema);
+
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
+        for forbidden in ["COUNT", "SUM"] {
+            assert!(
+                !statement.contains(forbidden),
+                "{label} must be withdrawn whole, so the statement carries no {forbidden}: \
+                 {statement}"
+            );
+        }
+        let rows = assert_matches_mirror(ITEMS, query);
+        assert_eq!(rows.len(), 1, "{label}: {rows:?}");
+    }
 }
 
 #[test]

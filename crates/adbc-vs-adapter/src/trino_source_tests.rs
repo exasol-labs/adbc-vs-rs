@@ -1,6 +1,6 @@
 use super::*;
+use crate::exa_type::ExasolType;
 use crate::metadata::DiscoveredTable;
-use crate::type_mapping::MappedType;
 
 /// One `information_schema.columns` row, with the fields a test does not care
 /// about set to what the first column of a table reports.
@@ -86,7 +86,7 @@ fn a_table_reports_its_mapped_and_its_omitted_columns_together() {
     assert_eq!(table.columns[0].name, "id");
     assert_eq!(
         table.columns[0].mapped.exasol_type,
-        MappedType::Decimal {
+        ExasolType::Decimal {
             precision: 10,
             scale: 0
         }
