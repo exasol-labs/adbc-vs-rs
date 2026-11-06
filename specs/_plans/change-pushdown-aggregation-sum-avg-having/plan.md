@@ -2,7 +2,7 @@
 
 ## Summary
 
-The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`, `AVG(DISTINCT)`, and `HAVING` to the source, and a floating-point sum follows the source's accumulation order, as documented for users. This implements issue exasol-labs/adbc-vs-rs#19 with its option 1.
+The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`, `AVG(DISTINCT)`, and `HAVING` to the source, and a floating-point sum follows the source's accumulation order, as documented for users. A new documentation page lists what runs at the source for each database. This implements issue exasol-labs/adbc-vs-rs#19 with its option 1.
 
 ## Context
 
@@ -18,6 +18,7 @@ The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`
 - MySQL's `SUM` over an exact-numeric operand returns a `DECIMAL` wider than the operand. The scan converts each result column to its declared type with arrow's cast kernel (`crates/adbc-vs-scan/src/coerce.rs:178`), and no existing test reads a MySQL decimal wider than 38 digits.
 - No mirrored test table holds an exact-numeric column, a `DOUBLE` column, and a grouping column together, and the Trino mirror holds no `DOUBLE` column.
 - The deltas rewrite the Background of `mysql-pushdown`, `postgresql-pushdown`, `trino-pushdown`, and `pushdown-dialect`, whose bullets state the old withholding. Each rewrite is cut to five bullets. The behavior a dropped bullet described stays in that feature's scenarios.
+- `docs/how-it-works.md:39` states what runs at the source in one sentence for every database. The three capability sets differ in three entries: `FN_PRED_LIKE_ESCAPE` (MySQL, PostgreSQL), `JOIN_TYPE_FULL_OUTER` (PostgreSQL, Trino), and `AGGREGATE_GROUP_BY_TUPLE` (Trino). PR #23 feedback asks for a per-database overview that each dialect group keeps equal to its driver capability set.
 - Architecture: `architecture.md` adds the floating-point `SUM` and `AVG` rule to § Constraints, beside the collation rule. The query model gains an optional `having` predicate inside `pushdown_query`'s existing responsibility.
 
 ## Features
@@ -39,6 +40,7 @@ The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`
 - A `SUM` or `AVG` over a `BOOLEAN` or character column is delegated, with the operand converted as Exasol converts it. Over a MySQL character column, a value that is not a number reads as its numeric prefix or as 0, where Exasol fails the query.
 - Breaking for MySQL servers older than 8.0.17: a delegated `AVG` fails there, because `CAST(... AS DOUBLE)` needs 8.0.17.
 - Exasol requests the capability set once per session, so sessions that start after the adapter library is upgraded use the new set.
+- The documentation gains a Pushdown page, `docs/pushdown.md`, linked from every page's navigation header, from `docs/index.md`, and from `README.md`. It lists what runs at the source for MySQL, PostgreSQL, and Trino, and where a delegated result can differ from Exasol's.
 
 ## Implementation Tasks
 
@@ -47,8 +49,32 @@ The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`
 - [ ] 1.1 Parse the `having` element into the `Query` model in `pushdown_query.rs` with `read_predicate` (`:767`), and remove its entry from `UNDELEGATED_ELEMENTS` (`:336`) with the doc comment at `:322-323`. Replace `a_having_element_is_refused` (`pushdown_query_tests.rs:227`) with `a_having_element_parses_into_the_query_model`.
 - [ ] 1.2 Add `AGGREGATE_HAVING` to `MAIN_CAPABILITY_CONSTANTS` (`capabilities_tests.rs:144`).
 - [ ] 1.3 Extend `declared_types_come_from_select_list_data_types` (`emit_type_tests.rs:51`) with `SUM`, `SUM(DISTINCT)`, `AVG`, and `AVG(DISTINCT)` entries.
-- [ ] 1.4 In `docs/how-it-works.md`, add `HAVING` and the `SUM` and `AVG` functions to "What runs at the source". Add a section "Floating-point sums follow the source" beside "String comparison follows the source": an exact-numeric `SUM` or `AVG` equals Exasol's result; over a `DOUBLE` column the source adds in its own order, so the result can differ in the low-order digits, differ further where values cancel, and differ between runs; a `NaN` makes the result null; to get Exasol's result, wrap the operand in an expression the adapter does not send, such as `SUM("price" + 0)`. Add to the MySQL database details that a delegated `AVG` needs MySQL 8.0.17 or later, and that a delegated `SUM` or `AVG` over a character column reads a value that is not a number as its numeric prefix or as 0, where Exasol fails the query.
+- [ ] 1.4 Create `docs/pushdown.md`, titled "Pushdown", with the navigation header and rule of `docs/how-it-works.md:1-3`. Add `[Pushdown](pushdown.md)` between How Does It Work and Type Mapping to that header in `docs/{install,create-virtual-schema,how-it-works,type-mapping}.md` and in the new page. Add the page to the list in `docs/index.md:7-10` and to the documentation list in `README.md:58-63`, and link the "SQL pushdown" bullet of `README.md:30` to it. Replace the two paragraphs of "What runs at the source" in `docs/how-it-works.md` (`:39-41`) with one sentence that links the page. The page holds, in this order:
+  - One paragraph: the adapter sends the parts of a query that the source can run, and Exasol runs the rest on the returned rows.
+  - The table of the rows listed after this task group, with the Capabilities column and one Yes or No cell per database. Each cell comes from the `advertised` list of `crates/adbc-vs-scan/drivers/<database>.toml` as it stands before group B: Yes when the list holds every capability of the row, No when it holds none. The `SUM`, `AVG`, and `HAVING` rows read No for every database until tasks 2.8, 3.7, and 4.7.
+  - The parts Exasol runs for every database: `ORDER BY`, `LIMIT`, `OFFSET`, `GROUP BY` over an expression, a join on a condition other than equality, and scalar functions and arithmetic, such as `"price" + 0`. A query with such a part still works, but Exasol fetches more rows.
+  - A section "Floating-point sums follow the source" for the databases whose `SUM` and `AVG` cells read Yes: an exact-numeric `SUM` or `AVG` equals Exasol's result; over a `DOUBLE` column the source adds in its own order, so the result can differ in the low-order digits, differ further where values cancel, and differ between runs; a `NaN` makes the result null; to get Exasol's result, wrap the operand in an expression the adapter does not send, such as `SUM("price" + 0)`. The section links "String comparison follows the source" in `docs/how-it-works.md`.
+  - A section per database for its differences. The MySQL section states that MySQL has no `FULL OUTER JOIN`. The Trino section holds the `LIKE` backslash bullet, moved from `docs/how-it-works.md:82`.
 - [ ] 1.5 In `pushdown_query.rs`, add one method on `Expression` (`:92`) that classifies a `SUM` or `AVG` operand by the conversion Exasol applies to it: `BOOLEAN` (a column declared `ExasolType::Boolean`, or a predicate), character (a column declared `Varchar` or `Char`, or a `Literal::String`), or none. Its doc comment states that it reproduces Exasol's implicit conversion of the emitted value and is not a read expression. Add `aggregate_operand_conversion_follows_the_exasol_type` to `pushdown_query_tests.rs`.
+
+Rows of the `docs/pushdown.md` table, derived from the three `advertised` lists before group B. The rows cover all 34, 35, and 35 entries.
+
+| Row | Capabilities | MySQL | PostgreSQL | Trino |
+|-----|--------------|-------|------------|-------|
+| Column selection | `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS` | Yes | Yes | Yes |
+| Filters with comparisons, `IS NULL`, `IS NOT NULL`, `BETWEEN`, `IN` with a list of constants, `LIKE`, `AND`, `OR`, and `NOT` | `FILTER_EXPRESSIONS`, `FN_PRED_EQUAL`, `FN_PRED_NOTEQUAL`, `FN_PRED_LESS`, `FN_PRED_LESSEQUAL`, `FN_PRED_IS_NULL`, `FN_PRED_IS_NOT_NULL`, `FN_PRED_BETWEEN`, `FN_PRED_IN_CONSTLIST`, `FN_PRED_LIKE`, `FN_PRED_AND`, `FN_PRED_OR`, `FN_PRED_NOT` | Yes | Yes | Yes |
+| `LIKE` with an `ESCAPE` clause | `FN_PRED_LIKE_ESCAPE` | Yes | Yes | No |
+| `NULL`, number, string, date, and timestamp literals | `LITERAL_NULL`, `LITERAL_EXACTNUMERIC`, `LITERAL_DOUBLE`, `LITERAL_STRING`, `LITERAL_DATE`, `LITERAL_TIMESTAMP` | Yes | Yes | Yes |
+| Aggregation without `GROUP BY` | `AGGREGATE_SINGLE_GROUP` | Yes | Yes | Yes |
+| `GROUP BY` one column | `AGGREGATE_GROUP_BY_COLUMN` | Yes | Yes | Yes |
+| `GROUP BY` several columns | `AGGREGATE_GROUP_BY_TUPLE` | No | No | Yes |
+| `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)` | `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT` | Yes | Yes | Yes |
+| `MIN`, `MAX` | `FN_AGG_MIN`, `FN_AGG_MAX` | Yes | Yes | Yes |
+| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | No | No | No |
+| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | No | No | No |
+| `HAVING` | `AGGREGATE_HAVING` | No | No | No |
+| Inner, left outer, and right outer join on an equality | `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI` | Yes | Yes | Yes |
+| Full outer join on an equality | `JOIN_TYPE_FULL_OUTER` | No | Yes | Yes |
 
 ### 2. MySQL dialect
 
@@ -59,6 +85,7 @@ The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`
 - [ ] 2.5 Add a `measures` fixture table to the MySQL test source and to the `MIRROR` schema (`tests/common/mysql.rs`, `tests/common/mirror.rs`). It holds a grouping column, a `BIGINT` column, a `DECIMAL(30,2)` column, a `DOUBLE` column, and a `FLOAT` column across three groups. One group holds only null operands. The floating-point values are binary fractions whose partial sums are exact in double precision. The table also holds a `BIT(1)` column and a `VARCHAR` column whose values are binary-fraction decimals as text, with an empty string and `'5'` beside `'5.0'` in one group.
 - [ ] 2.6 In `e2e_mysql_test.rs`, add `sum_and_avg_are_delegated_and_match_the_mirror`, `sum_and_avg_over_boolean_and_character_columns_match_the_mirror`, and `having_is_delegated_and_matches_the_mirror`. Each asserts the fragment through `pushdown_statement` (`:2964`) and the rows through `assert_matches_mirror_of` (`:1235`). The `BIGINT` and `DECIMAL(30,2)` sums read a MySQL `DECIMAL` wider than 38 digits; if the scan cannot cast the driver's Arrow type for it, extend `crates/adbc-vs-scan/src/coerce.rs` under the existing `scan-udf/arrow-coercion` scenario "Decimal width variation is normalized", with a test in `coerce_tests.rs`. Change the `SUM`-beside-`COUNT` case of `aggregation_not_delegable_whole_is_withdrawn_and_matches_local_exasol_result` (`:2708`) to `STDDEV` beside `COUNT`.
 - [ ] 2.7 Update the stale comments that say the shipped dialect withholds `SUM` and `AVG`: `e2e_mysql_test.rs:535`, `tests/common/probe.rs:10-11` and `:204`.
+- [ ] 2.8 In `docs/pushdown.md`, set the MySQL cells of the `SUM`, `AVG`, and `HAVING` rows to Yes, so every MySQL cell matches `mysql.toml` after task 2.1. Add to the MySQL section that a delegated `AVG` needs MySQL 8.0.17 or later, because `CAST(... AS DOUBLE)` needs it, and that a delegated `SUM` or `AVG` over a character column reads a value that is not a number as its numeric prefix or as 0, where Exasol fails the query.
 
 ### 3. PostgreSQL dialect
 
@@ -68,6 +95,7 @@ The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`
 - [ ] 3.4 In `postgres_dialect_tests.rs`, add `query_exercising` arms (`:1374`) for the five capabilities. Add `sum_renders_with_and_without_distinct`, `sum_over_a_double_operand_casts_it_to_double_precision`, `avg_renders_as_the_double_quotient_of_sum_and_count`, `sum_and_avg_convert_boolean_and_character_operands`, and `having_renders_after_group_by_and_on_a_single_group`. Extend `mixed_case_function_names_render_identically` (`:1077`). Remove the `AVG` and `SUM` cases from `unrenderable_aggregate_named_in_error` (`:1105`) and the `having` arm from `order_by_and_limit_elements_fail_named` (`:1249`).
 - [ ] 3.5 Add a `measures` fixture table to `docker/postgres/init.sql` and to `PG_MIRROR` (`tests/common/postgres_mirror.rs`) with the columns of task 2.5, a `boolean` column in place of `BIT(1)`, a `real` column in place of `FLOAT` holding `16777216` and `1` in one group, and a separate table holding a `double precision` `NaN` beside finite values, which the mirror does not copy.
 - [ ] 3.6 In `e2e_postgres_test.rs`, add `sum_and_avg_are_delegated_and_match_the_mirror`, `sum_and_avg_over_boolean_and_character_columns_match_the_mirror`, `having_is_delegated_and_matches_the_mirror`, `sum_over_a_real_column_accumulates_in_double_precision`, and `a_nan_operand_makes_the_delegated_sum_and_avg_null`, asserting the fragment through `generated_statement` (`:2468`) and the rows through `assert_matches_mirror` (`:2442`). Update the comment at `:755`.
+- [ ] 3.7 In `docs/pushdown.md`, set the PostgreSQL cells of the `SUM`, `AVG`, and `HAVING` rows to Yes, so every PostgreSQL cell matches `postgresql.toml` after task 3.1. Add to the PostgreSQL section that a `SUM` over a `real` column adds in double precision, so it returns the sum Exasol computes over the same values as `DOUBLE`.
 
 ### 4. Trino dialect
 
@@ -77,17 +105,19 @@ The MySQL, PostgreSQL, and Trino dialects delegate `SUM`, `SUM(DISTINCT)`, `AVG`
 - [ ] 4.4 In `trino_dialect_tests.rs`, add `query_exercising` arms (`:769`) for the five capabilities. Add `sum_renders_with_and_without_distinct`, `sum_over_a_decimal_operand_casts_it_to_decimal_38`, `avg_renders_as_the_double_quotient_of_sum_and_count`, `sum_and_avg_convert_boolean_and_character_operands`, `having_renders_after_group_by_and_on_a_single_group`, and `mixed_case_function_names_render_identically`. Change `unrenderable_aggregate_named_in_error` (`:509`) from `sum` to `stddev`.
 - [ ] 4.5 Add a `measures` fixture table to `docker/trino/init.sql` and to `TR_MIRROR` (`tests/common/trino_mirror.rs`) with a grouping column, a `bigint` column holding `9223372036854775807` and `1` in one group, a `decimal(12,4)` column, a `double` column, and a `varchar` column holding the text values of task 2.5, under the value rules of task 2.5.
 - [ ] 4.6 In `e2e_trino_test.rs`, add `sum_and_avg_are_delegated_and_match_the_mirror`, `sum_and_avg_over_boolean_and_character_columns_match_the_mirror` (over the `varchar` column and over a predicate on the `bigint` column), `having_is_delegated_and_matches_the_mirror`, and `sum_over_a_bigint_column_sums_past_the_bigint_range`, asserting the fragment through `generated_statement` (`:1250`) and the rows through `assert_matches_mirror` (`:1234`).
+- [ ] 4.7 In `docs/pushdown.md`, set the Trino cells of the `SUM`, `AVG`, and `HAVING` rows to Yes, so every Trino cell matches `trino.toml` after task 4.1. Add to the Trino section that a `SUM` over a `bigint` or `decimal` column adds in a 38-digit decimal, so a sum beyond the `bigint` range returns its value instead of a Trino overflow error.
 
 ## Parallelization
 
 | Group | Tasks | Depends on | Knowledge |
 |-------|-------|------------|-----------|
-| A: Query model and documentation | 1.1-1.5 | — | spec deltas `vs-adapter/pushdown-aggregation`, `vs-adapter/pushdown-aggregation-delegation`, `vs-adapter/pushdown-aggregation-types`, `vs-adapter/pushdown-dialect`; `crates/adbc-vs-adapter/src/pushdown_query.rs`, `pushdown_query_tests.rs`, `emit_type_tests.rs`, `capabilities_tests.rs`, `docs/how-it-works.md` |
-| B: MySQL dialect | 2.1-2.7 | A (uses the `having` model); shares `capabilities_tests.rs` | spec delta `vs-adapter/mysql-pushdown` plus group A's deltas; `crates/adbc-vs-scan/drivers/mysql.toml`, `crates/adbc-vs-adapter/src/mysql_dialect.rs`, `mysql_dialect_tests.rs`, `capabilities_tests.rs`, `tests/e2e_mysql_test.rs`, `tests/common/{mysql,mirror,probe}.rs`, `crates/adbc-vs-scan/src/coerce.rs` |
-| C: PostgreSQL dialect | 3.1-3.6 | B (shares `capabilities_tests.rs`) | spec delta `vs-adapter/postgresql-pushdown` plus group A's deltas; `crates/adbc-vs-scan/drivers/postgresql.toml`, `crates/adbc-vs-adapter/src/postgres_dialect.rs`, `postgres_dialect_tests.rs`, `capabilities_tests.rs`, `tests/e2e_postgres_test.rs`, `tests/common/postgres_mirror.rs`, `docker/postgres/init.sql` |
-| D: Trino dialect | 4.1-4.6 | C (shares `capabilities_tests.rs`, and the PostgreSQL set must be final for the set comparison) | spec delta `vs-adapter/trino-pushdown` plus group A's deltas; `crates/adbc-vs-scan/drivers/trino.toml`, `crates/adbc-vs-adapter/src/trino_dialect.rs`, `trino_dialect_tests.rs`, `capabilities_tests.rs`, `tests/e2e_trino_test.rs`, `tests/common/trino_mirror.rs`, `docker/trino/init.sql` |
+| A: Query model and documentation | 1.1-1.5 | — | spec deltas `vs-adapter/pushdown-aggregation`, `vs-adapter/pushdown-aggregation-delegation`, `vs-adapter/pushdown-aggregation-types`, `vs-adapter/pushdown-dialect`; `crates/adbc-vs-adapter/src/pushdown_query.rs`, `pushdown_query_tests.rs`, `emit_type_tests.rs`, `capabilities_tests.rs`, `crates/adbc-vs-scan/drivers/{mysql,postgresql,trino}.toml` (read only), `docs/{pushdown,how-it-works,index,install,create-virtual-schema,type-mapping}.md`, `README.md` |
+| B: MySQL dialect | 2.1-2.8 | A (uses the `having` model); shares `capabilities_tests.rs` | spec delta `vs-adapter/mysql-pushdown` plus group A's deltas; `crates/adbc-vs-scan/drivers/mysql.toml`, `crates/adbc-vs-adapter/src/mysql_dialect.rs`, `mysql_dialect_tests.rs`, `capabilities_tests.rs`, `tests/e2e_mysql_test.rs`, `tests/common/{mysql,mirror,probe}.rs`, `crates/adbc-vs-scan/src/coerce.rs`, `docs/pushdown.md` |
+| C: PostgreSQL dialect | 3.1-3.7 | B (shares `capabilities_tests.rs`) | spec delta `vs-adapter/postgresql-pushdown` plus group A's deltas; `crates/adbc-vs-scan/drivers/postgresql.toml`, `crates/adbc-vs-adapter/src/postgres_dialect.rs`, `postgres_dialect_tests.rs`, `capabilities_tests.rs`, `tests/e2e_postgres_test.rs`, `tests/common/postgres_mirror.rs`, `docker/postgres/init.sql`, `docs/pushdown.md` |
+| D: Trino dialect | 4.1-4.7 | C (shares `capabilities_tests.rs`, and the PostgreSQL set must be final for the set comparison) | spec delta `vs-adapter/trino-pushdown` plus group A's deltas; `crates/adbc-vs-scan/drivers/trino.toml`, `crates/adbc-vs-adapter/src/trino_dialect.rs`, `trino_dialect_tests.rs`, `capabilities_tests.rs`, `tests/e2e_trino_test.rs`, `tests/common/trino_mirror.rs`, `docker/trino/init.sql`, `docs/pushdown.md` |
 
 - The groups run in sequence. `capabilities_tests.rs` runs every dialect's invariant and exact-set tests, so a dialect group mid-change turns another group's run red.
+- `docs/pushdown.md` is shared the same way. Group A writes the page at the capability sets before group B. Each dialect group then changes only its own database's column and section, so the page matches the driver capability sets after every group.
 
 ## Dead Code Removal
 
@@ -149,7 +179,7 @@ Run each command after `make stack-up` and `make cross-udf-build`, against virtu
 | pushdown-aggregation-delegation | `exapump sql --dsn "$EXASOL_DSN" 'SELECT "name", SUM("amount"), AVG("amount") FROM PGVS."orders" GROUP BY "name"'` | Each name's `SUM` and `AVG` equal its seeded `amount` in `docker/postgres/init.sql`, and the name whose `amount` is null returns null for both |
 | pushdown-aggregation (operand conversion) | `exapump sql --dsn "$EXASOL_DSN" 'SELECT PUSHDOWN_SQL FROM (EXPLAIN VIRTUAL SELECT SUM("flag"), AVG("label") FROM PGVS."type_coverage")'` | The statement carries `SUM(CAST("flag" AS INTEGER))` and `(CAST(SUM(CAST(NULLIF("label", '') AS DOUBLE PRECISION)) AS DOUBLE PRECISION) / COUNT(NULLIF("label", '')))` |
 | pushdown-aggregation-delegation (operand conversion) | `exapump sql --dsn "$EXASOL_DSN" 'SELECT SUM("flag"), COUNT("flag") FROM PGVS."type_coverage"'` | `SUM` equals the number of rows whose `flag` is true in `docker/postgres/init.sql`, and no source error |
-| pushdown-aggregation-delegation (documented workaround) | `exapump sql --dsn "$EXASOL_DSN" 'SELECT PUSHDOWN_SQL FROM (EXPLAIN VIRTUAL SELECT SUM("price" + 0) FROM PGVS."orders")'` | The statement carries no `SUM`, so Exasol computes the sum, as `docs/how-it-works.md` states |
+| pushdown-aggregation-delegation (documented workaround) | `exapump sql --dsn "$EXASOL_DSN" 'SELECT PUSHDOWN_SQL FROM (EXPLAIN VIRTUAL SELECT SUM("price" + 0) FROM PGVS."orders")'` | The statement carries no `SUM`, so Exasol computes the sum, as `docs/pushdown.md` states |
 | pushdown-aggregation-types, pushdown-dialect | `exapump sql --dsn "$EXASOL_DSN" 'SELECT SUM("amount"), AVG("price") FROM MYSQLVS."orders"'` | One row and no declared-type error |
 
 ### Checklist
@@ -163,3 +193,4 @@ Run each command after `make stack-up` and `make cross-udf-build`, against virtu
 | E2E Trino | `make test-e2e-trino` | 0 failures |
 | Lint | `make lint` | 0 errors or warnings |
 | Format | `make fmt-check` | No changes |
+| Docs | Compare each database column of `docs/pushdown.md` with `advertised` in `crates/adbc-vs-scan/drivers/<database>.toml`, and follow every navigation link of `docs/*.md` and the documentation links of `README.md` | Each Yes row's capabilities are all in the list, each No row's are absent, the rows cover every list entry, and every link opens a page |
