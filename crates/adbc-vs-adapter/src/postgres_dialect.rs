@@ -75,14 +75,11 @@
 use adbc_vs_scan::driver::Driver;
 
 use crate::dialect_common::{
-    counted, is_numeric_constant, optional_clause, render_temporal_literal, StatementRenderer,
-    Tables,
+    counted, is_numeric_constant, render_literal_with, render_select, StatementRenderer, Tables,
 };
 use crate::exa_type::ExasolType;
 use crate::postgres_type_mapping;
-use crate::pushdown_query::{
-    Aggregation, ColumnRef, Expression, Literal, OperandConversion, Query,
-};
+use crate::pushdown_query::{ColumnRef, Expression, Literal, OperandConversion, Query};
 use crate::sql_dialect::{RenderError, SqlDialect};
 
 /// The PostgreSQL keyword each `join_type` this dialect renders spells, and
@@ -113,30 +110,12 @@ impl SqlDialect for PostgresDialect {
     }
 
     fn render(&self, query: &Query) -> Result<String, RenderError> {
-        let statement = Statement {
-            tables: Tables::of(&query.from),
-        };
-        let projection = statement.render_projection(&query.select_list)?;
-        let from = statement.render_from()?;
-        let filter = optional_clause("WHERE", query.filter.as_ref(), |predicate| {
-            statement.render_predicate(predicate)
-        })?;
-        let grouping = match &query.aggregation {
-            Some(Aggregation::GroupBy(columns)) => {
-                format!(
-                    " GROUP BY {}",
-                    statement.render_group_by_keys(columns)?.join(", ")
-                )
-            }
-            _ => String::new(),
-        };
-        let having = optional_clause("HAVING", query.having.as_ref(), |predicate| {
-            statement.render_predicate(predicate)
-        })?;
-
-        Ok(format!(
-            "SELECT {projection} FROM {from}{filter}{grouping}{having}"
-        ))
+        render_select(
+            &Statement {
+                tables: Tables::of(&query.from),
+            },
+            query,
+        )
     }
 }
 
@@ -235,13 +214,12 @@ fn boolean_aggregate(function: &str) -> &str {
 }
 
 fn render_literal(literal: &Literal) -> Result<String, RenderError> {
-    match literal {
-        Literal::Null => Ok("NULL".to_string()),
-        Literal::ExactNumeric(value) | Literal::Double(value) => render_numeric_literal(value),
-        Literal::String(value) => Ok(render_string_literal(value)),
-        Literal::Date(value) => render_temporal_literal("PostgreSQL", "DATE", value),
-        Literal::Timestamp(value) => render_temporal_literal("PostgreSQL", "TIMESTAMP", value),
-    }
+    render_literal_with(
+        "PostgreSQL",
+        literal,
+        render_numeric_literal,
+        render_string_literal,
+    )
 }
 
 /// Renders a string literal as the escape string constant `E'<body>'`.

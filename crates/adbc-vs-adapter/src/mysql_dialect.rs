@@ -61,7 +61,7 @@
 use adbc_vs_scan::driver::Driver;
 
 use crate::dialect_common::{
-    counted, optional_clause, render_temporal_literal, StatementRenderer, Tables,
+    counted, optional_clause, render_literal_with, StatementRenderer, Tables,
 };
 use crate::mysql_type_mapping;
 use crate::pushdown_query::{
@@ -243,13 +243,12 @@ impl StatementRenderer for Statement<'_> {
 }
 
 fn render_literal(literal: &Literal) -> Result<String, RenderError> {
-    match literal {
-        Literal::Null => Ok("NULL".to_string()),
-        Literal::ExactNumeric(value) | Literal::Double(value) => render_numeric_literal(value),
-        Literal::String(value) => Ok(render_string_literal(value)),
-        Literal::Date(value) => render_temporal_literal("MySQL", "DATE", value),
-        Literal::Timestamp(value) => render_temporal_literal("MySQL", "TIMESTAMP", value),
-    }
+    render_literal_with(
+        "MySQL",
+        literal,
+        render_numeric_literal,
+        render_string_literal,
+    )
 }
 
 /// Renders a string literal as the hex encoding of its UTF-8 bytes.

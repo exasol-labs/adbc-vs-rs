@@ -63,13 +63,6 @@ const ITEM_COLUMNS: [Column; 8] = [
     column("region", "VARCHAR(30) UTF8 NOT NULL"),
 ];
 
-/// The mirrored `item_notes` columns, in the order
-/// [`items::note_values`](super::items::note_values) renders them.
-const NOTE_COLUMNS: [Column; 2] = [
-    column("item_id", "DECIMAL(10,0) NOT NULL"),
-    column("note", "VARCHAR(50) UTF8 NOT NULL"),
-];
-
 /// The mirrored `type_coverage` columns, in the order of the fixture's own
 /// `CREATE TABLE`: the
 /// Exasol type the virtual table declares for each, stated here rather than
@@ -145,20 +138,6 @@ const TYPE_COVERAGE_VALUES: &str = "\
      NULL, NULL, NULL, \
      NULL, NULL, NULL, NULL, NULL, NULL)";
 
-/// The mirrored `measures` columns, in the order of the fixture's own
-/// `CREATE TABLE`: a `BIGINT` is `DECIMAL(19,0)`, a `FLOAT` and a `DOUBLE` are
-/// `DOUBLE`, a `BIT(1)` is `BOOLEAN`, and a `VARCHAR` is `VARCHAR(n) UTF8`.
-const MEASURES_COLUMNS: [Column; 8] = [
-    column("id", "DECIMAL(10,0) NOT NULL"),
-    column("grp", "VARCHAR(10) UTF8 NOT NULL"),
-    column("big_value", "DECIMAL(19,0)"),
-    column("decimal_value", "DECIMAL(30,2)"),
-    column("double_value", "DOUBLE"),
-    column("float_value", "DOUBLE"),
-    column("flag", "BOOLEAN"),
-    column("label", "VARCHAR(20) UTF8"),
-];
-
 /// The `measures` rows as Exasol reads them, copied by hand from
 /// `MEASURES_SCRIPT` in [`super::mysql`], every `BIT(1)` as a `BOOLEAN`.
 const MEASURES_VALUES: &str = "\
@@ -178,23 +157,24 @@ const MEASURES_VALUES: &str = "\
 /// fixture would make every differential comparison report a pushdown defect
 /// that is really a stale table.
 pub fn install(exasol: &Exasol) {
-    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"));
-    let seed = |table: &str, columns: &[Column], values: &str| {
-        mirror_table::seed(exasol, SCHEMA, table, columns, values)
-    };
+    let seed = mirror_table::seeder(exasol, SCHEMA);
     seed("items", &ITEM_COLUMNS, &items::mirror_values());
     seed(
         mysql::CODE_POINT_ITEMS,
         &ITEM_COLUMNS,
         &items::code_point_mirror_values(),
     );
-    seed("item_notes", &NOTE_COLUMNS, &items::note_values());
+    seed(
+        "item_notes",
+        &mirror_table::NOTE_COLUMNS,
+        &items::note_values(),
+    );
     seed(
         "type_coverage",
         &TYPE_COVERAGE_COLUMNS,
         TYPE_COVERAGE_VALUES,
     );
-    seed("measures", &MEASURES_COLUMNS, MEASURES_VALUES);
+    seed("measures", &mirror_table::MEASURES_COLUMNS, MEASURES_VALUES);
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {
@@ -242,7 +222,7 @@ mod tests {
 
     #[test]
     fn every_mirrored_row_carries_one_value_per_declared_column() {
-        for (table, columns, values) in [
+        mirror_table::assert_one_value_per_column(&[
             ("items", ITEM_COLUMNS.len(), items::mirror_values()),
             (
                 "items_bin",
@@ -256,18 +236,9 @@ mod tests {
             ),
             (
                 "measures",
-                MEASURES_COLUMNS.len(),
+                mirror_table::MEASURES_COLUMNS.len(),
                 MEASURES_VALUES.to_string(),
             ),
-        ] {
-            let counts = mirror_table::values_per_tuple(&values);
-
-            assert!(!counts.is_empty(), "`{table}` must hold rows");
-            assert!(
-                counts.iter().all(|count| *count == columns),
-                "every `{table}` row must carry {columns} values, one per declared column, or \
-                 Exasol assigns the values to the wrong columns: {counts:?}"
-            );
-        }
+        ]);
     }
 }

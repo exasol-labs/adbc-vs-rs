@@ -9,8 +9,8 @@
 //! name beyond the [`StatementRenderer::TARGET`] its error messages quote.
 
 use crate::pushdown_query::{
-    AggregateCall, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
-    InConstListPredicate, LikePredicate, Literal, OperandConversion, Predicate, SelectItem,
+    AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
+    InConstListPredicate, LikePredicate, Literal, OperandConversion, Predicate, Query, SelectItem,
     SourceTable,
 };
 use crate::sql_dialect::RenderError;
@@ -430,6 +430,52 @@ pub trait StatementRenderer {
             quote_identifier(alias, Self::QUOTE),
             quote_identifier(&column.name, Self::QUOTE)
         ))
+    }
+}
+
+/// Renders a whole query for a dialect whose `GROUP BY` keys are the plain
+/// rendering of the grouping columns.
+pub fn render_select<S: StatementRenderer>(
+    statement: &S,
+    query: &Query,
+) -> Result<String, RenderError> {
+    let projection = statement.render_projection(&query.select_list)?;
+    let from = statement.render_from()?;
+    let filter = optional_clause("WHERE", query.filter.as_ref(), |predicate| {
+        statement.render_predicate(predicate)
+    })?;
+    let grouping = match &query.aggregation {
+        Some(Aggregation::GroupBy(columns)) => {
+            format!(
+                " GROUP BY {}",
+                statement.render_group_by_keys(columns)?.join(", ")
+            )
+        }
+        _ => String::new(),
+    };
+    let having = optional_clause("HAVING", query.having.as_ref(), |predicate| {
+        statement.render_predicate(predicate)
+    })?;
+
+    Ok(format!(
+        "SELECT {projection} FROM {from}{filter}{grouping}{having}"
+    ))
+}
+
+/// Renders a literal for a dialect that spells a `DOUBLE` like an exact
+/// numeric, with the dialect's own numeric and string spellings.
+pub fn render_literal_with(
+    target: &str,
+    literal: &Literal,
+    numeric: fn(&str) -> Result<String, RenderError>,
+    string: fn(&str) -> String,
+) -> Result<String, RenderError> {
+    match literal {
+        Literal::Null => Ok("NULL".to_string()),
+        Literal::ExactNumeric(value) | Literal::Double(value) => numeric(value),
+        Literal::String(value) => Ok(string(value)),
+        Literal::Date(value) => render_temporal_literal(target, "DATE", value),
+        Literal::Timestamp(value) => render_temporal_literal(target, "TIMESTAMP", value),
     }
 }
 

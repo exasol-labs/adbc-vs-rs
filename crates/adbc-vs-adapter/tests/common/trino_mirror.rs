@@ -74,13 +74,6 @@ const ITEM_VALUES: &str = "\
     (5, 'cafe', 'a', 'ab'), \
     (6, 'café', 'C', 'ab!')";
 
-/// The mirrored `item_notes` columns, in `docker/trino/init.sql`'s column
-/// order. Both columns are mapped, so both are mirrored.
-const NOTE_COLUMNS: [Column; 2] = [
-    column("item_id", "DECIMAL(10,0) NOT NULL"),
-    column("note", "VARCHAR(50) UTF8 NOT NULL"),
-];
-
 /// The `item_notes` rows, `(item_id, note)`, copied verbatim from
 /// `docker/trino/init.sql`'s `INSERT INTO item_notes` statement. `item_id` 1
 /// is absent, so that `items` row is unmatched on the `items` side; `item_id`
@@ -125,16 +118,10 @@ const MEASURES_VALUES: &str = "\
 /// fixture would make every differential comparison report a pushdown defect
 /// that is really a stale table.
 pub fn install(exasol: &Exasol) {
-    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"));
-    mirror_table::seed(exasol, SCHEMA, "items", &ITEM_COLUMNS, ITEM_VALUES);
-    mirror_table::seed(exasol, SCHEMA, "item_notes", &NOTE_COLUMNS, NOTE_VALUES);
-    mirror_table::seed(
-        exasol,
-        SCHEMA,
-        "measures",
-        &MEASURES_COLUMNS,
-        MEASURES_VALUES,
-    );
+    let seed = mirror_table::seeder(exasol, SCHEMA);
+    seed("items", &ITEM_COLUMNS, ITEM_VALUES);
+    seed("item_notes", &mirror_table::NOTE_COLUMNS, NOTE_VALUES);
+    seed("measures", &MEASURES_COLUMNS, MEASURES_VALUES);
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {

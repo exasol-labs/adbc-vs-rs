@@ -21,6 +21,47 @@ pub const fn column(name: &'static str, declaration: &'static str) -> Column {
     Column { name, declaration }
 }
 
+/// The `item_notes` columns every source mirrors the same way.
+pub const NOTE_COLUMNS: [Column; 2] = [
+    column("item_id", "DECIMAL(10,0) NOT NULL"),
+    column("note", "VARCHAR(50) UTF8 NOT NULL"),
+];
+
+/// The `measures` columns the MySQL and PostgreSQL mirrors share.
+pub const MEASURES_COLUMNS: [Column; 8] = [
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("grp", "VARCHAR(10) UTF8 NOT NULL"),
+    column("big_value", "DECIMAL(19,0)"),
+    column("decimal_value", "DECIMAL(30,2)"),
+    column("double_value", "DOUBLE"),
+    column("float_value", "DOUBLE"),
+    column("flag", "BOOLEAN"),
+    column("label", "VARCHAR(20) UTF8"),
+];
+
+/// Creates the mirror schema and returns the function that seeds one table in
+/// it.
+pub fn seeder<'a>(exasol: &'a Exasol, schema: &'a str) -> impl Fn(&str, &[Column], &str) + 'a {
+    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"));
+    move |table, columns, values| seed(exasol, schema, table, columns, values)
+}
+
+/// Asserts that every row of each `(table, column count, values)` carries one
+/// value per declared column.
+#[cfg(test)]
+pub fn assert_one_value_per_column(tables: &[(&str, usize, String)]) {
+    for (table, columns, values) in tables {
+        let counts = values_per_tuple(values);
+
+        assert!(!counts.is_empty(), "`{table}` must hold rows");
+        assert!(
+            counts.iter().all(|count| count == columns),
+            "every `{table}` row must carry {columns} values, one per declared column, or \
+             Exasol assigns the values to the wrong columns: {counts:?}"
+        );
+    }
+}
+
 /// Creates one table and fills it, in that order and never one without the
 /// other: a mirror table that exists but holds nothing looks to a
 /// differential test exactly like a delegated query returning no row.

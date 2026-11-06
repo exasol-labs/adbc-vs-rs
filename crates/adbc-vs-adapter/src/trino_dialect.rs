@@ -96,12 +96,11 @@
 use adbc_vs_scan::driver::Driver;
 
 use crate::dialect_common::{
-    counted, is_numeric_constant, optional_clause, render_temporal_literal, StatementRenderer,
-    Tables,
+    counted, is_numeric_constant, render_select, render_temporal_literal, StatementRenderer, Tables,
 };
 use crate::exa_type::ExasolType;
 use crate::pushdown_query::{
-    Aggregation, ColumnRef, Expression, LikePredicate, Literal, OperandConversion, Query,
+    ColumnRef, Expression, LikePredicate, Literal, OperandConversion, Query,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
 
@@ -136,30 +135,12 @@ impl SqlDialect for TrinoDialect {
     }
 
     fn render(&self, query: &Query) -> Result<String, RenderError> {
-        let statement = Statement {
-            tables: Tables::of(&query.from),
-        };
-        let projection = statement.render_projection(&query.select_list)?;
-        let from = statement.render_from()?;
-        let filter = optional_clause("WHERE", query.filter.as_ref(), |predicate| {
-            statement.render_predicate(predicate)
-        })?;
-        let grouping = match &query.aggregation {
-            Some(Aggregation::GroupBy(columns)) => {
-                format!(
-                    " GROUP BY {}",
-                    statement.render_group_by_keys(columns)?.join(", ")
-                )
-            }
-            _ => String::new(),
-        };
-        let having = optional_clause("HAVING", query.having.as_ref(), |predicate| {
-            statement.render_predicate(predicate)
-        })?;
-
-        Ok(format!(
-            "SELECT {projection} FROM {from}{filter}{grouping}{having}"
-        ))
+        render_select(
+            &Statement {
+                tables: Tables::of(&query.from),
+            },
+            query,
+        )
     }
 }
 
