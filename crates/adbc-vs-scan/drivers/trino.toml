@@ -49,16 +49,16 @@ segment_count = 2
 # error: the two are one decision, and the capability invariant test renders
 # every entry below to hold them together.
 #
-# The set is the 35 entries `postgresql.toml` states, minus `FN_PRED_LIKE_ESCAPE`,
+# The set is the 40 entries `postgresql.toml` states, minus `FN_PRED_LIKE_ESCAPE`,
 # plus one Trino advertises and no other dialect does:
-# `AGGREGATE_GROUP_BY_TUPLE`. That makes 35 entries. Trino executes a
+# `AGGREGATE_GROUP_BY_TUPLE`. That makes 40 entries. Trino executes a
 # multi-column `GROUP BY`, and the capability needs no rendering change in any
 # dialect — `vs-adapter/pushdown-dialect` already records that each dialect
 # renders every grouping column a request carries, so this widening costs no
-# renderer anything. Decision `[16]` records that the requester drew the line
-# here and nowhere else: `AGGREGATE_GROUP_BY_EXPRESSION` and `AGGREGATE_HAVING`
-# stay withheld release-wide because neither is confirmed rendering-free the
-# way this one is.
+# renderer anything.
+#
+# SUM widens an exact-numeric operand to DECIMAL(38, s), because sum(bigint) fails past the bigint range;
+# a double sum follows Trino's distributed accumulation order (docs/pushdown.md).
 #
 # `FN_PRED_LIKE_ESCAPE` is the one entry withheld for a reason about Trino's SQL.
 # Trino defines no default escape character and rejects an escape character
@@ -76,17 +76,8 @@ segment_count = 2
 #     joins. Trino would execute a non-equi condition, including under a full
 #     outer join; the boundary is this project's, not Trino's
 #     (mission.md, `vs-adapter/pushdown-join`).
-#   - `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_HAVING` — this release
-#     groups by columns rather than expressions and applies `HAVING` in
-#     Exasol, for every dialect. Trino executes both, but neither is
-#     confirmed rendering-free the way `AGGREGATE_GROUP_BY_TUPLE` is, so
-#     lifting either buys a rendering change in three dialects rather than
-#     none (`vs-adapter/pushdown-aggregation`, decision `[16]`).
-#   - `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT`
-#     — a capability admits every numeric operand, and a floating-point sum
-#     is order-dependent. Trino distributes an aggregation and combines
-#     partial results, so its accumulation order is not stable between two
-#     runs (`vs-adapter/pushdown-aggregation`).
+#   - `AGGREGATE_GROUP_BY_EXPRESSION` — this release groups by columns rather
+#     than expressions, for every dialect (`vs-adapter/pushdown-aggregation`).
 #   - `ORDER_BY_COLUMN`, `ORDER_BY_EXPRESSION`, `LIMIT`, `LIMIT_WITH_OFFSET`
 #     — the emitting-UDF transport carries no ordering guarantee, whatever
 #     the source (`vs-adapter/result-ordering`).
@@ -111,11 +102,16 @@ advertised = [
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
     "AGGREGATE_GROUP_BY_TUPLE",
+    "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
+    "FN_AGG_SUM",
+    "FN_AGG_SUM_DISTINCT",
+    "FN_AGG_AVG",
+    "FN_AGG_AVG_DISTINCT",
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",

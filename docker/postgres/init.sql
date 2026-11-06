@@ -319,3 +319,40 @@ CREATE TABLE "MixedCase" (
 INSERT INTO "MixedCase" ("ItemId", "Label") VALUES
     (1, 'First'),
     (2, 'Second');
+
+-- measures feeds the SUM, AVG, and HAVING tests; postgres_mirror.rs restates its rows by hand. Floats are
+-- binary fractions so no accumulation order changes a sum, and real 16777216 + 1 needs double precision.
+CREATE TABLE measures (
+    id INTEGER NOT NULL,
+    grp VARCHAR(10) NOT NULL,
+    big_value BIGINT NULL,
+    decimal_value NUMERIC(30,2) NULL,
+    double_value DOUBLE PRECISION NULL,
+    float_value REAL NULL,
+    flag BOOLEAN NULL,
+    label VARCHAR(20) NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO measures (id, grp, big_value, decimal_value, double_value, float_value, flag, label) VALUES
+    (1, 'a', 10,                  1.25,  0.5,  0.25,     TRUE,  '5'),
+    (2, 'a', 20,                  2.50,  1.5,  0.5,      FALSE, '5.0'),
+    (3, 'a', 20,                  3.75,  1.5,  0.5,      TRUE,  ''),
+    (4, 'b', 1,                  -0.25,  2.25, 16777216, TRUE,  '7'),
+    (5, 'b', 9223372036854775807, 0.25,  4.25, 1,        NULL,  '7.5'),
+    (6, 'b', NULL,                NULL,  NULL, NULL,     FALSE, NULL),
+    (7, 'c', NULL,                NULL,  NULL, NULL,     NULL,  NULL);
+
+-- nan_measures holds a NaN, which Exasol cannot store, so no mirror copies it.
+CREATE TABLE nan_measures (
+    id INTEGER NOT NULL,
+    grp VARCHAR(10) NOT NULL,
+    value DOUBLE PRECISION NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO nan_measures (id, grp, value) VALUES
+    (1, 'a', 1.5),
+    (2, 'a', 'NaN'),
+    (3, 'b', 2.5),
+    (4, 'b', 4.5);

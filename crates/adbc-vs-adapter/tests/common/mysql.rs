@@ -122,6 +122,32 @@ const TYPE_COVERAGE_SCRIPT: &str = "\
     CREATE TABLE year_edges (id INT NOT NULL, y YEAR NOT NULL, PRIMARY KEY (id)); \
     INSERT INTO year_edges VALUES (1, 2024), (2, 0);";
 
+/// The table the `SUM`, `AVG`, and `HAVING` tests read, mirrored by
+/// [`super::mirror`], which states its columns and values independently.
+///
+/// Three groups: `a` and `b` hold values, and `c` holds only null operands, so
+/// a group with nothing to sum is observable. Every floating-point value is a
+/// binary fraction whose partial sums are exact in double precision, so the
+/// source's accumulation order cannot change a result. `big_value` holds
+/// `9223372036854775807` and `1` in group `b`, a sum past the `BIGINT` range.
+/// `label` holds decimal numbers as text, an empty string, and `'5'` beside
+/// `'5.0'` in group `a`, which are two distinct values that convert to one
+/// number.
+const MEASURES_SCRIPT: &str = "\
+    DROP TABLE IF EXISTS measures; \
+    CREATE TABLE measures (id INT NOT NULL, grp VARCHAR(10) NOT NULL, \
+        big_value BIGINT NULL, decimal_value DECIMAL(30,2) NULL, double_value DOUBLE NULL, \
+        float_value FLOAT NULL, flag BIT(1) NULL, label VARCHAR(20) NULL, \
+        PRIMARY KEY (id)); \
+    INSERT INTO measures VALUES \
+        (1, 'a', 10, 1.25, 0.5, 0.25, b'1', '5'), \
+        (2, 'a', 20, 2.50, 1.5, 0.5, b'0', '5.0'), \
+        (3, 'a', 20, 3.75, 1.5, 0.5, b'1', ''), \
+        (4, 'b', 1, -0.25, 2.25, 1.0, b'1', '7'), \
+        (5, 'b', 9223372036854775807, 0.25, 4.25, 2.0, NULL, '7.5'), \
+        (6, 'b', NULL, NULL, NULL, NULL, b'0', NULL), \
+        (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL);";
+
 /// The fixture tables the end-to-end tests read, beyond the `orders` table the
 /// Compose seed creates.
 ///
@@ -186,6 +212,7 @@ fn fixture_script() -> String {
     CREATE TABLE refresh_target (id INT NOT NULL, name VARCHAR(30) NOT NULL); \
     INSERT INTO refresh_target VALUES (1, 'before'); \
     {} \
+    {MEASURES_SCRIPT} \
     DROP TABLE IF EXISTS item_notes; \
     {} \
     DROP VIEW IF EXISTS {CONVERTED_REGION_VIEW}; \

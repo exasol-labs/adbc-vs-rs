@@ -3,8 +3,9 @@
 -- spellings, against the built-in `memory` catalog. It carries two halves:
 -- the core-type `orders` table the integration tier reads, and the
 -- differential objects the E2E tier reads -- `items`, `item_notes`,
--- `all_unmapped`, `refresh_target`, and `orders_view` -- which cover
--- collation, joins, a view, and unmapped columns respectively.
+-- `all_unmapped`, `refresh_target`, `orders_view`, and `measures` -- which
+-- cover collation, joins, a view, unmapped columns, and `SUM`, `AVG`, and
+-- `HAVING` respectively.
 --
 -- `created_at_ns` adds a timestamp(9) column beyond the core set every
 -- other source's fixture already covers, because precision 9 is the only
@@ -185,3 +186,25 @@ INSERT INTO memory.adbc_vs.refresh_target (id, name) VALUES (1, 'Original');
 DROP VIEW IF EXISTS memory.adbc_vs.orders_view;
 
 CREATE VIEW memory.adbc_vs.orders_view AS SELECT id, name FROM memory.adbc_vs.orders;
+
+-- measures feeds the SUM, AVG, and HAVING tests; trino_mirror.rs restates its rows by hand.
+-- Floats are binary fractions so no accumulation order changes a sum, and big_value sums past bigint.
+DROP TABLE IF EXISTS memory.adbc_vs.measures;
+
+CREATE TABLE memory.adbc_vs.measures (
+    id INTEGER,
+    grp VARCHAR(10),
+    big_value BIGINT,
+    decimal_value DECIMAL(12,4),
+    double_value DOUBLE,
+    label VARCHAR(20)
+);
+
+INSERT INTO memory.adbc_vs.measures (id, grp, big_value, decimal_value, double_value, label) VALUES
+    (1, 'a', 10,                  1.25,  0.5,  '5'),
+    (2, 'a', 20,                  2.50,  1.5,  '5.0'),
+    (3, 'a', 20,                  3.75,  1.5,  ''),
+    (4, 'b', 1,                  -0.25,  2.25, '7'),
+    (5, 'b', 9223372036854775807, 0.25,  4.25, '7.5'),
+    (6, 'b', NULL,                NULL,  NULL, NULL),
+    (7, 'c', NULL,                NULL,  NULL, NULL);

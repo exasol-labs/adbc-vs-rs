@@ -64,17 +64,6 @@ const QUALIFIED_ITEMS: &str = "\"public\".\"items\"";
 const ITEMS: &str = "items";
 const ITEMS_C: &str = "items_c";
 
-/// The sum and the mean of the seeded `id` values, 1 through [`ITEM_ROWS`],
-/// worked out by hand: what Exasol has to answer for the two aggregates this
-/// release delegates to no source.
-const SEEDED_ID_TOTAL: &str = "21";
-const SEEDED_ID_MEAN: f64 = 3.5;
-
-/// How far a returned mean may sit from [`SEEDED_ID_MEAN`]. Exasol declares
-/// `AVG` `DOUBLE` for every numeric operand, so the value arrives as a
-/// floating-point number and is compared as one.
-const MEAN_TOLERANCE: f64 = 1e-9;
-
 // --- the mirror is a valid oracle -------------------------------------------
 
 /// Every differential test below rests on the mirror answering under Exasol's
@@ -750,60 +739,231 @@ fn select_list_predicate_over_the_grouped_character_column_delegates_and_matches
     );
 }
 
-// --- what is deliberately not delegated -------------------------------------
+/// The table `SUM`, `AVG`, and `HAVING` read, whose local mirror holds the same
+/// rows, and the table holding a `NaN`, which the mirror does not copy.
+const MEASURES: &str = "measures";
+const NAN_MEASURES: &str = "nan_measures";
 
-/// `postgresql.toml` withholds `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT`,
-/// `FN_AGG_SUM`, and `FN_AGG_SUM_DISTINCT` whole — a framework decision rather
-/// than a PostgreSQL one — so Exasol delegates neither and computes both itself
-/// over whatever the pushed-down statement projects. That withholding costs no
-/// answer, which is what this measures.
-///
-/// The answers are pinned against values worked out by hand rather than against
-/// the mirror alone. Exasol computes a withheld aggregate on both sides, so a
-/// differential comparison of one is two runs of the same computation and could
-/// not disagree; only a value stated independently of it can fail.
-#[test]
-fn avg_and_sum_are_withdrawn_and_match_the_mirror() {
-    for function in ["AVG", "SUM"] {
-        let query = |schema: &str, table: &str| {
-            format!("SELECT {function}(\"id\") AS VAL FROM {schema}.\"{table}\"")
-        };
+/// The four aggregates a numeric operand answers, each aliased so a result
+/// row names them.
+fn numeric_aggregates(column: &str) -> String {
+    format!(
+        "SUM(\"{column}\") AS S, SUM(DISTINCT \"{column}\") AS SD, AVG(\"{column}\") AS A, \
+         AVG(DISTINCT \"{column}\") AS AD"
+    )
+}
 
-        for statement in generated_statements(&query(VIRTUAL_SCHEMA, ITEMS)) {
-            assert!(
-                !statement.to_uppercase().contains(function),
-                "no generated statement may carry a delegated {function}, since this release \
-                 withholds it and Exasol computes it itself: {statement}"
-            );
-        }
+/// `aggregates` over the whole of `table`, and per group of its `grp` column.
+fn single_group_and_grouped(
+    aggregates: String,
+) -> (
+    impl Fn(&str, &str) -> String + Clone,
+    impl Fn(&str, &str) -> String + Clone,
+) {
+    let single_aggregates = aggregates.clone();
+    (
+        move |schema: &str, table: &str| {
+            format!("SELECT {single_aggregates} FROM {schema}.\"{table}\"")
+        },
+        move |schema: &str, table: &str| {
+            format!(
+                "SELECT \"grp\", {aggregates} FROM {schema}.\"{table}\" GROUP BY \"grp\" \
+                 ORDER BY \"grp\""
+            )
+        },
+    )
+}
 
-        let rows = assert_matches_mirror(ITEMS, query);
-        assert_eq!(
-            rows.len(),
-            1,
-            "a single-group aggregation returns exactly one row: {rows:?}"
+/// Asserts the statement PostgreSQL received carries the `SUM` and the `SUM`
+/// and `COUNT` quotient the aggregates of [`numeric_aggregates`] render as, and
+/// no PostgreSQL `avg`.
+fn assert_sum_and_avg_delegated(statement: &str) {
+    for fragment in [
+        "SUM(",
+        "SUM(DISTINCT ",
+        "CAST(SUM(",
+        "AS DOUBLE PRECISION) / COUNT(",
+    ] {
+        assert!(
+            statement.contains(fragment),
+            "the generated statement must carry {fragment}: {statement}"
         );
     }
-
-    let rows = stack::shared().exasol.query_rows(&format!(
-        "SELECT SUM(\"id\") AS TOTAL, AVG(\"id\") AS MEAN FROM {VIRTUAL_SCHEMA}.\"items\""
-    ));
-    assert_eq!(
-        cell(&rows[0], "TOTAL"),
-        Some(SEEDED_ID_TOTAL.to_string()),
-        "the seeded ids 1 through {ITEM_ROWS} sum to {SEEDED_ID_TOTAL}, and the withheld SUM \
-         must still answer with it rather than failing: {rows:?}"
-    );
-    let mean: f64 = cell(&rows[0], "MEAN")
-        .expect("the withheld AVG must answer with a value")
-        .parse()
-        .expect("Exasol returns an average as a number");
     assert!(
-        (mean - SEEDED_ID_MEAN).abs() < MEAN_TOLERANCE,
-        "the withheld AVG must answer with the mean of the seeded ids, {SEEDED_ID_MEAN}, not \
-         {mean}"
+        !statement.to_uppercase().contains("AVG("),
+        "`AVG` must render as the quotient of `SUM` and `COUNT`, never as PostgreSQL's own: \
+         {statement}"
     );
 }
+
+/// `pushdown-aggregation-delegation`: `SUM` and `AVG`, each with and without
+/// `DISTINCT`, over every numeric column, once without grouping and once
+/// grouped, return the rows Exasol returns over the mirror. The `bigint` sum
+/// passes the `bigint` range, and group `c`, which holds only null operands,
+/// returns null for both functions.
+#[test]
+fn sum_and_avg_are_delegated_and_match_the_mirror() {
+    for column in ["big_value", "decimal_value", "double_value", "float_value"] {
+        let (single_group, grouped) = single_group_and_grouped(numeric_aggregates(column));
+
+        let single_statement = generated_statement(&single_group(VIRTUAL_SCHEMA, MEASURES));
+        assert_sum_and_avg_delegated(&single_statement);
+        assert!(
+            !single_statement.contains("GROUP BY"),
+            "a single-group aggregation must render no GROUP BY clause: {single_statement}"
+        );
+        let single_rows = assert_matches_mirror(MEASURES, single_group);
+        assert_eq!(single_rows.len(), 1, "{column}: {single_rows:?}");
+
+        assert_sum_and_avg_delegated(&generated_statement(&grouped(VIRTUAL_SCHEMA, MEASURES)));
+        let grouped_rows = assert_matches_mirror(MEASURES, grouped);
+        assert_eq!(grouped_rows.len(), 3, "{column}: {grouped_rows:?}");
+        let null_group = &grouped_rows[2];
+        for aggregate in ["S", "SD", "A", "AD"] {
+            assert_eq!(
+                cell(null_group, aggregate),
+                None,
+                "{column}: the group holding only null operands must return null for \
+                 {aggregate}: {null_group:?}"
+            );
+        }
+    }
+}
+
+/// `pushdown-aggregation-delegation`: `SUM` and `AVG` over a `boolean` column
+/// and over a `character varying` column holding numbers as text convert the
+/// operand as Exasol does. `label` holds an empty string, which Exasol reads as
+/// null, and `'5'` beside `'5.0'`, which `SUM(DISTINCT)` takes as one value and
+/// `AVG(DISTINCT)` divides as two.
+#[test]
+fn sum_and_avg_over_boolean_and_character_columns_match_the_mirror() {
+    for (column, converted_fragment) in [
+        ("flag", "SUM(CAST(\"flag\" AS INTEGER))"),
+        ("label", "CAST(NULLIF(\"label\", "),
+    ] {
+        let (single_group, grouped) = single_group_and_grouped(numeric_aggregates(column));
+
+        let statement = generated_statement(&single_group(VIRTUAL_SCHEMA, MEASURES));
+        assert_sum_and_avg_delegated(&statement);
+        assert!(
+            statement.contains(converted_fragment),
+            "the operand must render as {converted_fragment}: {statement}"
+        );
+        let single_rows = assert_matches_mirror(MEASURES, single_group);
+        assert_eq!(single_rows.len(), 1, "{column}: {single_rows:?}");
+
+        let grouped_rows = assert_matches_mirror(MEASURES, grouped);
+        assert_eq!(grouped_rows.len(), 3, "{column}: {grouped_rows:?}");
+    }
+
+    let predicate = |schema: &str, measures: &str| {
+        format!(
+            "SELECT SUM(\"big_value\" > 5) AS S, AVG(\"big_value\" > 5) AS A \
+             FROM {schema}.\"{measures}\""
+        )
+    };
+    let statement = generated_statement(&predicate(VIRTUAL_SCHEMA, MEASURES));
+    assert!(
+        statement.contains("CAST((5 < \"big_value\") AS INTEGER)"),
+        "a predicate operand must render as an INTEGER: {statement}"
+    );
+    assert_matches_mirror(MEASURES, predicate);
+}
+
+/// `pushdown-aggregation-delegation`: a `HAVING` clause over `COUNT(*)`, over
+/// `SUM`, and over `AVG` reaches PostgreSQL and keeps the groups the mirror
+/// keeps, which are fewer than all three.
+#[test]
+fn having_is_delegated_and_matches_the_mirror() {
+    for (having, kept_groups) in [
+        ("COUNT(*) > 2", 2),
+        ("SUM(\"decimal_value\") > 1", 1),
+        ("AVG(\"double_value\") > 2", 1),
+    ] {
+        let query = |schema: &str, measures: &str| {
+            format!(
+                "SELECT \"grp\", COUNT(*) AS N, SUM(\"decimal_value\") AS S \
+                 FROM {schema}.\"{measures}\" GROUP BY \"grp\" HAVING {having} ORDER BY \"grp\""
+            )
+        };
+
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA, MEASURES));
+        assert!(
+            statement.contains("GROUP BY \"grp\" HAVING"),
+            "the generated statement must carry the HAVING clause after the grouping for \
+             {having}: {statement}"
+        );
+        let rows = assert_matches_mirror(MEASURES, query);
+        assert_eq!(rows.len(), kept_groups, "{having}: {rows:?}");
+    }
+}
+
+/// `postgresql-pushdown`, scenario "SUM over a real column accumulates in
+/// double precision": group `b` of `float_value`, a `real` column, holds
+/// `16777216` and `1`, whose single-precision sum rounds back to `16777216`.
+/// The delegated `SUM` casts the operand to `DOUBLE PRECISION` and returns
+/// `16777217`, with the mean `8388608.5`, as the mirror does.
+#[test]
+fn sum_over_a_real_column_accumulates_in_double_precision() {
+    let query = |schema: &str, measures: &str| {
+        format!(
+            "SELECT \"grp\", SUM(\"float_value\") AS S, AVG(\"float_value\") AS A \
+             FROM {schema}.\"{measures}\" GROUP BY \"grp\" ORDER BY \"grp\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA, MEASURES));
+    assert!(
+        statement.contains("SUM(CAST(\"float_value\" AS DOUBLE PRECISION))"),
+        "a `real` operand must be summed in double precision: {statement}"
+    );
+    let rows = assert_matches_mirror(MEASURES, query);
+    let group_b = &rows[1];
+    assert_eq!(
+        cell(group_b, "S").and_then(|sum| sum.parse::<f64>().ok()),
+        Some(16_777_217.0),
+        "{group_b:?}"
+    );
+    assert_eq!(
+        cell(group_b, "A").and_then(|mean| mean.parse::<f64>().ok()),
+        Some(8_388_608.5),
+        "{group_b:?}"
+    );
+}
+
+/// `pushdown-aggregation-delegation`: a `NaN` in a `double precision` operand
+/// makes the delegated `SUM` and `AVG` null, because PostgreSQL's sum is `NaN`
+/// and Exasol reads a `NaN` as null. Group `a` of `nan_measures` holds `NaN`
+/// beside a finite value, and group `b` holds finite values only. The mirror
+/// cannot hold the row, so the answers are stated by hand.
+#[test]
+fn a_nan_operand_makes_the_delegated_sum_and_avg_null() {
+    let aggregates = "SUM(\"value\") AS S, AVG(\"value\") AS A";
+    let single = format!("SELECT {aggregates} FROM {VIRTUAL_SCHEMA}.\"{NAN_MEASURES}\"");
+    let grouped = format!(
+        "SELECT \"grp\", {aggregates} FROM {VIRTUAL_SCHEMA}.\"{NAN_MEASURES}\" \
+         GROUP BY \"grp\" ORDER BY \"grp\""
+    );
+
+    assert!(generated_statement(&single).contains("SUM("));
+    let exasol = &stack::shared().exasol;
+    let single_rows = exasol.query_rows(&single);
+    assert_eq!(cell(&single_rows[0], "S"), None, "{single_rows:?}");
+    assert_eq!(cell(&single_rows[0], "A"), None, "{single_rows:?}");
+
+    assert!(generated_statement(&grouped).contains("GROUP BY"));
+    let rows = exasol.query_rows(&grouped);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(cell(&rows[0], "S"), None, "group a holds the NaN: {rows:?}");
+    assert_eq!(cell(&rows[0], "A"), None, "group a holds the NaN: {rows:?}");
+    let number = |row: &serde_json::Map<String, serde_json::Value>, name: &str| {
+        cell(row, name).and_then(|value| value.parse::<f64>().ok())
+    };
+    assert_eq!(number(&rows[1], "S"), Some(7.0), "{rows:?}");
+    assert_eq!(number(&rows[1], "A"), Some(3.5), "{rows:?}");
+}
+
+// --- what is deliberately not delegated -------------------------------------
 
 #[test]
 fn two_column_group_by_is_not_delegated() {

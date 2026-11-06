@@ -13,7 +13,7 @@ Declares for each delegated aggregate the Exasol type Exasol's own compiler comp
 
 ### Scenario: Each aggregate declares the type the request supplies for it
 
-* *GIVEN* a `pushdown` request whose select list holds `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)`, `MIN`, and `MAX` entries, and whose `selectListDataTypes` carries one entry per select-list entry
+* *GIVEN* a `pushdown` request whose select list holds `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)`, `MIN`, `MAX`, `SUM`, `SUM(DISTINCT)`, `AVG`, and `AVG(DISTINCT)` entries, and whose `selectListDataTypes` carries one entry per select-list entry
 * *WHEN* the adapter builds the `EMITS` clause
 * *THEN* each declared type MUST be the `selectListDataTypes` entry at the same index, as `vs-adapter/pushdown-dialect` requires, because an aggregate select-list entry carries no source column type to copy
 * *AND* the adapter MUST NOT compute an aggregate's type from its operand's type, because Exasol rejects a declared type that differs from the one it expects, so reading Exasol's own answer is the only source that is correct by construction
@@ -26,7 +26,7 @@ Declares for each delegated aggregate the Exasol type Exasol's own compiler comp
 * *THEN* `SUM` over `DECIMAL(12,4)` MUST carry `DECIMAL(23,4)` and `SUM` over `DECIMAL(30,2)` MUST carry `DECIMAL(36,2)`, matching `DECIMAL(min(p + 11, 36), s)`
 * *AND* `AVG` MUST carry `DOUBLE`, `SUM` over the `DOUBLE` column MUST carry `DOUBLE`, and `SUM(DISTINCT)` over the `DECIMAL(12,4)` column MUST carry `DECIMAL(23,4)`
 * *AND* `COUNT`, `COUNT(*)`, and `COUNT(DISTINCT)` MUST carry `DECIMAL(18,0)`, and `MIN` and `MAX` MUST carry the operand's own type
-* *AND* a departure from these values MUST fail the test rather than be absorbed, because the declared type Exasol accepts is the type Exasol sent, and every `AVG` and `SUM` entry MUST be measured through a throwaway adapter probe advertising those capabilities — the shipped capability set delegates neither function, so no such entry is reachable through the shipped dialect, and the values stay asserted as the protocol evidence a later release restoring either fragment would build on
+* *AND* a departure from these values MUST fail the test rather than be absorbed, because the declared type Exasol accepts is the type Exasol sent, and Exasol MUST accept the `EMITS` clause the shipped dialects declare for a delegated `SUM` and `AVG`, so a query delegating either returns its rows rather than a declared-type error
 
 ### Scenario: Declared type entries carry the shapes this release measured
 

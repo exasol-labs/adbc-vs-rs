@@ -1,4 +1,4 @@
-[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md) · [Type Mapping](type-mapping.md)
+[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md) · [Pushdown](pushdown.md) · [Type Mapping](type-mapping.md)
 
 ---
 
@@ -36,9 +36,7 @@ The adapter keeps no state between calls. The scan UDF is the only part that rea
 
 ### What runs at the source
 
-`adbc-vs-rs` sends these parts of a query to the source: column selection, filters, aggregation (also with `GROUP BY`), and equi joins and outer joins.
-
-Exasol runs `ORDER BY`, `LIMIT`, and `OFFSET` on the returned rows. Non-equi joins also run in Exasol. A query that `adbc-vs-rs` cannot send to the source still works, but Exasol must fetch more rows.
+`adbc-vs-rs` sends the parts of a query that the source can run, and Exasol runs the rest. See [Pushdown](pushdown.md) for the parts of each database.
 
 ### String comparison follows the source
 
@@ -79,5 +77,4 @@ To get the Exasol behavior, use one of two options:
 
 - The address must have a catalog and a schema.
 - Seven types map, and every `timestamp(p)` column maps to `TIMESTAMP(3)`. See [Type Mapping](type-mapping.md#trino).
-- A backslash in a `LIKE` pattern is an ordinary character, unless the query has an `ESCAPE` clause. Exasol then runs that predicate.
 - Driver version range: `>=0.5.3, <0.6.0`.

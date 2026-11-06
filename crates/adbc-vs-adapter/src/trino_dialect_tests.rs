@@ -1,14 +1,17 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::sql_dialect::SqlDialect;
+use adbc_vs_scan::driver::Driver;
+
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column, double_literal, equal, filtered_request, less, numeric_literal, orders_columns,
-    request, string_literal,
+    aggregate, column, count_type, distinct, double_literal, double_type, equal, filtered_request,
+    grouped_request, join_request, joined_column, less, numeric_literal, orders_columns,
+    orders_to_customers, request, string_literal, sum_type, typed_request,
 };
-use crate::exa_type::ExasolType;
-use crate::pushdown_query;
+use crate::pushdown_query::{self, Query};
 
 /// The namespace a Trino virtual schema records and every rendered table is
 /// qualified by: the catalog and the schema, the two segments
@@ -119,20 +122,7 @@ fn an_empty_select_list_projects_a_single_constant() {
 
 #[test]
 fn a_query_projecting_nothing_fails_rather_than_rendering_an_empty_projection() {
-    let query = pushdown_query::Query {
-        select_list: vec![],
-        filter: None,
-        aggregation: None,
-        from: pushdown_query::FromClause::Table(pushdown_query::SourceTable {
-            namespace: namespace(),
-            name: "orders".to_string(),
-            alias: None,
-        }),
-    };
-    let error = TrinoDialect
-        .render(&query)
-        .expect_err("an empty select list must fail to render")
-        .to_string();
+    let error = fixtures::empty_projection_error(&TrinoDialect, namespace());
     assert!(error.contains("empty"), "{error}");
 }
 
@@ -238,26 +228,11 @@ fn a_floating_point_literal_renders_as_typed_double() {
 
 #[test]
 fn temporal_literals_render_typed() {
-    let columns = json!([
-        {"name": "shipped", "dataType": {"type": "DATE"}},
-        {"name": "logged", "dataType": {"type": "TIMESTAMP"}},
-    ]);
-    let date_clause = where_clause_over(
-        columns.clone(),
-        equal(
-            column("shipped"),
-            json!({"type": "literal_date", "value": "2015-12-01"}),
-        ),
-    );
+    let date_clause = where_clause_over(fixtures::temporal_columns(), fixtures::date_filter());
     assert_eq!(date_clause, r#"("shipped" = DATE '2015-12-01')"#);
 
-    let timestamp_clause = where_clause_over(
-        columns,
-        equal(
-            column("logged"),
-            json!({"type": "literal_timestamp", "value": "2015-12-01 12:01:01.123"}),
-        ),
-    );
+    let timestamp_clause =
+        where_clause_over(fixtures::temporal_columns(), fixtures::timestamp_filter());
     assert_eq!(
         timestamp_clause,
         r#"("logged" = TIMESTAMP '2015-12-01 12:01:01.123')"#
@@ -317,51 +292,6 @@ fn a_like_carrying_an_escape_char_fails_naming_the_capability() {
 // Joins
 // ---------------------------------------------------------------------------
 
-fn joined_column(name: &str, table: &str) -> Value {
-    json!({"type": "column", "name": name, "tableName": table})
-}
-
-fn joined_orders_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
-}
-
-fn joined_customers_columns() -> Value {
-    json!([{"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}}])
-}
-
-fn orders_to_customers(join_type: &str) -> Value {
-    json!({
-        "type": "join",
-        "join_type": join_type,
-        "left": {"type": "table", "name": "orders"},
-        "right": {"type": "table", "name": "customers"},
-        "condition": {
-            "type": "predicate_equal",
-            "left": joined_column("customer_id", "orders"),
-            "right": joined_column("id", "customers"),
-        },
-    })
-}
-
-fn join_request(from: Value, select_list: Value) -> Value {
-    json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": from,
-            "selectList": select_list,
-        },
-        "involvedTables": [
-            {"name": "orders", "columns": joined_orders_columns()},
-            {"name": "customers", "columns": joined_customers_columns()},
-        ],
-    })
-}
-
 #[test]
 fn inner_join_renders_positionally_aliased_and_qualified() {
     let sql = render_statement(&join_request(
@@ -382,10 +312,7 @@ fn each_join_type_renders_its_own_keyword() {
         ("right_outer", "RIGHT OUTER JOIN"),
         ("full_outer", "FULL OUTER JOIN"),
     ] {
-        let sql = render_statement(&join_request(
-            orders_to_customers(join_type),
-            json!([joined_column("id", "orders")]),
-        ));
+        let sql = render_statement(&fixtures::join_type_request(join_type));
         assert!(sql.contains(keyword), "{join_type}: {sql}");
     }
 }
@@ -427,35 +354,6 @@ fn a_single_table_query_renders_no_alias_even_when_the_request_assigned_one() {
 // ---------------------------------------------------------------------------
 // Aggregation and GROUP BY
 // ---------------------------------------------------------------------------
-
-fn aggregate(function: &str, argument: Option<Value>) -> Value {
-    let mut node = json!({"type": "function_aggregate", "name": function});
-    if let Some(argument) = argument {
-        node["arguments"] = json!([argument]);
-    }
-    node
-}
-
-fn count_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 18, "scale": 0})
-}
-
-/// A `pushdown` request over `orders` carrying `select_list` and the
-/// `selectListDataTypes` Exasol supplies for it, which is the only type
-/// source an aggregate or a select-list predicate entry has.
-fn typed_request(select_list: Value, data_types: Value) -> Value {
-    let mut built = request(orders_columns(), Some(select_list));
-    built["pushdownRequest"]["selectListDataTypes"] = data_types;
-    built
-}
-
-/// A `pushdown` request whose `aggregationType` is `group_by` over `group_by`.
-fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
-    let mut built = typed_request(select_list, data_types);
-    built["pushdownRequest"]["aggregationType"] = json!("group_by");
-    built["pushdownRequest"]["groupBy"] = group_by;
-    built
-}
 
 #[test]
 fn single_group_renders_without_group_by() {
@@ -508,13 +406,110 @@ fn count_star_differs_from_count_column() {
 #[test]
 fn unrenderable_aggregate_named_in_error() {
     let mut built = typed_request(
-        json!([aggregate("sum", Some(column("id")))]),
+        json!([aggregate("stddev", Some(column("id")))]),
         json!([count_type()]),
     );
     built["pushdownRequest"]["aggregationType"] = json!("single_group");
 
     let error = render_error(&built);
-    assert!(error.contains("SUM"), "{error}");
+    assert!(error.contains("STDDEV"), "{error}");
+}
+
+/// The function name Exasol sends in any case must render as Trino's canonical
+/// spelling, so the case a request arrives in never reaches the statement.
+#[test]
+fn mixed_case_function_names_render_identically() {
+    fixtures::assert_mixed_case_renders_identically(
+        &render_statement,
+        "id",
+        r#"SELECT COUNT("id"), MIN("note"), SUM(CAST("total" AS DECIMAL(38,4))), (CAST(SUM(CAST("total" AS DECIMAL(38,4))) AS DOUBLE) / COUNT("total")) FROM "memory"."adbc_vs"."orders""#,
+    );
+}
+
+fn note_type() -> Value {
+    json!({"type": "VARCHAR", "size": 100, "characterSet": "UTF8"})
+}
+
+/// `vs-adapter/trino-pushdown`, scenario "SUM over an exact-numeric column sums
+/// in Trino's 38-digit decimal": an operand declared `DECIMAL(p,s)` is cast to
+/// `DECIMAL(38,s)` inside `SUM`, with and without `DISTINCT`, because Trino's
+/// `sum` returns its input's type.
+#[test]
+fn sum_over_a_decimal_operand_casts_it_to_decimal_38() {
+    let sql = render_statement(&typed_request(
+        json!([
+            aggregate("SUM", Some(column("id"))),
+            aggregate("SUM", Some(column("total"))),
+            distinct(aggregate("SUM", Some(column("total")))),
+        ]),
+        json!([sum_type(), sum_type(), sum_type()]),
+    ));
+
+    assert_eq!(
+        sql,
+        r#"SELECT SUM(CAST("id" AS DECIMAL(38,0))), SUM(CAST("total" AS DECIMAL(38,4))), SUM(DISTINCT CAST("total" AS DECIMAL(38,4))) FROM "memory"."adbc_vs"."orders""#
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "SUM renders as the source's SUM
+/// over the operand": `DISTINCT` precedes the operand exactly when the request
+/// sets it, and an operand declared `DOUBLE` renders without a cast.
+#[test]
+fn sum_renders_with_and_without_distinct() {
+    let request = fixtures::ratio_request(fixtures::ratio_sum_entries());
+
+    assert_eq!(
+        render_statement(&request),
+        r#"SELECT SUM("ratio"), SUM(DISTINCT "ratio") FROM "memory"."adbc_vs"."orders""#
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "AVG renders as the double
+/// quotient of SUM and COUNT": the quotient is parenthesized, both halves carry
+/// `DISTINCT` for `AVG(DISTINCT)`, and Trino's own `AVG`, which returns
+/// `decimal` over an exact-numeric operand, never renders.
+#[test]
+fn avg_renders_as_the_double_quotient_of_sum_and_count() {
+    fixtures::assert_avg_renders_as_quotient(
+        &render_statement,
+        r#"SELECT (CAST(SUM(CAST("total" AS DECIMAL(38,4))) AS DOUBLE) / COUNT("total")), (CAST(SUM(DISTINCT CAST("total" AS DECIMAL(38,4))) AS DOUBLE) / COUNT(DISTINCT "total")) FROM "memory"."adbc_vs"."orders""#,
+        "Trino",
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A BOOLEAN or character SUM and
+/// AVG operand renders converted as Exasol converts it": Trino defines no `sum`
+/// over a boolean or a character type, so a predicate sums as an `INTEGER`, and
+/// a character column or literal reads through `NULLIF` and a `DOUBLE` cast,
+/// with the `AVG` count taking the operand before the cast.
+#[test]
+fn sum_and_avg_convert_boolean_and_character_operands() {
+    let predicate = less(numeric_literal("2"), column("id"));
+    let mut entries = vec![
+        (aggregate("SUM", Some(predicate.clone())), sum_type()),
+        (aggregate("AVG", Some(predicate)), double_type()),
+    ];
+    entries.extend(fixtures::character_sum_avg_entries());
+    let sql = render_statement(&fixtures::typed_entries_request(entries));
+
+    assert_eq!(
+        sql,
+        r#"SELECT SUM(CAST((2 < "id") AS INTEGER)), (CAST(SUM(CAST((2 < "id") AS INTEGER)) AS DOUBLE) / COUNT((2 < "id"))), SUM(CAST(NULLIF("note", '') AS DOUBLE)), SUM(DISTINCT CAST(NULLIF("note", '') AS DOUBLE)), (CAST(SUM(CAST(NULLIF("note", '') AS DOUBLE)) AS DOUBLE) / COUNT(NULLIF("note", ''))), (CAST(SUM(DISTINCT CAST(NULLIF("note", '') AS DOUBLE)) AS DOUBLE) / COUNT(DISTINCT NULLIF("note", ''))), SUM(CAST(NULLIF('5', '') AS DOUBLE)) FROM "memory"."adbc_vs"."orders""#
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A having element renders as a
+/// HAVING clause": the clause follows `GROUP BY`, and a single-group request
+/// carries the clause with no `GROUP BY`.
+#[test]
+fn having_renders_after_group_by_and_on_a_single_group() {
+    fixtures::assert_having_renders(
+        &render_statement,
+        [
+            r#"SELECT "note", COUNT(*) FROM "memory"."adbc_vs"."orders" GROUP BY "note" HAVING (12 < COUNT(*))"#,
+            r#"SELECT COUNT(*) FROM "memory"."adbc_vs"."orders" HAVING (12 < COUNT(*))"#,
+        ],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -541,25 +536,7 @@ fn a_request_renders_byte_identically_on_every_call() {
 /// it never asked for.
 #[test]
 fn a_predicate_with_no_operand_fails_rather_than_rendering_an_empty_group() {
-    for (filter, named) in [
-        (json!({"type": "predicate_and", "expressions": []}), "AND"),
-        (json!({"type": "predicate_or", "expressions": []}), "OR"),
-        (
-            json!({
-                "type": "predicate_in_constlist",
-                "expression": column("id"),
-                "arguments": [],
-            }),
-            "IN",
-        ),
-    ] {
-        let error = filter_render_error(filter);
-
-        assert!(
-            error.contains(named),
-            "the error must name the empty Trino form: {error}"
-        );
-    }
+    fixtures::assert_empty_predicate_groups_fail(&filter_render_error, "Trino");
 }
 
 /// Trino writes no empty `GROUP BY` clause, and a renderer that dropped the
@@ -567,18 +544,7 @@ fn a_predicate_with_no_operand_fails_rather_than_rendering_an_empty_group() {
 /// asked for one row per group.
 #[test]
 fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_clause() {
-    let request = grouped_request(
-        json!([aggregate("COUNT", None)]),
-        json!([count_type()]),
-        json!([]),
-    );
-
-    let error = render_error(&request);
-
-    assert!(
-        error.contains("GROUP BY"),
-        "the error must name the empty Trino clause: {error}"
-    );
+    fixtures::assert_empty_group_by_fails(&render_error, "Trino");
 }
 
 /// `COUNT(*)` is the only aggregate Trino writes over no argument, and it
@@ -587,27 +553,7 @@ fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_cla
 /// every row where it asked for the distinct values.
 #[test]
 fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
-    let min_error = render_error(&typed_request(
-        json!([aggregate("MIN", None)]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        min_error.contains("MIN"),
-        "the error must name the aggregate that carries no argument: {min_error}"
-    );
-
-    let mut distinct_count = aggregate("COUNT", None);
-    distinct_count["distinct"] = json!(true);
-    let count_error = render_error(&typed_request(
-        json!([distinct_count]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        count_error.contains("DISTINCT"),
-        "the error must name the fragment Trino has no form for: {count_error}"
-    );
+    fixtures::assert_argumentless_aggregates_fail(&render_error, "Trino");
 }
 
 /// A reference carrying neither half has nothing to resolve against, and it
@@ -615,15 +561,7 @@ fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
 /// whichever joined table declares it.
 #[test]
 fn a_join_column_carrying_no_table_reference_at_all_fails_naming_it() {
-    let error = render_error(&join_request(
-        orders_to_customers("inner"),
-        json!([column("note")]),
-    ));
-
-    assert!(
-        error.contains("note") && error.contains("tableName") && error.contains("tableAlias"),
-        "the error must name the column and both spellings it lacks: {error}"
-    );
+    fixtures::assert_unreferenced_join_column_fails(&render_error, "note");
 }
 
 /// One table joined to itself is told apart only by the alias the request
@@ -632,15 +570,7 @@ fn a_join_column_carrying_no_table_reference_at_all_fails_naming_it() {
 /// against itself.
 #[test]
 fn a_reference_more_than_one_joined_table_answers_to_fails_naming_it() {
-    let mut from = orders_to_customers("inner");
-    from["right"] = json!({"type": "table", "name": "orders"});
-
-    let error = render_error(&join_request(from, json!([joined_column("id", "orders")])));
-
-    assert!(
-        error.contains("id") && error.contains("orders") && error.contains("more than one"),
-        "the error must name the column and the reference two tables answer to: {error}"
-    );
+    fixtures::assert_ambiguous_join_reference_fails(&render_error, "id");
 }
 
 // ---------------------------------------------------------------------------
@@ -653,30 +583,7 @@ fn a_reference_more_than_one_joined_table_answers_to_fails_naming_it() {
 /// counter, so the positional aliases are proved here rather than inherited.
 #[test]
 fn a_nested_join_renders_the_inner_join_parenthesized_inside_the_outer() {
-    let mut request = join_request(
-        json!({
-            "type": "join",
-            "join_type": "left_outer",
-            "left": orders_to_customers("inner"),
-            "right": {"type": "table", "name": "regions"},
-            "condition": {
-                "type": "predicate_equal",
-                "left": joined_column("id", "customers"),
-                "right": joined_column("customer_id", "regions"),
-            },
-        }),
-        json!([joined_column("code", "regions")]),
-    );
-    request["involvedTables"]
-        .as_array_mut()
-        .expect("involvedTables must be an array")
-        .push(json!({
-            "name": "regions",
-            "columns": [
-                {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-                {"name": "code", "dataType": {"type": "VARCHAR", "size": 10, "characterSet": "UTF8"}},
-            ],
-        }));
+    let request = fixtures::nested_join_request("left_outer");
 
     let sql = render_statement(&request);
 
@@ -692,31 +599,7 @@ fn a_nested_join_renders_the_inner_join_parenthesized_inside_the_outer() {
 /// itself.
 #[test]
 fn a_self_join_resolves_each_copy_to_its_own_alias() {
-    let request = json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": {
-                "type": "join",
-                "join_type": "inner",
-                "left": {"type": "table", "name": "orders", "alias": "a"},
-                "right": {"type": "table", "name": "orders", "alias": "b"},
-                "condition": {
-                    "type": "predicate_equal",
-                    "left": {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "a"},
-                    "right": {"type": "column", "name": "customer_id", "tableName": "orders", "tableAlias": "b"},
-                },
-            },
-            "selectList": [
-                {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "a"},
-                {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "b"},
-            ],
-        },
-        "involvedTables": [
-            {"name": "orders", "columns": joined_orders_columns()},
-            {"name": "orders", "columns": joined_orders_columns()},
-        ],
-    });
+    let request = fixtures::self_join_request();
 
     let sql = render_statement(&request);
 
@@ -733,21 +616,8 @@ fn a_self_join_resolves_each_copy_to_its_own_alias() {
 /// and this dialect assembles its clauses itself.
 #[test]
 fn join_composes_with_filter_and_group_by() {
-    let mut request = join_request(
-        orders_to_customers("inner"),
-        json!([joined_column("note", "orders"), aggregate("COUNT", None)]),
-    );
-    request["pushdownRequest"]["filter"] = json!({
-        "type": "predicate_equal",
-        "left": joined_column("note", "orders"),
-        "right": string_literal("x"),
-    });
-    request["pushdownRequest"]["selectListDataTypes"] = json!([
-        {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"},
-        count_type(),
-    ]);
-    request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = json!([joined_column("note", "orders")]);
+    let request =
+        fixtures::filtered_grouped_join_request(joined_column("note", "orders"), note_type());
 
     let sql = render_statement(&request);
 
@@ -767,239 +637,7 @@ fn join_composes_with_filter_and_group_by() {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
-    use fixtures::{
-        aggregate_call, aggregate_item, count_star, date_column, decimal_column, id_equals,
-        numeric, select_list, timestamp_column, varchar_column,
-    };
-
-    fn from() -> FromClause {
-        fixtures::from(&namespace())
-    }
-
-    fn filtered(filter: Predicate) -> Query {
-        fixtures::filtered(&namespace(), filter)
-    }
-
-    fn aggregated(select_list: Vec<SelectItem>) -> Query {
-        fixtures::aggregated(&namespace(), select_list)
-    }
-
-    fn joined_query(join_type: &str) -> Query {
-        fixtures::joined_query(&namespace(), join_type)
-    }
-
-    match capability {
-        "SELECTLIST_PROJECTION" => (
-            r#"SELECT "id" FROM"#,
-            Query {
-                select_list: select_list(),
-                filter: None,
-                aggregation: None,
-                from: from(),
-            },
-        ),
-        "SELECTLIST_EXPRESSIONS" => (
-            r#"SELECT ("id" = 2)"#,
-            Query {
-                select_list: vec![SelectItem {
-                    expression: Expression::Predicate(Box::new(id_equals(numeric("2")))),
-                    declared_type: ExasolType::Boolean,
-                }],
-                filter: None,
-                aggregation: None,
-                from: from(),
-            },
-        ),
-        "FILTER_EXPRESSIONS" => (r#"WHERE ("id" = 2)"#, filtered(id_equals(numeric("2")))),
-        "AGGREGATE_SINGLE_GROUP" => (
-            "SELECT COUNT(*) FROM",
-            aggregated(vec![aggregate_item(count_star())]),
-        ),
-        "AGGREGATE_GROUP_BY_COLUMN" => (
-            r#"GROUP BY "id""#,
-            Query {
-                select_list: select_list(),
-                filter: None,
-                aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![decimal_column()])),
-                from: from(),
-            },
-        ),
-        "AGGREGATE_GROUP_BY_TUPLE" => (
-            r#"GROUP BY "id", "note""#,
-            Query {
-                select_list: vec![
-                    SelectItem {
-                        expression: Expression::Column(decimal_column()),
-                        declared_type: decimal_column().declared_type,
-                    },
-                    SelectItem {
-                        expression: Expression::Column(varchar_column()),
-                        declared_type: varchar_column().declared_type,
-                    },
-                ],
-                filter: None,
-                aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![
-                    decimal_column(),
-                    varchar_column(),
-                ])),
-                from: from(),
-            },
-        ),
-        "FN_AGG_COUNT" => (
-            r#"COUNT("id")"#,
-            aggregated(vec![aggregate_item(aggregate_call(
-                "COUNT",
-                Expression::Column(decimal_column()),
-                false,
-            ))]),
-        ),
-        "FN_AGG_COUNT_STAR" => ("COUNT(*)", aggregated(vec![aggregate_item(count_star())])),
-        "FN_AGG_COUNT_DISTINCT" => (
-            r#"COUNT(DISTINCT "id")"#,
-            aggregated(vec![aggregate_item(aggregate_call(
-                "COUNT",
-                Expression::Column(decimal_column()),
-                true,
-            ))]),
-        ),
-        "FN_AGG_MIN" => (
-            r#"MIN("id")"#,
-            aggregated(vec![aggregate_item(aggregate_call(
-                "MIN",
-                Expression::Column(decimal_column()),
-                false,
-            ))]),
-        ),
-        "FN_AGG_MAX" => (
-            r#"MAX("id")"#,
-            aggregated(vec![aggregate_item(aggregate_call(
-                "MAX",
-                Expression::Column(decimal_column()),
-                false,
-            ))]),
-        ),
-        "FN_PRED_AND" => (
-            r#"(("id" = 1) AND ("id" = 2))"#,
-            filtered(Predicate::And(vec![
-                id_equals(numeric("1")),
-                id_equals(numeric("2")),
-            ])),
-        ),
-        "FN_PRED_OR" => (
-            r#"(("id" = 1) OR ("id" = 2))"#,
-            filtered(Predicate::Or(vec![
-                id_equals(numeric("1")),
-                id_equals(numeric("2")),
-            ])),
-        ),
-        "FN_PRED_NOT" => (
-            r#"(NOT ("id" = 2))"#,
-            filtered(Predicate::Not(Box::new(id_equals(numeric("2"))))),
-        ),
-        "FN_PRED_EQUAL" => (r#"("id" = 2)"#, filtered(id_equals(numeric("2")))),
-        "FN_PRED_NOTEQUAL" => (
-            r#"("id" <> 2)"#,
-            filtered(Predicate::NotEqual(Comparison {
-                left: Expression::Column(decimal_column()),
-                right: numeric("2"),
-            })),
-        ),
-        "FN_PRED_LESS" => (
-            r#"("id" < 2)"#,
-            filtered(Predicate::Less(Comparison {
-                left: Expression::Column(decimal_column()),
-                right: numeric("2"),
-            })),
-        ),
-        "FN_PRED_LESSEQUAL" => (
-            r#"("id" <= 2)"#,
-            filtered(Predicate::LessEqual(Comparison {
-                left: Expression::Column(decimal_column()),
-                right: numeric("2"),
-            })),
-        ),
-        "FN_PRED_IS_NULL" => (
-            r#"("id" IS NULL)"#,
-            filtered(Predicate::IsNull(Expression::Column(decimal_column()))),
-        ),
-        "FN_PRED_IS_NOT_NULL" => (
-            r#"("id" IS NOT NULL)"#,
-            filtered(Predicate::IsNotNull(Expression::Column(decimal_column()))),
-        ),
-        "FN_PRED_LIKE" => (
-            "LIKE 'Wid%')",
-            filtered(Predicate::Like(LikePredicate {
-                expression: Expression::Column(varchar_column()),
-                pattern: Expression::Literal(Literal::String("Wid%".to_string())),
-                escape_char: None,
-            })),
-        ),
-        "FN_PRED_BETWEEN" => (
-            "BETWEEN 1 AND 9",
-            filtered(Predicate::Between(BetweenPredicate {
-                expression: Expression::Column(decimal_column()),
-                left: numeric("1"),
-                right: numeric("9"),
-            })),
-        ),
-        "FN_PRED_IN_CONSTLIST" => (
-            "IN (1, 2)",
-            filtered(Predicate::InConstList(InConstListPredicate {
-                expression: Expression::Column(decimal_column()),
-                arguments: vec![numeric("1"), numeric("2")],
-            })),
-        ),
-        "LITERAL_NULL" => (
-            "= NULL",
-            filtered(id_equals(Expression::Literal(Literal::Null))),
-        ),
-        "LITERAL_EXACTNUMERIC" => ("= 2", filtered(id_equals(numeric("2")))),
-        "LITERAL_DOUBLE" => (
-            "= DOUBLE '2.5'",
-            filtered(id_equals(Expression::Literal(Literal::Double(
-                "2.5".to_string(),
-            )))),
-        ),
-        "LITERAL_STRING" => (
-            "'widget'",
-            filtered(Predicate::Equal(Comparison {
-                left: Expression::Column(varchar_column()),
-                right: Expression::Literal(Literal::String("widget".to_string())),
-            })),
-        ),
-        "LITERAL_DATE" => (
-            "DATE '2015-12-01'",
-            filtered(Predicate::Equal(Comparison {
-                left: Expression::Column(date_column()),
-                right: Expression::Literal(Literal::Date("2015-12-01".to_string())),
-            })),
-        ),
-        "LITERAL_TIMESTAMP" => (
-            "TIMESTAMP '2015-12-01 12:01:01.123'",
-            filtered(Predicate::Equal(Comparison {
-                left: Expression::Column(timestamp_column()),
-                right: Expression::Literal(Literal::Timestamp(
-                    "2015-12-01 12:01:01.123".to_string(),
-                )),
-            })),
-        ),
-        "JOIN" => (
-            r#""memory"."adbc_vs"."orders" AS "t1" INNER JOIN "memory"."adbc_vs"."customers" AS "t2""#,
-            joined_query("inner"),
-        ),
-        "JOIN_TYPE_INNER" => ("INNER JOIN", joined_query("inner")),
-        "JOIN_TYPE_LEFT_OUTER" => ("LEFT OUTER JOIN", joined_query("left_outer")),
-        "JOIN_TYPE_RIGHT_OUTER" => ("RIGHT OUTER JOIN", joined_query("right_outer")),
-        "JOIN_TYPE_FULL_OUTER" => ("FULL OUTER JOIN", joined_query("full_outer")),
-        "JOIN_CONDITION_EQUI" => (
-            r#"ON ("t1"."customer_id" = "t2"."id")"#,
-            joined_query("inner"),
-        ),
-        other => panic!(
-            "capability `{other}` is advertised but this test has no fixture that exercises it; \
-             add one alongside whichever task added the capability"
-        ),
-    }
+    fixtures::query_exercising(Driver::Trino, &namespace(), capability)
 }
 
 /// Trino source types a column records. Trino's read expression is the bare
@@ -1016,37 +654,15 @@ const CONVERTED_NOTES: fixtures::ConvertedNotes = fixtures::ConvertedNotes {
 /// condition, as a column without notes does.
 #[test]
 fn column_reference_renders_identically_in_every_position() {
-    let filtered = render_statement(&fixtures::converted_column_filtered_request(
+    fixtures::assert_column_positions(
+        &render_statement,
         CONVERTED_NOTES,
-    ));
-    assert_eq!(
-        filtered,
-        r#"SELECT "uid" FROM "memory"."adbc_vs"."orders" WHERE ("uid" = 'a')"#
-    );
-
-    let grouped = render_statement(&fixtures::converted_column_grouped_request(
-        CONVERTED_NOTES,
-        json!([
-            column("uid"),
-            fixtures::aggregate_over("MIN", "uid", false),
-            fixtures::aggregate_over("COUNT", "uid", true),
-        ]),
-        json!([
-            {"type": "VARCHAR", "size": 36},
-            {"type": "VARCHAR", "size": 36},
-            {"type": "DECIMAL", "precision": 18, "scale": 0},
-        ]),
-        "uid",
-    ));
-    assert_eq!(
-        grouped,
-        r#"SELECT "uid", MIN("uid"), COUNT(DISTINCT "uid") FROM "memory"."adbc_vs"."orders" GROUP BY "uid""#
-    );
-
-    let joined = render_statement(&fixtures::converted_column_joined_request(CONVERTED_NOTES));
-    assert_eq!(
-        joined,
-        r#"SELECT "t1"."id" FROM ("memory"."adbc_vs"."orders" AS "t1" INNER JOIN "memory"."adbc_vs"."customers" AS "t2" ON ("t1"."uid" = "t2"."uid"))"#
+        true,
+        [
+            r#"SELECT "uid" FROM "memory"."adbc_vs"."orders" WHERE ("uid" = 'a')"#,
+            r#"SELECT "uid", MIN("uid"), COUNT(DISTINCT "uid") FROM "memory"."adbc_vs"."orders" GROUP BY "uid""#,
+            r#"SELECT "t1"."id" FROM ("memory"."adbc_vs"."orders" AS "t1" INNER JOIN "memory"."adbc_vs"."customers" AS "t2" ON ("t1"."uid" = "t2"."uid"))"#,
+        ],
     );
 }
 
@@ -1055,54 +671,31 @@ fn column_reference_renders_identically_in_every_position() {
 /// added, alone and under `NOT`, `AND`, and `OR`.
 #[test]
 fn boolean_column_predicate_renders_through_its_read_expression() {
-    for (filter, expected) in [
-        (column("flag"), r#""flag""#),
-        (column("active"), r#""active""#),
-        (fixtures::not(column("flag")), r#"(NOT "flag")"#),
-        (
-            fixtures::and(json!([column("flag"), column("active")])),
+    fixtures::assert_boolean_predicates(
+        &render_statement,
+        CONVERTED_NOTES,
+        r#"SELECT "id" FROM "memory"."adbc_vs"."orders" WHERE "#,
+        [
+            r#""flag""#,
+            r#""active""#,
+            r#"(NOT "flag")"#,
             r#"("flag" AND "active")"#,
-        ),
-        (
-            fixtures::or(json!([
-                column("active"),
-                less(numeric_literal("5"), column("id"))
-            ])),
             r#"("active" OR (5 < "id"))"#,
-        ),
-    ] {
-        let sql = render_statement(&fixtures::converted_table_filtered_request(
-            CONVERTED_NOTES,
-            filter,
-        ));
-
-        assert_eq!(
-            sql,
-            format!(r#"SELECT "id" FROM "memory"."adbc_vs"."orders" WHERE {expected}"#)
-        );
-    }
+        ],
+    );
 }
 
 /// Measured on Exasol 2025.1.11, `WHERE b = (d > 5)` arrives delegated with a
 /// predicate as the comparison's right operand.
 #[test]
 fn predicate_operand_of_a_comparison_renders_parenthesized() {
-    let columns = json!([
-        {"name": "active", "dataType": {"type": "BOOLEAN"}},
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-    ]);
-    for (operand, expected) in [
-        (
-            less(numeric_literal("5"), column("id")),
-            r#"("active" = (5 < "id"))"#,
-        ),
-        (
-            fixtures::not(column("active")),
-            r#"("active" = (NOT "active"))"#,
-        ),
-    ] {
-        let clause = where_clause_over(columns.clone(), equal(column("active"), operand));
+    let clauses = fixtures::predicate_operand_clauses(&where_clause_over);
 
-        assert_eq!(clause, expected);
-    }
+    assert_eq!(
+        clauses,
+        [
+            r#"("active" = (5 < "id"))"#,
+            r#"("active" = (NOT "active"))"#
+        ]
+    );
 }
