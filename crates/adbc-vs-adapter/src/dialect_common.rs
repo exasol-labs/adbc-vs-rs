@@ -152,7 +152,7 @@ pub trait StatementRenderer {
     /// target's SQL.
     const SQL_NAME: &'static str;
     /// The character that quotes an identifier, doubled inside it.
-    const QUOTE: char;
+    const QUOTE: char = '"';
     /// The keyword each `join_type` the dialect renders spells, which is also
     /// the closed set of values it renders at all.
     const JOIN_KEYWORDS: &'static [(&'static str, &'static str)];
@@ -708,3 +708,22 @@ fn is_signed_digits(exponent: &str) -> bool {
 
     !unsigned.is_empty() && unsigned.chars().all(|digit| digit.is_ascii_digit())
 }
+
+/// Declares the `Statement` of a dialect whose only per-statement decision is
+/// which table each column belongs to, with its `tables` accessor.
+macro_rules! plain_statement {
+    () => {
+        struct Statement<'a> {
+            tables: $crate::dialect_common::Tables<'a>,
+        }
+
+        impl<'a> Statement<'a> {
+            fn of(query: &'a $crate::pushdown_query::Query) -> Self {
+                Self {
+                    tables: $crate::dialect_common::Tables::of(&query.from),
+                }
+            }
+        }
+    };
+}
+pub(crate) use plain_statement;

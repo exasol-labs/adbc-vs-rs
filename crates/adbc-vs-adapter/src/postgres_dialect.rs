@@ -75,7 +75,8 @@
 use adbc_vs_scan::driver::Driver;
 
 use crate::dialect_common::{
-    counted, is_numeric_constant, render_literal_with, render_select, StatementRenderer, Tables,
+    counted, is_numeric_constant, plain_statement, render_literal_with, render_select,
+    StatementRenderer, Tables,
 };
 use crate::exa_type::ExasolType;
 use crate::postgres_type_mapping;
@@ -110,31 +111,23 @@ impl SqlDialect for PostgresDialect {
     }
 
     fn render(&self, query: &Query) -> Result<String, RenderError> {
-        render_select(
-            &Statement {
-                tables: Tables::of(&query.from),
-            },
-            query,
-        )
+        render_select(&Statement::of(query), query)
     }
 }
 
-/// The one decision a PostgreSQL statement settles before any expression in it
-/// renders: which table each column reference belongs to, and therefore how a
-/// column is named.
-///
-/// It is also the *only* such decision here, where the MySQL dialect carries a
-/// second: which columns the query groups by. That question decides nothing in
-/// this dialect, because a grouping key and its select-list occurrence render
-/// as the same read expression whatever the query groups by.
-struct Statement<'a> {
-    tables: Tables<'a>,
-}
+// The one decision a PostgreSQL statement settles before any expression in it
+// renders: which table each column reference belongs to, and therefore how a
+// column is named.
+//
+// It is also the *only* such decision here, where the MySQL dialect carries a
+// second: which columns the query groups by. That question decides nothing in
+// this dialect, because a grouping key and its select-list occurrence render
+// as the same read expression whatever the query groups by.
+plain_statement!();
 
 impl StatementRenderer for Statement<'_> {
     const TARGET: &'static str = "PostgreSQL";
     const SQL_NAME: &'static str = "PostgreSQL";
-    const QUOTE: char = '"';
     const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS;
     const DOUBLE_TYPE: &'static str = "DOUBLE PRECISION";
 
