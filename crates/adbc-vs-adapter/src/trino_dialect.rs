@@ -93,17 +93,13 @@
 //! joinable/hash-joinable rule imposes — not that it matters here, since only
 //! `JOIN_CONDITION_EQUI` is advertised.
 
-use adbc_vs_scan::driver::Driver;
-
 use crate::dialect_common::{
-    counted, is_numeric_constant, plain_statement, render_select, render_temporal_literal,
+    counted, is_numeric_constant, plain_dialect, render_select, render_temporal_literal,
     StatementRenderer, Tables,
 };
 use crate::exa_type::ExasolType;
-use crate::pushdown_query::{
-    ColumnRef, Expression, LikePredicate, Literal, OperandConversion, Query,
-};
-use crate::sql_dialect::{RenderError, SqlDialect};
+use crate::pushdown_query::{ColumnRef, Expression, LikePredicate, Literal, OperandConversion};
+use crate::sql_dialect::RenderError;
 
 use crate::trino_type_mapping;
 
@@ -125,44 +121,7 @@ const JOIN_KEYWORDS: &[(&str, &str)] = &[
 /// The Trino dialect.
 pub struct TrinoDialect;
 
-impl SqlDialect for TrinoDialect {
-    /// The set `drivers/trino.toml` declares, which is this dialect's claim
-    /// about what the renderer below covers rather than a fact about Trino:
-    /// the values are a data edit, but advertising one this module cannot
-    /// render still returns wrong rows, so the two stay one decision that
-    /// `capabilities_tests` renders entry by entry.
-    fn capabilities(&self) -> &'static [&'static str] {
-        Driver::Trino.capabilities()
-    }
-
-    fn render(&self, query: &Query) -> Result<String, RenderError> {
-        render_select(&Statement::of(query), query)
-    }
-}
-
-// The one decision a Trino statement settles before any expression in it
-// renders: which table each column reference belongs to, and therefore how
-// a column is named.
-//
-// This is the only decision a statement settles here: nothing in this dialect
-// collates, so no decision about which operand carries a suffix exists to
-// thread through rendering.
-plain_statement!();
-
-impl StatementRenderer for Statement<'_> {
-    const TARGET: &'static str = "Trino";
-    const SQL_NAME: &'static str = "Trino SQL";
-    const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS;
-    const DOUBLE_TYPE: &'static str = "DOUBLE";
-
-    fn tables(&self) -> &Tables<'_> {
-        &self.tables
-    }
-
-    fn render_literal(&self, literal: &Literal) -> Result<String, RenderError> {
-        render_literal(literal)
-    }
-
+plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
     /// Adds the operand as Exasol converts it. Trino defines no `sum` over a
     /// boolean or a character type, so a boolean, which for Trino is a
     /// predicate, sums as an `INTEGER` and a character operand as a `DOUBLE`
@@ -219,7 +178,7 @@ impl StatementRenderer for Statement<'_> {
             &named,
         ))
     }
-}
+});
 
 fn decimal_scale(operand: &Expression) -> Option<u32> {
     match operand {

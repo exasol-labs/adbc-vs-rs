@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use super::*;
+use crate::sql_dialect::SqlDialect;
 use adbc_vs_scan::driver::Driver;
 
 use crate::adapter_notes::SourceQualifier;

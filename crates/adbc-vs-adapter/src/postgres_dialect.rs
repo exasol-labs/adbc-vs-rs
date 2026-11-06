@@ -72,16 +72,14 @@
 //! answers it for itself, because which alias a table renders under is a
 //! rendering decision `vs-adapter/pushdown-join` places in the dialect.
 
-use adbc_vs_scan::driver::Driver;
-
 use crate::dialect_common::{
-    counted, is_numeric_constant, plain_statement, render_literal_with, render_select,
+    counted, is_numeric_constant, plain_dialect, render_literal_with, render_select,
     StatementRenderer, Tables,
 };
 use crate::exa_type::ExasolType;
 use crate::postgres_type_mapping;
-use crate::pushdown_query::{ColumnRef, Expression, Literal, OperandConversion, Query};
-use crate::sql_dialect::{RenderError, SqlDialect};
+use crate::pushdown_query::{ColumnRef, Expression, Literal, OperandConversion};
+use crate::sql_dialect::RenderError;
 
 /// The PostgreSQL keyword each `join_type` this dialect renders spells, and
 /// the closed set of values it renders at all.
@@ -100,91 +98,62 @@ const JOIN_KEYWORDS: &[(&str, &str)] = &[
 /// The PostgreSQL dialect.
 pub struct PostgresDialect;
 
-impl SqlDialect for PostgresDialect {
-    /// The set `drivers/postgresql.toml` declares, which is this dialect's
-    /// claim about what the renderer below covers rather than a fact about
-    /// PostgreSQL: the values are a data edit, but advertising one this module
-    /// cannot render still returns wrong rows, so the two stay one decision
-    /// that `capabilities_tests` renders entry by entry.
-    fn capabilities(&self) -> &'static [&'static str] {
-        Driver::Postgres.capabilities()
-    }
-
-    fn render(&self, query: &Query) -> Result<String, RenderError> {
-        render_select(&Statement::of(query), query)
-    }
-}
-
-// The one decision a PostgreSQL statement settles before any expression in it
-// renders: which table each column reference belongs to, and therefore how a
-// column is named.
-//
-// It is also the *only* such decision here, where the MySQL dialect carries a
-// second: which columns the query groups by. That question decides nothing in
-// this dialect, because a grouping key and its select-list occurrence render
-// as the same read expression whatever the query groups by.
-plain_statement!();
-
-impl StatementRenderer for Statement<'_> {
-    const TARGET: &'static str = "PostgreSQL";
-    const SQL_NAME: &'static str = "PostgreSQL";
-    const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS;
-    const DOUBLE_TYPE: &'static str = "DOUBLE PRECISION";
-
-    fn tables(&self) -> &Tables<'_> {
-        &self.tables
-    }
-
-    fn render_literal(&self, literal: &Literal) -> Result<String, RenderError> {
-        render_literal(literal)
-    }
-
-    /// Adds the operand as Exasol converts it. PostgreSQL defines no `sum`
-    /// over a boolean or a character type, so a boolean sums as an `INTEGER`
-    /// and a character operand as a `DOUBLE PRECISION` with an empty value read
-    /// as null. A column declared `DOUBLE` is cast too, because `sum` over
-    /// `real` returns `real` and adds in single precision, which would round a
-    /// sum Exasol computes in double precision.
-    fn summed(&self, argument: &Expression, operand: &str) -> String {
-        let conversion = argument.aggregate_operand_conversion();
-        match conversion {
-            Some(OperandConversion::Boolean) => format!("CAST({operand} AS INTEGER)"),
-            Some(OperandConversion::Character) => {
-                format!("CAST({} AS DOUBLE PRECISION)", counted(conversion, operand))
+plain_dialect!(
+    PostgresDialect,
+    Postgres,
+    "PostgreSQL",
+    "PostgreSQL",
+    "DOUBLE PRECISION",
+    {
+        /// Adds the operand as Exasol converts it. PostgreSQL defines no `sum`
+        /// over a boolean or a character type, so a boolean sums as an `INTEGER`
+        /// and a character operand as a `DOUBLE PRECISION` with an empty value read
+        /// as null. A column declared `DOUBLE` is cast too, because `sum` over
+        /// `real` returns `real` and adds in single precision, which would round a
+        /// sum Exasol computes in double precision.
+        fn summed(&self, argument: &Expression, operand: &str) -> String {
+            let conversion = argument.aggregate_operand_conversion();
+            match conversion {
+                Some(OperandConversion::Boolean) => format!("CAST({operand} AS INTEGER)"),
+                Some(OperandConversion::Character) => {
+                    format!("CAST({} AS DOUBLE PRECISION)", counted(conversion, operand))
+                }
+                None if is_double_column(argument) => {
+                    format!("CAST({operand} AS DOUBLE PRECISION)")
+                }
+                None => operand.to_string(),
             }
-            None if is_double_column(argument) => format!("CAST({operand} AS DOUBLE PRECISION)"),
-            None => operand.to_string(),
+        }
+
+        /// Over a `BOOLEAN` operand, which PostgreSQL defines neither `MIN` nor
+        /// `MAX` for, `MIN` is `bool_and` and `MAX` is `bool_or`.
+        fn render_plain_aggregate(
+            &self,
+            function: &str,
+            argument: &Expression,
+            distinct: &str,
+            operand: &str,
+        ) -> String {
+            if argument.aggregate_operand_conversion() == Some(OperandConversion::Boolean) {
+                return format!("{}({distinct}{operand})", boolean_aggregate(function));
+            }
+            format!("{function}({distinct}{operand})")
+        }
+
+        /// Renders one column reference through the read expression PostgreSQL's
+        /// type mapping names for its recorded source type, so every position acts
+        /// on the value the scan emits for it.
+        fn render_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
+            let named = self.name_column(column)?;
+
+            Ok(postgres_type_mapping::column_read_sql(
+                column.source_type.as_deref(),
+                column.declared_type,
+                &named,
+            ))
         }
     }
-
-    /// Over a `BOOLEAN` operand, which PostgreSQL defines neither `MIN` nor
-    /// `MAX` for, `MIN` is `bool_and` and `MAX` is `bool_or`.
-    fn render_plain_aggregate(
-        &self,
-        function: &str,
-        argument: &Expression,
-        distinct: &str,
-        operand: &str,
-    ) -> String {
-        if argument.aggregate_operand_conversion() == Some(OperandConversion::Boolean) {
-            return format!("{}({distinct}{operand})", boolean_aggregate(function));
-        }
-        format!("{function}({distinct}{operand})")
-    }
-
-    /// Renders one column reference through the read expression PostgreSQL's
-    /// type mapping names for its recorded source type, so every position acts
-    /// on the value the scan emits for it.
-    fn render_column(&self, column: &ColumnRef) -> Result<String, RenderError> {
-        let named = self.name_column(column)?;
-
-        Ok(postgres_type_mapping::column_read_sql(
-            column.source_type.as_deref(),
-            column.declared_type,
-            &named,
-        ))
-    }
-}
+);
 
 fn is_double_column(operand: &Expression) -> bool {
     matches!(

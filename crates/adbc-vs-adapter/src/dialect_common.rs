@@ -709,21 +709,57 @@ fn is_signed_digits(exponent: &str) -> bool {
     !unsigned.is_empty() && unsigned.chars().all(|digit| digit.is_ascii_digit())
 }
 
-/// Declares the `Statement` of a dialect whose only per-statement decision is
-/// which table each column belongs to, with its `tables` accessor.
-macro_rules! plain_statement {
-    () => {
+/// Declares a dialect whose only per-statement decision is which table each
+/// column belongs to: its `SqlDialect` impl, its `Statement`, and the
+/// `StatementRenderer` constants and accessors every such dialect shares. The
+/// braces hold the renderer's hooks. It reads the `JOIN_KEYWORDS` constant and
+/// `render_literal` function of the invoking module.
+macro_rules! plain_dialect {
+    ($dialect:ident, $driver:ident, $target:literal, $sql_name:literal, $double:literal, { $($hooks:tt)* }) => {
+        impl $crate::sql_dialect::SqlDialect for $dialect {
+            fn capabilities(&self) -> &'static [&'static str] {
+                adbc_vs_scan::driver::Driver::$driver.capabilities()
+            }
+
+            fn render(
+                &self,
+                query: &$crate::pushdown_query::Query,
+            ) -> Result<String, $crate::sql_dialect::RenderError> {
+                render_select(&Statement::of(query), query)
+            }
+        }
+
         struct Statement<'a> {
-            tables: $crate::dialect_common::Tables<'a>,
+            tables: Tables<'a>,
         }
 
         impl<'a> Statement<'a> {
             fn of(query: &'a $crate::pushdown_query::Query) -> Self {
                 Self {
-                    tables: $crate::dialect_common::Tables::of(&query.from),
+                    tables: Tables::of(&query.from),
                 }
             }
         }
+
+        impl StatementRenderer for Statement<'_> {
+            const TARGET: &'static str = $target;
+            const SQL_NAME: &'static str = $sql_name;
+            const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS;
+            const DOUBLE_TYPE: &'static str = $double;
+
+            fn tables(&self) -> &Tables<'_> {
+                &self.tables
+            }
+
+            fn render_literal(
+                &self,
+                literal: &$crate::pushdown_query::Literal,
+            ) -> Result<String, $crate::sql_dialect::RenderError> {
+                render_literal(literal)
+            }
+
+            $($hooks)*
+        }
     };
 }
-pub(crate) use plain_statement;
+pub(crate) use plain_dialect;
