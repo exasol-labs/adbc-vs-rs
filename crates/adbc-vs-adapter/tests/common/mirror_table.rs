@@ -50,6 +50,31 @@ pub fn insert_statement(schema: &str, table: &str, columns: &[Column], values: &
     )
 }
 
+/// The number of values each parenthesized tuple of `values` carries, read
+/// outside single-quoted strings, whose own commas and parentheses are text.
+pub fn values_per_tuple(values: &str) -> Vec<usize> {
+    let mut counts = Vec::new();
+    let mut in_string = false;
+    let mut open = false;
+    let mut commas = 0;
+    for character in values.chars() {
+        match character {
+            '\'' => in_string = !in_string,
+            '(' if !in_string => {
+                open = true;
+                commas = 0;
+            }
+            ',' if !in_string && open => commas += 1,
+            ')' if !in_string && open => {
+                counts.push(commas + 1);
+                open = false;
+            }
+            _ => {}
+        }
+    }
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,8 +4,8 @@ use super::*;
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column, double_literal, equal, filtered_request, less, numeric_literal, orders_columns,
-    request, string_literal,
+    column, distinct, double_literal, double_type, equal, filtered_request, less, numeric_literal,
+    orders_columns, request, string_literal, sum_type,
 };
 use crate::exa_type::ExasolType;
 use crate::pushdown_query;
@@ -550,22 +550,6 @@ fn mixed_case_function_names_render_identically() {
 
 fn note_type() -> Value {
     json!({"type": "VARCHAR", "size": 100, "characterSet": "UTF8"})
-}
-
-/// The type Exasol supplies for `SUM` over `total`, a `DECIMAL(12,4)`.
-fn sum_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 23, "scale": 4})
-}
-
-/// The type Exasol supplies for `AVG` and for `SUM` over a `DOUBLE` operand.
-fn double_type() -> Value {
-    json!({"type": "DOUBLE"})
-}
-
-/// `entry` with `DISTINCT` set, which Exasol sends as a `distinct` field.
-fn distinct(mut entry: Value) -> Value {
-    entry["distinct"] = json!(true);
-    entry
 }
 
 /// `vs-adapter/trino-pushdown`, scenario "SUM over an exact-numeric column sums

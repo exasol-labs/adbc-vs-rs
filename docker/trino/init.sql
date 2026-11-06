@@ -187,18 +187,8 @@ DROP VIEW IF EXISTS memory.adbc_vs.orders_view;
 
 CREATE VIEW memory.adbc_vs.orders_view AS SELECT id, name FROM memory.adbc_vs.orders;
 
--- `measures` is the table the `SUM`, `AVG`, and `HAVING` end-to-end tests read,
--- mirrored by `crates/adbc-vs-adapter/tests/common/trino_mirror.rs`, which
--- states its columns and values independently. Keep the two in sync by hand.
---
--- Three groups: `a` and `b` hold values, and `c` holds only null operands, so
--- a group with nothing to sum is observable. Every floating-point value is a
--- binary fraction whose partial sums are exact in double precision, so the
--- order in which Trino combines partial results cannot change a result.
--- `big_value` holds `9223372036854775807` and `1` in group `b`, a sum past the
--- `bigint` range. `label` holds decimal numbers as text, an empty string, and
--- `'5'` beside `'5.0'` in group `a`, which are two distinct values that
--- convert to one number.
+-- measures feeds the SUM, AVG, and HAVING tests; trino_mirror.rs restates its rows by hand.
+-- Floats are binary fractions so no accumulation order changes a sum, and big_value sums past bigint.
 DROP TABLE IF EXISTS memory.adbc_vs.measures;
 
 CREATE TABLE memory.adbc_vs.measures (

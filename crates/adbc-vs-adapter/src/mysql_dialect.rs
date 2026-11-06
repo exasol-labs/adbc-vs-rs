@@ -31,9 +31,9 @@
 //! needs nothing: its select-list occurrence is the same bare column, and a
 //! select-list predicate reading it is an expression over that column, which
 //! MySQL accepts. A key read through a conversion is grouped by its read
-//! expression, and its select-list occurrence outside an aggregate renders as
-//! `ANY_VALUE(<read expression>)`, which has the grouping value within its
-//! group and which MySQL exempts from the check. Grouping by the bare column
+//! expression, and its occurrence outside an aggregate in the select list or
+//! the `HAVING` clause renders as `ANY_VALUE(<read expression>)`, which has the
+//! grouping value within its group and which MySQL exempts from the check. Grouping by the bare column
 //! instead would group a read expression that does not preserve equality,
 //! such as a multi-bit `BIT` read as `BOOLEAN`, apart from the key the scan
 //! emits.
@@ -280,9 +280,9 @@ impl<'a> Tables<'a> {
 /// The keys are the second decision a MySQL statement settles before its
 /// select list renders. `ONLY_FULL_GROUP_BY` matches a select-list expression
 /// against a `GROUP BY` expression only whole, so outside an aggregate in the
-/// select list a key grouped by a read expression other than the bare column
-/// reads as `ANY_VALUE(<read expression>)`, which has the grouping value
-/// within its group. Every other position carries no key: a `WHERE` or `ON`
+/// select list and in the `HAVING` clause a key grouped by a read expression
+/// other than the bare column reads as `ANY_VALUE(<read expression>)`, which
+/// has the grouping value within its group. Every other position carries no key: a `WHERE` or `ON`
 /// operand and an aggregate's argument are read per row.
 #[derive(Clone, Copy)]
 struct Statement<'s> {

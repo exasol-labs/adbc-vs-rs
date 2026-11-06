@@ -221,22 +221,14 @@ mod tests {
 
     #[test]
     fn every_mirrored_measures_row_carries_one_value_per_declared_column() {
-        for row in MEASURES_VALUES.split("), ") {
-            let values = row.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
-            let quotes = values.matches('\'').count();
-            assert_eq!(quotes % 2, 0, "a value's quote must close: {row}");
-            let unquoted_commas = values
-                .split('\'')
-                .step_by(2)
-                .map(|outside| outside.matches(',').count())
-                .sum::<usize>();
-            assert_eq!(
-                unquoted_commas + 1,
-                MEASURES_COLUMNS.len(),
-                "every `measures` row must carry one value per declared column, or Exasol \
-                 assigns them to the wrong columns: {row}"
-            );
-        }
+        let counts = mirror_table::values_per_tuple(MEASURES_VALUES);
+
+        assert!(!counts.is_empty(), "`measures` must hold rows");
+        assert!(
+            counts.iter().all(|count| *count == MEASURES_COLUMNS.len()),
+            "every `measures` row must carry one value per declared column, or Exasol \
+             assigns them to the wrong columns: {counts:?}"
+        );
     }
 
     #[test]

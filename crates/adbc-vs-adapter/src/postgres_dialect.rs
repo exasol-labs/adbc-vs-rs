@@ -527,7 +527,7 @@ impl<'a> Statement<'a> {
                 summed(argument, &operand),
                 counted(argument, &operand)
             ),
-            _ if is_boolean_operand(argument) => {
+            _ if argument.aggregate_operand_conversion() == Some(OperandConversion::Boolean) => {
                 format!("{}({distinct}{operand})", boolean_aggregate(function))
             }
             _ => format!("{function}({distinct}{operand})"),
@@ -680,13 +680,6 @@ fn renderable_function(function: &str) -> Result<&'static str, RenderError> {
                 AGGREGATE_FUNCTIONS.join(", ")
             ))
         })
-}
-
-/// Whether `operand` is a `BOOLEAN` value: a column declared `BOOLEAN`, or a
-/// predicate, which is boolean by construction and carries no declared type of
-/// its own.
-fn is_boolean_operand(operand: &Expression) -> bool {
-    operand.aggregate_operand_conversion() == Some(OperandConversion::Boolean)
 }
 
 /// The operand a `SUM` adds, converted as Exasol converts it before it sums.

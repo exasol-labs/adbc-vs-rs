@@ -4,7 +4,8 @@ use super::*;
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column, equal, filtered_request, less, numeric_literal, orders_columns, request, string_literal,
+    column, distinct, double_type, equal, filtered_request, less, numeric_literal, orders_columns,
+    request, string_literal, sum_type,
 };
 use crate::exa_type::ExasolType;
 use crate::pushdown_query;
@@ -1116,22 +1117,6 @@ fn unrenderable_aggregate_named_in_error() {
             "the error must name the aggregate function it received: {error}"
         );
     }
-}
-
-/// The type Exasol supplies for `SUM` over `total`, a `DECIMAL(12,4)`.
-fn sum_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 23, "scale": 4})
-}
-
-/// The type Exasol supplies for `AVG` and for `SUM` over a `DOUBLE` operand.
-fn double_type() -> Value {
-    json!({"type": "DOUBLE"})
-}
-
-/// `entry` with `DISTINCT` set, which Exasol sends as a `distinct` field.
-fn distinct(mut entry: Value) -> Value {
-    entry["distinct"] = json!(true);
-    entry
 }
 
 /// `vs-adapter/pushdown-aggregation`, scenario "SUM renders as the source's

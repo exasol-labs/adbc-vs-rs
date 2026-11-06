@@ -4,8 +4,8 @@ use super::*;
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column as column_operand, equal, filtered_request, less, numeric_literal, orders_columns,
-    request, string_literal,
+    column as column_operand, distinct, double_type, equal, filtered_request, less,
+    numeric_literal, orders_columns, request, string_literal, sum_type,
 };
 use crate::exa_type::ExasolType;
 use crate::pushdown_query;
@@ -598,13 +598,6 @@ fn a_joined_grouping_key_is_recognized_however_the_request_qualifies_its_occurre
     );
 }
 
-/// An aggregate entry with `distinct` set, the shape Exasol sends for
-/// `COUNT(DISTINCT "c")` and `MIN(DISTINCT "c")`.
-fn distinct(mut entry: Value) -> Value {
-    entry["distinct"] = json!(true);
-    entry
-}
-
 /// `DISTINCT` reaches the statement as a keyword before the operand, whatever
 /// the function and the operand's type. `COUNT` over the same column without
 /// `distinct` renders no keyword. The exact match carries no `COLLATE`.
@@ -690,16 +683,6 @@ fn unrenderable_aggregate_named_in_error() {
             "the error must name the aggregate function it received: {error}"
         );
     }
-}
-
-/// The type Exasol supplies for `SUM` over `total`, a `DECIMAL(12,4)`.
-fn sum_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 23, "scale": 4})
-}
-
-/// The type Exasol supplies for `AVG` and for `SUM` over a `DOUBLE` operand.
-fn double_type() -> Value {
-    json!({"type": "DOUBLE"})
 }
 
 /// `vs-adapter/pushdown-aggregation`, scenario "SUM renders as the source's

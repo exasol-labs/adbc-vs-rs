@@ -394,8 +394,6 @@ fn full_outer_join_reaches_trino_and_returns_both_unmatched_rows() {
     );
 }
 
-// --- SUM, AVG, and HAVING ---------------------------------------------------
-
 const MEASURES: &str = "measures";
 
 /// The four aggregates a numeric operand answers, each aliased so a result

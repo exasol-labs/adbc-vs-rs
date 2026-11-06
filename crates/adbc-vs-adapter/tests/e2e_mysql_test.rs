@@ -1538,6 +1538,11 @@ fn sum_and_avg_over_boolean_and_character_columns_match_the_mirror() {
              FROM {schema}.\"{measures}\""
         )
     };
+    let statement = pushdown_statement(&predicate(VIRTUAL_SCHEMA, MEASURES));
+    assert!(
+        statement.contains("SUM((5 < `big_value`))"),
+        "a predicate operand must render unchanged inside SUM: {statement}"
+    );
     assert_matches_mirror(MEASURES, predicate);
 }
 

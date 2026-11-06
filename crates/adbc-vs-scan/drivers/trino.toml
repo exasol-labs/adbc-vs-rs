@@ -57,13 +57,8 @@ segment_count = 2
 # renders every grouping column a request carries, so this widening costs no
 # renderer anything.
 #
-# `AGGREGATE_HAVING`, `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, and
-# `FN_AGG_AVG_DISTINCT` are advertised although a capability admits every
-# numeric operand: the dialect widens an exact-numeric `SUM` operand to
-# `DECIMAL(38, s)` and renders an `AVG` quotient so each returns the type Exasol
-# declares, and a `double` sum still follows Trino's accumulation order, which
-# distributes an aggregation and combines partial results and which
-# `docs/pushdown.md` states.
+# SUM widens an exact-numeric operand to DECIMAL(38, s), because sum(bigint) fails past the bigint range;
+# a double sum follows Trino's distributed accumulation order (docs/pushdown.md).
 #
 # `FN_PRED_LIKE_ESCAPE` is the one entry withheld for a reason about Trino's SQL.
 # Trino defines no default escape character and rejects an escape character

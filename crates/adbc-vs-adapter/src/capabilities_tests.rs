@@ -248,17 +248,13 @@ const MYSQL_CAPABILITIES: &[&str] = &[
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
-    // A floating-point `SUM` and `AVG` follow the source's accumulation order, so a
-    // delegated result can differ from Exasol's in its low-order digits; the capability
-    // admits every numeric operand, so refusing a `DOUBLE` at render time would turn a
-    // query Exasol answers into a failure.
+    // Advertised although a floating-point sum follows the source's accumulation order:
+    // refusing a DOUBLE operand at render time would fail a query Exasol answers.
     "FN_AGG_SUM",
     "FN_AGG_SUM_DISTINCT",
     "FN_AGG_AVG",
     "FN_AGG_AVG_DISTINCT",
-    // `AGGREGATE_GROUP_BY_EXPRESSION` and `AGGREGATE_GROUP_BY_TUPLE` are withheld: this
-    // release groups by one column, and no aggregate reaches the adapter without
-    // `SELECTLIST_EXPRESSIONS`.
+    // AGGREGATE_GROUP_BY_EXPRESSION and AGGREGATE_GROUP_BY_TUPLE are withheld: MySQL groups by one column.
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",
@@ -328,10 +324,8 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
-    // A `SUM` or `AVG` over a `double precision` column follows the source's accumulation
-    // order, so a delegated result can differ from Exasol's in its low-order digits; the
-    // capability admits every numeric operand, so refusing a `DOUBLE` at render time would
-    // turn a query Exasol answers into a failure.
+    // Advertised although a floating-point sum follows the source's accumulation order:
+    // refusing a DOUBLE operand at render time would fail a query Exasol answers.
     "FN_AGG_SUM",
     "FN_AGG_SUM_DISTINCT",
     "FN_AGG_AVG",
@@ -404,10 +398,8 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
-    // A `SUM` or `AVG` over a `double` column follows the source's accumulation order, so a
-    // delegated result can differ from Exasol's in its low-order digits; the capability
-    // admits every numeric operand, so refusing a `DOUBLE` at render time would turn a query
-    // Exasol answers into a failure.
+    // Advertised although a floating-point sum follows the source's accumulation order:
+    // refusing a DOUBLE operand at render time would fail a query Exasol answers.
     "FN_AGG_SUM",
     "FN_AGG_SUM_DISTINCT",
     "FN_AGG_AVG",

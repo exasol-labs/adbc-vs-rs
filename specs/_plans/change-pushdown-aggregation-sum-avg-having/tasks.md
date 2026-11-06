@@ -37,3 +37,17 @@
 
 ## Phase 3: Verification
 - [ ] 3.1 Checks, e2e, manual, report
+
+## Phase 4: Review Fixes
+- [x] 4.1 In `docs/pushdown.md`, replace the MySQL 8.0.17 bullet so it names `AVG` and `SUM` over a character column and gives the `+ 0` workaround.
+- [x] 4.2 In `docs/pushdown.md`, extend the floating-point section to cover a character operand, which converts to `DOUBLE`.
+- [x] 4.3 In `postgres_dialect.rs`, delete `is_boolean_operand` and inline its check in `Statement::render_aggregate`.
+- [x] 4.4 In `mysql_dialect.rs`, name the `HAVING` clause in the `Statement` doc and the module doc of `ANY_VALUE`.
+- [x] 4.5 In `capabilities_tests.rs`, shorten the three `FN_AGG_SUM` comments and the group-by withholding comment to 2 and 1 lines.
+- [x] 4.6 In `drivers/postgresql.toml`, rewrite the `FN_AGG_SUM`/`FN_AGG_AVG` comment to 2 lines with the real reason for the cast.
+- [x] 4.7 In `drivers/trino.toml`, rewrite the `SUM` widening comment to 2 lines with the real reason.
+- [x] 4.8 Move `sum_type`, `double_type`, and `distinct` into `dialect_test_fixtures.rs` as `pub(crate) fn` and delete the three dialect-test copies.
+- [x] 4.9 Move `values_per_tuple` into `tests/common/mirror_table.rs` as `pub fn`, delete the mirror copies, and reuse it in `trino_mirror.rs`.
+- [x] 4.10 In `e2e_mysql_test.rs`, assert that `SUM((5 < `big_value`))` reaches the statement in the predicate operand case.
+- [x] 4.11 Delete the `SUM, AVG, and HAVING` section banner in `e2e_postgres_test.rs` and `e2e_trino_test.rs`.
+- [x] 4.12 Shorten the `measures` and `nan_measures` comments in `docker/postgres/init.sql` and `docker/trino/init.sql`, with no SQL change.

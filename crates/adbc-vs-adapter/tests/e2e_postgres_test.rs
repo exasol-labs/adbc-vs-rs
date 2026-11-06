@@ -739,8 +739,6 @@ fn select_list_predicate_over_the_grouped_character_column_delegates_and_matches
     );
 }
 
-// --- SUM, AVG, and HAVING ---------------------------------------------------
-
 /// The table `SUM`, `AVG`, and `HAVING` read, whose local mirror holds the same
 /// rows, and the table holding a `NaN`, which the mirror does not copy.
 const MEASURES: &str = "measures";

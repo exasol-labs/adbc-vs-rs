@@ -427,3 +427,19 @@ pub(crate) fn joined_query(namespace: &SourceQualifier, join_type: &str) -> Quer
         })),
     }
 }
+
+/// `entry` with `DISTINCT` set, which Exasol sends as a `distinct` field.
+pub(crate) fn distinct(mut entry: Value) -> Value {
+    entry["distinct"] = json!(true);
+    entry
+}
+
+/// The type Exasol supplies for `SUM` over `total`, a `DECIMAL(12,4)`.
+pub(crate) fn sum_type() -> Value {
+    json!({"type": "DECIMAL", "precision": 23, "scale": 4})
+}
+
+/// The type Exasol supplies for `AVG` and for `SUM` over a `DOUBLE` operand.
+pub(crate) fn double_type() -> Value {
+    json!({"type": "DOUBLE"})
+}

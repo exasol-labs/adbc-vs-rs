@@ -31,7 +31,7 @@ Exasol runs these parts for every database: `ORDER BY`, `LIMIT`, `OFFSET`, `GROU
 
 ## Floating-point sums follow the source
 
-An exact-numeric `SUM` or `AVG` that runs at the source equals the result that Exasol computes. Over a `DOUBLE` column, the source adds the values in its own order. The result can then differ from the Exasol result in the low-order digits. It can differ further where values cancel, and it can differ between runs. A `NaN` value makes the result null.
+An exact-numeric `SUM` or `AVG` that runs at the source equals the result that Exasol computes. Over a `DOUBLE` column, and over a character column, which the source and Exasol both convert to `DOUBLE`, the source adds the values in its own order. The result can then differ from the Exasol result in the low-order digits. It can differ further where values cancel, and it can differ between runs. A `NaN` value makes the result null.
 
 To get the Exasol result, wrap the operand in an expression that `adbc-vs-rs` does not send, for example `SUM("price" + 0)`. Exasol then runs the sum. This follows the same rule as [String comparison follows the source](how-it-works.md#string-comparison-follows-the-source).
 
@@ -40,7 +40,7 @@ To get the Exasol result, wrap the operand in an expression that `adbc-vs-rs` do
 ### MySQL
 
 - MySQL has no `FULL OUTER JOIN`. Exasol runs a full outer join.
-- A delegated `AVG` needs MySQL 8.0.17 or later, because the `CAST(... AS DOUBLE)` in the query that `adbc-vs-rs` sends needs it. On an older MySQL, the query fails.
+- A delegated `AVG`, and a delegated `SUM` over a character column, need MySQL 8.0.17 or later, because the query that `adbc-vs-rs` sends uses `CAST(... AS DOUBLE)`. On an older MySQL, the query fails. To run it there, wrap the operand in an expression that `adbc-vs-rs` does not send, for example `AVG("price" + 0)`, so that Exasol computes the aggregate.
 - A `SUM` or `AVG` over a character column reads a value that is not a number as its numeric prefix, or as 0. Exasol fails the query for such a value.
 
 ### PostgreSQL
