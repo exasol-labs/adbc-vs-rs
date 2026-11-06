@@ -327,6 +327,7 @@ pub(crate) fn filtered(namespace: &SourceQualifier, filter: Predicate) -> Query 
         select_list: select_list(),
         filter: Some(filter),
         aggregation: None,
+        having: None,
         from: from(namespace),
     }
 }
@@ -347,6 +348,7 @@ pub(crate) fn aggregated(namespace: &SourceQualifier, select_list: Vec<SelectIte
         select_list,
         filter: None,
         aggregation: Some(pushdown_query::Aggregation::SingleGroup),
+        having: None,
         from: from(namespace),
     }
 }
@@ -405,6 +407,7 @@ pub(crate) fn joined_query(namespace: &SourceQualifier, join_type: &str) -> Quer
         }],
         filter: None,
         aggregation: None,
+        having: None,
         from: FromClause::Join(Box::new(pushdown_query::Join {
             join_type: join_type.to_string(),
             left: Box::new(FromClause::Table(SourceTable {

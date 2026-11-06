@@ -1,4 +1,4 @@
-[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md) · [Type Mapping](type-mapping.md)
+[Home](index.md) · [Install & Set Up](install.md) · [Create a Virtual Schema](create-virtual-schema.md) · [How Does It Work](how-it-works.md) · [Pushdown](pushdown.md) · [Type Mapping](type-mapping.md)
 
 ---
 

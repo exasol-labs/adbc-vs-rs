@@ -27,7 +27,7 @@
 
 The adapter installs the ADBC driver itself. It downloads ADBC drivers from the [ADBC Driver Registry](https://dbc-cdn.columnar.tech), the same one used by [dbc](https://github.com/columnar-tech/dbc). [Columnar](https://github.com/columnar-tech) runs the registry. The drivers themselves are developed by the [ADBC Driver Foundry](https://adbc-drivers.org) and the [Apache Arrow ADBC](https://github.com/apache/arrow-adbc) project. The adapter writes the driver to [BucketFS](https://docs.exasol.com/db/latest/administration/on-premise/bucketfs/bucketfs.htm). On a cluster without internet access, you upload the driver to BucketFS yourself.
 
-- **SQL pushdown.** Column selection, filters, aggregation, and equi and outer joins run at the source.
+- **[SQL pushdown](docs/pushdown.md).** Column selection, filters, aggregation, and equi and outer joins run at the source.
 - **Read-only.** `adbc-vs-rs` does not write to the source.
 
 ---
@@ -61,6 +61,7 @@ See [**docs/**](docs/index.md):
 - [Air-gapped environments](docs/install.md#install-the-driver-yourself) - Deployments without internet access
 - [Create a Virtual Schema](docs/create-virtual-schema.md) - Connections, properties, and specifics for each database
 - [How Does It Work](docs/how-it-works.md) - The adapter and the scan UDF, and the [limits](docs/how-it-works.md#limits)
+- [Pushdown](docs/pushdown.md) - The parts of a query that run at the source, and the parts that run in Exasol
 
 ---
 

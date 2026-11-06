@@ -1241,23 +1241,14 @@ fn select_list_predicate_over_an_aggregate_renders() {
 }
 
 /// `vs-adapter/result-ordering`: `orderBy` and `limit` stay in Exasol because
-/// their capabilities are withheld, and `having` stays because
-/// `AGGREGATE_HAVING` is. An element arriving anyway means the advertised set
-/// and the rejection list have drifted apart, and reading past it would hand
-/// Exasol a statement it believes carries the clause.
+/// their capabilities are withheld. An element arriving anyway means the
+/// advertised set and the rejection list have drifted apart, and reading past
+/// it would hand Exasol a statement it believes carries the clause.
 #[test]
 fn order_by_and_limit_elements_fail_named() {
     for (element, value) in [
         ("orderBy", json!([column("id")])),
         ("limit", json!({"numElements": 10})),
-        (
-            "having",
-            json!({
-                "type": "predicate_less",
-                "left": numeric_literal("0"),
-                "right": aggregate("COUNT", None),
-            }),
-        ),
     ] {
         let mut request = request(orders_columns(), Some(json!([column("id")])));
         request["pushdownRequest"][element] = value;
@@ -1284,6 +1275,7 @@ fn a_query_projecting_nothing_fails_rather_than_rendering_an_empty_projection() 
         select_list: vec![],
         filter: None,
         aggregation: None,
+        having: None,
         from: FromClause::Table(SourceTable {
             namespace: SourceQualifier::single(NAMESPACE),
             name: "orders".to_string(),
@@ -1317,6 +1309,7 @@ fn a_literal_select_list_entry_renders_through_the_literal_renderer() {
         }],
         filter: None,
         aggregation: None,
+        having: None,
         from: FromClause::Table(SourceTable {
             namespace: SourceQualifier::single(NAMESPACE),
             name: "orders".to_string(),
@@ -1400,6 +1393,7 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
                 select_list: select_list(),
                 filter: None,
                 aggregation: None,
+                having: None,
                 from: from(),
             },
         ),
@@ -1412,6 +1406,7 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
                 }],
                 filter: None,
                 aggregation: None,
+                having: None,
                 from: from(),
             },
         ),
@@ -1426,6 +1421,7 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
                 select_list: select_list(),
                 filter: None,
                 aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![decimal_column()])),
+                having: None,
                 from: from(),
             },
         ),
