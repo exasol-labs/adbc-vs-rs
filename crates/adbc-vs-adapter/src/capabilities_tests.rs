@@ -383,7 +383,7 @@ fn postgres_capability_set_is_exact() {
 /// deriving this one from PostgreSQL's would be the second capability list
 /// `vs-adapter/pushdown-dialect` forbids.
 ///
-/// `drivers/trino.toml` states the set as PostgreSQL's 35 entries, minus
+/// `drivers/trino.toml` states the set as PostgreSQL's 40 entries, minus
 /// `FN_PRED_LIKE_ESCAPE`, plus `AGGREGATE_GROUP_BY_TUPLE`, and that is exactly
 /// what this list spells out. `FN_PRED_LIKE_ESCAPE` is withheld because Trino
 /// defines no default escape character and rejects an escape character
@@ -398,11 +398,20 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
     "AGGREGATE_GROUP_BY_TUPLE",
+    "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
+    // A `SUM` or `AVG` over a `double` column follows the source's accumulation order, so a
+    // delegated result can differ from Exasol's in its low-order digits; the capability
+    // admits every numeric operand, so refusing a `DOUBLE` at render time would turn a query
+    // Exasol answers into a failure.
+    "FN_AGG_SUM",
+    "FN_AGG_SUM_DISTINCT",
+    "FN_AGG_AVG",
+    "FN_AGG_AVG_DISTINCT",
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",
@@ -429,8 +438,8 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// `vs-adapter/trino-pushdown`: Trino advertises exactly the set
-/// `drivers/trino.toml` declares, element for element.
+/// `vs-adapter/trino-pushdown`: Trino advertises exactly the 40 entries of
+/// [`TRINO_CAPABILITIES`], element for element.
 #[test]
 fn trino_capability_set_is_exact() {
     assert_set_is(Driver::Trino, TRINO_CAPABILITIES);
@@ -438,7 +447,7 @@ fn trino_capability_set_is_exact() {
 
 /// `vs-adapter/trino-pushdown`: the Trino and PostgreSQL sets differ by exactly
 /// two named entries, one in each direction. Each set is stated by its own
-/// declaration, so the 34 entries they share are an outcome of two decisions,
+/// declaration, so the 39 entries they share are an outcome of two decisions,
 /// and a change to either set fails here rather than being absorbed.
 #[test]
 fn trino_and_postgresql_sets_differ_by_two_named_entries() {
@@ -455,17 +464,7 @@ fn trino_and_postgresql_sets_differ_by_two_named_entries() {
         .collect();
 
     assert_eq!(only_trino, ["AGGREGATE_GROUP_BY_TUPLE"]);
-    assert_eq!(
-        only_postgresql,
-        [
-            "AGGREGATE_HAVING",
-            "FN_AGG_SUM",
-            "FN_AGG_SUM_DISTINCT",
-            "FN_AGG_AVG",
-            "FN_AGG_AVG_DISTINCT",
-            "FN_PRED_LIKE_ESCAPE",
-        ]
-    );
+    assert_eq!(only_postgresql, ["FN_PRED_LIKE_ESCAPE"]);
 }
 
 /// Asserts that `driver` advertises exactly `expected`, compared as sets.

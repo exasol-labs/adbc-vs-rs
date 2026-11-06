@@ -394,27 +394,183 @@ fn full_outer_join_reaches_trino_and_returns_both_unmatched_rows() {
     );
 }
 
-#[test]
-fn avg_and_sum_are_withdrawn_and_match_the_mirror() {
-    for function in ["AVG", "SUM"] {
-        let query =
-            |schema: &str| format!("SELECT {function}(\"id\") AS VAL FROM {schema}.\"items\"");
+// --- SUM, AVG, and HAVING ---------------------------------------------------
 
-        for statement in generated_statements(&query(VIRTUAL_SCHEMA)) {
-            assert!(
-                !statement.to_uppercase().contains(function),
-                "no generated statement may carry a delegated {function}, since this release \
-                 withholds it and Exasol computes it itself: {statement}"
-            );
-        }
+const MEASURES: &str = "measures";
 
-        let rows = assert_matches_mirror(query);
-        assert_eq!(
-            rows.len(),
-            1,
-            "a single-group aggregation returns exactly one row: {rows:?}"
+/// The four aggregates a numeric operand answers, each aliased so a result
+/// row names them.
+fn numeric_aggregates(column: &str) -> String {
+    format!(
+        "SUM(\"{column}\") AS S, SUM(DISTINCT \"{column}\") AS SD, AVG(\"{column}\") AS A, \
+         AVG(DISTINCT \"{column}\") AS AD"
+    )
+}
+
+/// `aggregates` over the whole of `measures`, as a query over `schema`.
+fn single_group_query(aggregates: &str, schema: &str) -> String {
+    format!("SELECT {aggregates} FROM {schema}.\"{MEASURES}\"")
+}
+
+/// `aggregates` per group of the `grp` column of `measures`, as a query over
+/// `schema`.
+fn grouped_query(aggregates: &str, schema: &str) -> String {
+    format!(
+        "SELECT \"grp\", {aggregates} FROM {schema}.\"{MEASURES}\" GROUP BY \"grp\" \
+         ORDER BY \"grp\""
+    )
+}
+
+/// Asserts the statement Trino received carries the `SUM` and the `SUM` and
+/// `COUNT` quotient the aggregates of [`numeric_aggregates`] render as, and no
+/// Trino `avg`.
+fn assert_sum_and_avg_delegated(statement: &str) {
+    for fragment in ["SUM(", "SUM(DISTINCT ", "CAST(SUM(", "AS DOUBLE) / COUNT("] {
+        assert!(
+            statement.contains(fragment),
+            "the generated statement must carry {fragment}: {statement}"
         );
     }
+    assert!(
+        !statement.to_uppercase().contains("AVG("),
+        "`AVG` must render as the quotient of `SUM` and `COUNT`, never as Trino's own: \
+         {statement}"
+    );
+}
+
+/// `trino-pushdown`: `SUM` and `AVG`, each with and without `DISTINCT`, over
+/// every numeric column, once without grouping and once grouped, return the
+/// rows Exasol returns over the mirror. An exact-numeric operand is widened to
+/// `DECIMAL(38, s)` and a `double` one is not, and group `c`, which holds only
+/// null operands, returns null for both functions.
+#[test]
+fn sum_and_avg_are_delegated_and_match_the_mirror() {
+    for (column, summed_operand) in [
+        ("big_value", "CAST(\"big_value\" AS DECIMAL(38,0))"),
+        ("decimal_value", "CAST(\"decimal_value\" AS DECIMAL(38,4))"),
+        ("double_value", "\"double_value\""),
+    ] {
+        let aggregates = numeric_aggregates(column);
+        let single_group = |schema: &str| single_group_query(&aggregates, schema);
+        let grouped = |schema: &str| grouped_query(&aggregates, schema);
+
+        let single_statement = generated_statement(&single_group(VIRTUAL_SCHEMA));
+        assert_sum_and_avg_delegated(&single_statement);
+        assert!(
+            single_statement.contains(&format!("SUM({summed_operand})")),
+            "{column}: the operand must render as {summed_operand}: {single_statement}"
+        );
+        assert!(
+            !single_statement.contains("GROUP BY"),
+            "a single-group aggregation must render no GROUP BY clause: {single_statement}"
+        );
+        let single_rows = assert_matches_mirror(single_group);
+        assert_eq!(single_rows.len(), 1, "{column}: {single_rows:?}");
+
+        assert_sum_and_avg_delegated(&generated_statement(&grouped(VIRTUAL_SCHEMA)));
+        let grouped_rows = assert_matches_mirror(grouped);
+        assert_eq!(grouped_rows.len(), 3, "{column}: {grouped_rows:?}");
+        let null_group = &grouped_rows[2];
+        for aggregate in ["S", "SD", "A", "AD"] {
+            assert_eq!(
+                cell(null_group, aggregate),
+                None,
+                "{column}: the group holding only null operands must return null for \
+                 {aggregate}: {null_group:?}"
+            );
+        }
+    }
+}
+
+/// `trino-pushdown`: `SUM` and `AVG` over a `varchar` column holding numbers as
+/// text, and over a predicate on a `bigint` column, convert the operand as
+/// Exasol does. `label` holds an empty string, which Exasol reads as null, and
+/// `'5'` beside `'5.0'`, which `SUM(DISTINCT)` takes as one value and
+/// `AVG(DISTINCT)` divides as two.
+#[test]
+fn sum_and_avg_over_boolean_and_character_columns_match_the_mirror() {
+    let aggregates = numeric_aggregates("label");
+    let single_group = |schema: &str| single_group_query(&aggregates, schema);
+    let grouped = |schema: &str| grouped_query(&aggregates, schema);
+
+    let statement = generated_statement(&single_group(VIRTUAL_SCHEMA));
+    assert_sum_and_avg_delegated(&statement);
+    assert!(
+        statement.contains("CAST(NULLIF(\"label\", '') AS DOUBLE)"),
+        "a character operand must render read through NULLIF and a DOUBLE cast: {statement}"
+    );
+    let single_rows = assert_matches_mirror(single_group);
+    assert_eq!(single_rows.len(), 1, "{single_rows:?}");
+    let grouped_rows = assert_matches_mirror(grouped);
+    assert_eq!(grouped_rows.len(), 3, "{grouped_rows:?}");
+
+    let predicate = |schema: &str| {
+        format!(
+            "SELECT SUM(\"big_value\" > 5) AS S, AVG(\"big_value\" > 5) AS A \
+             FROM {schema}.\"{MEASURES}\""
+        )
+    };
+    let statement = generated_statement(&predicate(VIRTUAL_SCHEMA));
+    assert!(
+        statement.contains("CAST((5 < \"big_value\") AS INTEGER)"),
+        "a predicate operand must render as an INTEGER: {statement}"
+    );
+    assert_matches_mirror(predicate);
+}
+
+/// `trino-pushdown`: a `HAVING` clause over `COUNT(*)`, over `SUM`, and over
+/// `AVG` reaches Trino and keeps the groups the mirror keeps, which are fewer
+/// than all three.
+#[test]
+fn having_is_delegated_and_matches_the_mirror() {
+    for (having, kept_groups) in [
+        ("COUNT(*) > 2", 2),
+        ("SUM(\"decimal_value\") > 1", 1),
+        ("AVG(\"double_value\") > 2", 1),
+    ] {
+        let query = |schema: &str| {
+            format!(
+                "SELECT \"grp\", COUNT(*) AS N, SUM(\"decimal_value\") AS S \
+                 FROM {schema}.\"{MEASURES}\" GROUP BY \"grp\" HAVING {having} ORDER BY \"grp\""
+            )
+        };
+
+        let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+        assert!(
+            statement.contains("GROUP BY \"grp\" HAVING"),
+            "the generated statement must carry the HAVING clause after the grouping for \
+             {having}: {statement}"
+        );
+        let rows = assert_matches_mirror(query);
+        assert_eq!(rows.len(), kept_groups, "{having}: {rows:?}");
+    }
+}
+
+/// `trino-pushdown`, scenario "SUM over an exact-numeric column sums in Trino's
+/// 38-digit decimal": group `b` of `big_value`, a `bigint` column, holds
+/// `9223372036854775807` and `1`. Trino's own `sum` over `bigint` fails with an
+/// overflow, and the delegated `SUM` widens the operand to `DECIMAL(38,0)` and
+/// returns `9223372036854775808`, as the mirror does.
+#[test]
+fn sum_over_a_bigint_column_sums_past_the_bigint_range() {
+    let query = |schema: &str| {
+        format!(
+            "SELECT \"grp\", SUM(\"big_value\") AS S FROM {schema}.\"{MEASURES}\" \
+             GROUP BY \"grp\" ORDER BY \"grp\""
+        )
+    };
+
+    let statement = generated_statement(&query(VIRTUAL_SCHEMA));
+    assert!(
+        statement.contains("SUM(CAST(\"big_value\" AS DECIMAL(38,0)))"),
+        "a `bigint` operand must be summed as a 38-digit decimal: {statement}"
+    );
+    let rows = assert_matches_mirror(query);
+    assert_eq!(
+        cell(&rows[1], "S"),
+        Some("9223372036854775808".to_string()),
+        "{rows:?}"
+    );
 }
 
 #[test]

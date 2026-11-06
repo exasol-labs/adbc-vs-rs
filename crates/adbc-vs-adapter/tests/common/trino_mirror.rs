@@ -21,6 +21,9 @@
 //! filled from the source's answers would agree with the source by
 //! construction and prove nothing.
 //!
+//! `measures` is mirrored whole, because the `SUM`, `AVG`, and `HAVING` tests read
+//! every column of it.
+//!
 //! Only `items`'s mapped columns are mirrored here. `items` also carries
 //! `code`, `bio`, and `active`, which `docker/trino/init.sql` documents as
 //! unmapped — no delegated query can reach them, so no mirror column
@@ -108,7 +111,49 @@ const NOTE_VALUES: &str = "\
     (6, 'discontinued'), \
     (99, 'orphan')";
 
-/// Creates the Trino mirror schema and both tables, seeded from the literals
+/// The mirrored `measures` columns, in the order of the fixture's own `CREATE
+/// TABLE`: an `integer` is `DECIMAL(10,0)`, a `bigint` is `DECIMAL(19,0)`, a
+/// `decimal(12,4)` keeps its precision and scale, a `double` is `DOUBLE`, and a
+/// `varchar(n)` is `VARCHAR(n) UTF8`.
+const MEASURES_COLUMNS: [Column; 6] = [
+    Column {
+        name: "id",
+        declaration: "DECIMAL(10,0)",
+    },
+    Column {
+        name: "grp",
+        declaration: "VARCHAR(10) UTF8",
+    },
+    Column {
+        name: "big_value",
+        declaration: "DECIMAL(19,0)",
+    },
+    Column {
+        name: "decimal_value",
+        declaration: "DECIMAL(12,4)",
+    },
+    Column {
+        name: "double_value",
+        declaration: "DOUBLE",
+    },
+    Column {
+        name: "label",
+        declaration: "VARCHAR(20) UTF8",
+    },
+];
+
+/// The `measures` rows as Exasol reads them, copied by hand from
+/// `docker/trino/init.sql`. The empty `label` in row 3 is null to Exasol.
+const MEASURES_VALUES: &str = "\
+    (1, 'a', 10, 1.25, 0.5, '5'), \
+    (2, 'a', 20, 2.50, 1.5, '5.0'), \
+    (3, 'a', 20, 3.75, 1.5, ''), \
+    (4, 'b', 1, -0.25, 2.25, '7'), \
+    (5, 'b', 9223372036854775807, 0.25, 4.25, '7.5'), \
+    (6, 'b', NULL, NULL, NULL, NULL), \
+    (7, 'c', NULL, NULL, NULL, NULL)";
+
+/// Creates the Trino mirror schema and every table, seeded from the literals
 /// above.
 ///
 /// Replaces whatever an earlier run left behind rather than adding to it: the
@@ -119,6 +164,13 @@ pub fn install(exasol: &Exasol) {
     exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"));
     mirror_table::seed(exasol, SCHEMA, "items", &ITEM_COLUMNS, ITEM_VALUES);
     mirror_table::seed(exasol, SCHEMA, "item_notes", &NOTE_COLUMNS, NOTE_VALUES);
+    mirror_table::seed(
+        exasol,
+        SCHEMA,
+        "measures",
+        &MEASURES_COLUMNS,
+        MEASURES_VALUES,
+    );
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {
@@ -163,6 +215,26 @@ mod tests {
                 !declarations.contains(unmapped),
                 "metadata discovery unmaps {unmapped}, so no delegated query reaches it and a \
                  mirror column would be compared against nothing: {declarations}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mirrored_measures_row_carries_one_value_per_declared_column() {
+        for row in MEASURES_VALUES.split("), ") {
+            let values = row.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+            let quotes = values.matches('\'').count();
+            assert_eq!(quotes % 2, 0, "a value's quote must close: {row}");
+            let unquoted_commas = values
+                .split('\'')
+                .step_by(2)
+                .map(|outside| outside.matches(',').count())
+                .sum::<usize>();
+            assert_eq!(
+                unquoted_commas + 1,
+                MEASURES_COLUMNS.len(),
+                "every `measures` row must carry one value per declared column, or Exasol \
+                 assigns them to the wrong columns: {row}"
             );
         }
     }

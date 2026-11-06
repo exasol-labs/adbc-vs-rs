@@ -95,9 +95,11 @@
 
 use adbc_vs_scan::driver::Driver;
 
+use crate::exa_type::ExasolType;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
-    InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
+    InConstListPredicate, LikePredicate, Literal, OperandConversion, Predicate, Query, SelectItem,
+    SourceTable,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
 use crate::trino_type_mapping;
@@ -117,13 +119,18 @@ const ROW_MARKER_CONSTANT: &str = "1";
 /// outside the list has no rendering path, and rendering its argument in its
 /// place would leave Exasol aggregating nothing and returning the wrong
 /// value.
-///
-/// `SUM` and `AVG` are absent for a reason `vs-adapter/pushdown-aggregation`
-/// states over every dialect rather than one about Trino: a capability is
-/// advertised once per session and admits every numeric operand, including
-/// `double`, whose sum is order-dependent under a distributed plan that
-/// combines partial results.
-const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX"];
+const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX", "SUM", "AVG"];
+
+const SUM_FUNCTION: &str = "SUM";
+
+/// Rendered as the quotient of its `SUM` and `COUNT`, never as Trino's own
+/// `avg`, which returns `decimal` over an exact-numeric operand where Exasol
+/// declares a `DOUBLE`.
+const AVG_FUNCTION: &str = "AVG";
+
+/// The widest precision Trino's `decimal` holds, which a `SUM` over an
+/// exact-numeric operand widens to so the sum cannot overflow its input type.
+const MAX_DECIMAL_PRECISION: u32 = 38;
 
 /// The one aggregate Trino writes over no argument, as `COUNT(*)`.
 const COUNT_FUNCTION: &str = "COUNT";
@@ -174,8 +181,14 @@ impl SqlDialect for TrinoDialect {
             Some(aggregation) => statement.render_grouping(aggregation)?,
             None => String::new(),
         };
+        let having = match &query.having {
+            Some(predicate) => format!(" HAVING {}", statement.render_predicate(predicate)?),
+            None => String::new(),
+        };
 
-        Ok(format!("SELECT {projection} FROM {from}{filter}{grouping}"))
+        Ok(format!(
+            "SELECT {projection} FROM {from}{filter}{grouping}{having}"
+        ))
     }
 }
 
@@ -478,7 +491,9 @@ impl<'a> Statement<'a> {
     /// the statement carries Trino's canonical spelling whatever case Exasol
     /// sent. The argument's absence, not a separate field, is what tells
     /// `COUNT(*)` apart from `COUNT(column)`. Every argument renders bare,
-    /// `DISTINCT` included: this dialect collates nothing.
+    /// `DISTINCT` included: this dialect collates nothing. `SUM` and `AVG` add
+    /// the operand as Exasol converts it, and `AVG` is the quotient of that
+    /// `SUM` and the operand's `COUNT`.
     fn render_aggregate(&self, call: &AggregateCall) -> Result<String, RenderError> {
         let function = renderable_function(&call.function)?;
         let Some(argument) = &call.argument else {
@@ -488,7 +503,15 @@ impl<'a> Statement<'a> {
         let distinct = if call.distinct { "DISTINCT " } else { "" };
         let operand = self.render_expression(argument)?;
 
-        Ok(format!("{function}({distinct}{operand})"))
+        Ok(match function {
+            SUM_FUNCTION => format!("SUM({distinct}{})", summed(argument, &operand)),
+            AVG_FUNCTION => format!(
+                "(CAST(SUM({distinct}{}) AS DOUBLE) / COUNT({distinct}{}))",
+                summed(argument, &operand),
+                counted(argument, &operand)
+            ),
+            _ => format!("{function}({distinct}{operand})"),
+        })
     }
 
     fn render_expression(&self, expression: &Expression) -> Result<String, RenderError> {
@@ -632,6 +655,45 @@ fn renderable_function(function: &str) -> Result<&'static str, RenderError> {
                 AGGREGATE_FUNCTIONS.join(", ")
             ))
         })
+}
+
+/// The operand a `SUM` adds, converted as Exasol converts it before it sums.
+/// Trino defines no `sum` over a boolean or a character type, so a boolean,
+/// which for Trino is a predicate, sums as an `INTEGER` and a character operand
+/// as a `DOUBLE` with an empty value read as null. An exact-numeric column is
+/// widened to `DECIMAL(38, s)`, because Trino's `sum` returns its input's type
+/// and a sum over `bigint` would otherwise fail past the `bigint` range.
+fn summed(argument: &Expression, operand: &str) -> String {
+    match argument.aggregate_operand_conversion() {
+        Some(OperandConversion::Boolean) => format!("CAST({operand} AS INTEGER)"),
+        Some(OperandConversion::Character) => {
+            format!("CAST({} AS DOUBLE)", counted(argument, operand))
+        }
+        None => match decimal_scale(argument) {
+            Some(scale) => format!("CAST({operand} AS DECIMAL({MAX_DECIMAL_PRECISION},{scale}))"),
+            None => operand.to_string(),
+        },
+    }
+}
+
+/// The operand an `AVG` counts: the one Exasol divides by, before any number
+/// conversion, so a character operand differs from the summed one only in that
+/// it is not yet a `DOUBLE`.
+fn counted(argument: &Expression, operand: &str) -> String {
+    match argument.aggregate_operand_conversion() {
+        Some(OperandConversion::Character) => format!("NULLIF({operand}, '')"),
+        Some(OperandConversion::Boolean) | None => operand.to_string(),
+    }
+}
+
+fn decimal_scale(operand: &Expression) -> Option<u32> {
+    match operand {
+        Expression::Column(column) => match column.declared_type {
+            ExasolType::Decimal { scale, .. } => Some(scale),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Renders the aggregate Trino writes over no argument.

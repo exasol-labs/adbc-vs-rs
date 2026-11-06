@@ -19,9 +19,9 @@
 | `GROUP BY` several columns | `AGGREGATE_GROUP_BY_TUPLE` | No | No | Yes |
 | `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)` | `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT` | Yes | Yes | Yes |
 | `MIN`, `MAX` | `FN_AGG_MIN`, `FN_AGG_MAX` | Yes | Yes | Yes |
-| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | Yes | Yes | No |
-| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | Yes | Yes | No |
-| `HAVING` | `AGGREGATE_HAVING` | Yes | Yes | No |
+| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | Yes | Yes | Yes |
+| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | Yes | Yes | Yes |
+| `HAVING` | `AGGREGATE_HAVING` | Yes | Yes | Yes |
 | Inner, left outer, and right outer join on an equality | `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI` | Yes | Yes | Yes |
 | Full outer join on an equality | `JOIN_TYPE_FULL_OUTER` | No | Yes | Yes |
 
@@ -49,4 +49,5 @@ To get the Exasol result, wrap the operand in an expression that `adbc-vs-rs` do
 
 ### Trino
 
+- A `SUM` over a `bigint` or `decimal` column adds in a 38-digit decimal, so a sum beyond the `bigint` range returns its value. Trino alone would stop the query with an overflow error.
 - A backslash in a `LIKE` pattern is an ordinary character, unless the query has an `ESCAPE` clause. Exasol then runs that predicate.
