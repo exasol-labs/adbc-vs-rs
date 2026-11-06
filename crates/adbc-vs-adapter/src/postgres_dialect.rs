@@ -78,7 +78,8 @@ use crate::exa_type::ExasolType;
 use crate::postgres_type_mapping;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
-    InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
+    InConstListPredicate, LikePredicate, Literal, OperandConversion, Predicate, Query, SelectItem,
+    SourceTable,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
 
@@ -97,12 +98,14 @@ const ROW_MARKER_CONSTANT: &str = "1";
 /// function outside the list has no rendering path, and rendering its argument
 /// in its place would leave Exasol aggregating nothing and returning the wrong
 /// value.
-///
-/// `SUM` and `AVG` are absent for a reason `vs-adapter/pushdown-aggregation`
-/// states over every dialect rather than one about PostgreSQL: a capability is
-/// advertised once per session and admits every numeric operand, including
-/// `double precision`, whose sum is order-dependent under a parallel plan.
-const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX"];
+const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX", "SUM", "AVG"];
+
+const SUM_FUNCTION: &str = "SUM";
+
+/// Rendered as the quotient of its `SUM` and `COUNT`, never as PostgreSQL's own
+/// `avg`, which returns `numeric` over an exact-numeric operand where Exasol
+/// declares a `DOUBLE`.
+const AVG_FUNCTION: &str = "AVG";
 
 /// The one aggregate PostgreSQL writes over no argument, as `COUNT(*)`.
 const COUNT_FUNCTION: &str = "COUNT";
@@ -160,8 +163,14 @@ impl SqlDialect for PostgresDialect {
             Some(aggregation) => statement.render_grouping(aggregation)?,
             None => String::new(),
         };
+        let having = match &query.having {
+            Some(predicate) => format!(" HAVING {}", statement.render_predicate(predicate)?),
+            None => String::new(),
+        };
 
-        Ok(format!("SELECT {projection} FROM {from}{filter}{grouping}"))
+        Ok(format!(
+            "SELECT {projection} FROM {from}{filter}{grouping}{having}"
+        ))
     }
 }
 
@@ -499,22 +508,30 @@ impl<'a> Statement<'a> {
     /// whatever `DISTINCT` it carries, so `MIN` and `MAX` over a character
     /// column return the value the source's collation sorts first or last.
     /// Over a `BOOLEAN` operand, which PostgreSQL defines neither for, `MIN` is
-    /// `bool_and` and `MAX` is `bool_or`.
+    /// `bool_and` and `MAX` is `bool_or`. `SUM` and `AVG` add the operand as
+    /// Exasol converts it, and `AVG` is the quotient of that `SUM` and the
+    /// operand's `COUNT`.
     fn render_aggregate(&self, call: &AggregateCall) -> Result<String, RenderError> {
         let function = renderable_function(&call.function)?;
         let Some(argument) = &call.argument else {
             return render_star_aggregate(function, call);
         };
 
-        let function = if is_boolean_operand(argument) {
-            boolean_aggregate(function)
-        } else {
-            function
-        };
         let distinct = if call.distinct { "DISTINCT " } else { "" };
         let operand = self.render_expression(argument)?;
 
-        Ok(format!("{function}({distinct}{operand})"))
+        Ok(match function {
+            SUM_FUNCTION => format!("SUM({distinct}{})", summed(argument, &operand)),
+            AVG_FUNCTION => format!(
+                "(CAST(SUM({distinct}{}) AS DOUBLE PRECISION) / COUNT({distinct}{}))",
+                summed(argument, &operand),
+                counted(argument, &operand)
+            ),
+            _ if is_boolean_operand(argument) => {
+                format!("{}({distinct}{operand})", boolean_aggregate(function))
+            }
+            _ => format!("{function}({distinct}{operand})"),
+        })
     }
 
     fn render_expression(&self, expression: &Expression) -> Result<String, RenderError> {
@@ -669,11 +686,41 @@ fn renderable_function(function: &str) -> Result<&'static str, RenderError> {
 /// predicate, which is boolean by construction and carries no declared type of
 /// its own.
 fn is_boolean_operand(operand: &Expression) -> bool {
-    match operand {
-        Expression::Column(column) => column.declared_type == ExasolType::Boolean,
-        Expression::Predicate(_) => true,
-        Expression::RowMarker | Expression::Literal(_) | Expression::Aggregate(_) => false,
+    operand.aggregate_operand_conversion() == Some(OperandConversion::Boolean)
+}
+
+/// The operand a `SUM` adds, converted as Exasol converts it before it sums.
+/// PostgreSQL defines no `sum` over a boolean or a character type, so a
+/// boolean sums as an `INTEGER` and a character operand as a `DOUBLE
+/// PRECISION` with an empty value read as null. A column declared `DOUBLE` is
+/// cast too, because `sum` over `real` returns `real` and adds in single
+/// precision, which would round a sum Exasol computes in double precision.
+fn summed(argument: &Expression, operand: &str) -> String {
+    match argument.aggregate_operand_conversion() {
+        Some(OperandConversion::Boolean) => format!("CAST({operand} AS INTEGER)"),
+        Some(OperandConversion::Character) => {
+            format!("CAST({} AS DOUBLE PRECISION)", counted(argument, operand))
+        }
+        None if is_double_column(argument) => format!("CAST({operand} AS DOUBLE PRECISION)"),
+        None => operand.to_string(),
     }
+}
+
+/// The operand an `AVG` counts: the one Exasol divides by, before any number
+/// conversion, so a character operand differs from the summed one only in that
+/// it is not yet a `DOUBLE PRECISION`.
+fn counted(argument: &Expression, operand: &str) -> String {
+    match argument.aggregate_operand_conversion() {
+        Some(OperandConversion::Character) => format!("NULLIF({operand}, '')"),
+        Some(OperandConversion::Boolean) | None => operand.to_string(),
+    }
+}
+
+fn is_double_column(operand: &Expression) -> bool {
+    matches!(
+        operand,
+        Expression::Column(column) if column.declared_type == ExasolType::Double
+    )
 }
 
 /// The aggregate PostgreSQL spells for `function` over a `BOOLEAN` operand.

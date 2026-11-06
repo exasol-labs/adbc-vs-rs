@@ -23,7 +23,7 @@
 //! mirror filled from the source's answers would agree with the source by
 //! construction and prove nothing.
 //!
-//! `items`, `items_c`, `item_notes`, and `type_coverage` are mirrored, each
+//! `items`, `items_c`, `item_notes`, `type_coverage`, and `measures` are mirrored, each
 //! with the values Exasol reads rather than the values PostgreSQL stores: a
 //! column read as text holds PostgreSQL's text for the value, `money` and
 //! `real` hold a `DOUBLE`, a `bit` column holds a `BOOLEAN`, a `character(n)`
@@ -34,9 +34,9 @@
 //! failure of a constrained `numeric` rather than a row comparison, and
 //! `all_unmapped` has no mapped column for a delegated query to reach.
 //! `text_overflow` and `collated_names` are read for a failure and for
-//! PostgreSQL's own answer. `refresh_target`, the `order_names` view, and
-//! `"MixedCase"` are likewise unmirrored: none of the three is read
-//! differentially.
+//! PostgreSQL's own answer, and `nan_measures` for a `NaN` Exasol cannot hold.
+//! `refresh_target`, the `order_names` view, and `"MixedCase"` are likewise
+//! unmirrored: none of the three is read differentially.
 //!
 //! There is no Rust module shared between `docker/postgres/init.sql` and this
 //! one the way `super::items` is shared between `super::mysql` and
@@ -343,6 +343,56 @@ fn type_coverage_values() -> String {
     TYPE_COVERAGE_VALUES.replace(HUGE_NUMERIC, &digits)
 }
 
+/// The mirrored `measures` columns, in the order of the fixture's own
+/// `CREATE TABLE`: an `integer` is `DECIMAL(10,0)`, a `bigint` is
+/// `DECIMAL(19,0)`, a `real` and a `double precision` are `DOUBLE`, a `boolean`
+/// is `BOOLEAN`, and a `character varying` is `VARCHAR(n) UTF8`.
+const MEASURES_COLUMNS: [Column; 8] = [
+    Column {
+        name: "id",
+        declaration: "DECIMAL(10,0) NOT NULL",
+    },
+    Column {
+        name: "grp",
+        declaration: "VARCHAR(10) UTF8 NOT NULL",
+    },
+    Column {
+        name: "big_value",
+        declaration: "DECIMAL(19,0)",
+    },
+    Column {
+        name: "decimal_value",
+        declaration: "DECIMAL(30,2)",
+    },
+    Column {
+        name: "double_value",
+        declaration: "DOUBLE",
+    },
+    Column {
+        name: "float_value",
+        declaration: "DOUBLE",
+    },
+    Column {
+        name: "flag",
+        declaration: "BOOLEAN",
+    },
+    Column {
+        name: "label",
+        declaration: "VARCHAR(20) UTF8",
+    },
+];
+
+/// The `measures` rows as Exasol reads them, copied by hand from
+/// `docker/postgres/init.sql`.
+const MEASURES_VALUES: &str = "\
+    (1, 'a', 10, 1.25, 0.5, 0.25, TRUE, '5'), \
+    (2, 'a', 20, 2.50, 1.5, 0.5, FALSE, '5.0'), \
+    (3, 'a', 20, 3.75, 1.5, 0.5, TRUE, ''), \
+    (4, 'b', 1, -0.25, 2.25, 16777216, TRUE, '7'), \
+    (5, 'b', 9223372036854775807, 0.25, 4.25, 1, NULL, '7.5'), \
+    (6, 'b', NULL, NULL, NULL, NULL, FALSE, NULL), \
+    (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL)";
+
 /// Creates the PostgreSQL mirror schema and every table, seeded from the
 /// literals above.
 ///
@@ -361,6 +411,13 @@ pub fn install(exasol: &Exasol) {
         "type_coverage",
         &TYPE_COVERAGE_COLUMNS,
         &type_coverage_values(),
+    );
+    mirror_table::seed(
+        exasol,
+        SCHEMA,
+        "measures",
+        &MEASURES_COLUMNS,
+        MEASURES_VALUES,
     );
 }
 
@@ -436,6 +493,11 @@ mod tests {
                 "type_coverage",
                 TYPE_COVERAGE_COLUMNS.len(),
                 type_coverage_values(),
+            ),
+            (
+                "measures",
+                MEASURES_COLUMNS.len(),
+                MEASURES_VALUES.to_string(),
             ),
         ] {
             let counts = values_per_tuple(&values);

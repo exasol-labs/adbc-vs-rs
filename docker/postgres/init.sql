@@ -319,3 +319,54 @@ CREATE TABLE "MixedCase" (
 INSERT INTO "MixedCase" ("ItemId", "Label") VALUES
     (1, 'First'),
     (2, 'Second');
+
+-- `measures` is the table the `SUM`, `AVG`, and `HAVING` end-to-end tests read,
+-- mirrored by `crates/adbc-vs-adapter/tests/common/postgres_mirror.rs`, which
+-- states its columns and values independently. Keep the two in sync by hand.
+--
+-- Three groups: `a` and `b` hold values, and `c` holds only null operands, so
+-- a group with nothing to sum is observable. Every floating-point value is a
+-- binary fraction whose partial sums are exact in double precision, so the
+-- source's accumulation order cannot change a result. `big_value` holds
+-- `9223372036854775807` and `1` in group `b`, a sum past the `bigint` range.
+-- `float_value` is a `real` and holds `16777216` and `1` in group `b`: a
+-- single-precision sum rounds `16777216 + 1` back to `16777216`, so only a sum
+-- in double precision returns `16777217`. `label` holds decimal numbers as
+-- text, an empty string, and `'5'` beside `'5.0'` in group `a`, which are two
+-- distinct values that convert to one number.
+CREATE TABLE measures (
+    id INTEGER NOT NULL,
+    grp VARCHAR(10) NOT NULL,
+    big_value BIGINT NULL,
+    decimal_value NUMERIC(30,2) NULL,
+    double_value DOUBLE PRECISION NULL,
+    float_value REAL NULL,
+    flag BOOLEAN NULL,
+    label VARCHAR(20) NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO measures (id, grp, big_value, decimal_value, double_value, float_value, flag, label) VALUES
+    (1, 'a', 10,                  1.25,  0.5,  0.25,     TRUE,  '5'),
+    (2, 'a', 20,                  2.50,  1.5,  0.5,      FALSE, '5.0'),
+    (3, 'a', 20,                  3.75,  1.5,  0.5,      TRUE,  ''),
+    (4, 'b', 1,                  -0.25,  2.25, 16777216, TRUE,  '7'),
+    (5, 'b', 9223372036854775807, 0.25,  4.25, 1,        NULL,  '7.5'),
+    (6, 'b', NULL,                NULL,  NULL, NULL,     FALSE, NULL),
+    (7, 'c', NULL,                NULL,  NULL, NULL,     NULL,  NULL);
+
+-- `nan_measures` holds a `double precision` `NaN` beside finite values in group
+-- `a`, which `a_nan_operand_makes_the_delegated_sum_and_avg_null` reads. It has
+-- no Exasol mirror: Exasol holds no `NaN`, so the mirror cannot hold the row.
+CREATE TABLE nan_measures (
+    id INTEGER NOT NULL,
+    grp VARCHAR(10) NOT NULL,
+    value DOUBLE PRECISION NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO nan_measures (id, grp, value) VALUES
+    (1, 'a', 1.5),
+    (2, 'a', 'NaN'),
+    (3, 'b', 2.5),
+    (4, 'b', 4.5);

@@ -1075,16 +1075,21 @@ fn count_star_differs_from_count_column() {
 /// arrives in must not reach the generated statement.
 #[test]
 fn mixed_case_function_names_render_identically() {
-    let entries = |count: &str, min: &str| {
+    let entries = |count: &str, min: &str, sum: &str, avg: &str| {
         json!([
             aggregate(count, Some(column("total"))),
             aggregate(min, Some(column("note"))),
+            aggregate(sum, Some(column("total"))),
+            aggregate(avg, Some(column("total"))),
         ])
     };
-    let types = json!([count_type(), note_type()]);
+    let types = json!([count_type(), note_type(), sum_type(), double_type()]);
 
-    let lower_case = render_statement(&typed_request(entries("count", "min"), types.clone()));
-    let upper_case = render_statement(&typed_request(entries("COUNT", "MIN"), types));
+    let lower_case = render_statement(&typed_request(
+        entries("count", "min", "sum", "avg"),
+        types.clone(),
+    ));
+    let upper_case = render_statement(&typed_request(entries("COUNT", "MIN", "SUM", "AVG"), types));
 
     assert_eq!(
         lower_case, upper_case,
@@ -1092,23 +1097,15 @@ fn mixed_case_function_names_render_identically() {
     );
     assert_eq!(
         lower_case,
-        r#"SELECT COUNT("total"), MIN("note") FROM "public"."orders""#
+        r#"SELECT COUNT("total"), MIN("note"), SUM("total"), (CAST(SUM("total") AS DOUBLE PRECISION) / COUNT("total")) FROM "public"."orders""#
     );
 }
 
 /// Rendering the aggregate's argument alone would leave Exasol aggregating
-/// nothing and returning the wrong value, so an unknown function fails. `AVG`
-/// and `SUM` fail the same way: both are withheld capabilities, so neither
-/// reaches this path from an advertising Exasol, but a request that somehow
-/// sends one anyway must still fail naming it.
+/// nothing and returning the wrong value, so an unknown function fails.
 #[test]
 fn unrenderable_aggregate_named_in_error() {
-    for (function, named) in [
-        ("STDDEV", "STDDEV"),
-        ("stddev", "STDDEV"),
-        ("AVG", "AVG"),
-        ("SUM", "SUM"),
-    ] {
+    for (function, named) in [("STDDEV", "STDDEV"), ("stddev", "STDDEV")] {
         let error = render_error(&typed_request(
             json!([aggregate(function, Some(column("total")))]),
             json!([{"type": "DOUBLE"}]),
@@ -1119,6 +1116,160 @@ fn unrenderable_aggregate_named_in_error() {
             "the error must name the aggregate function it received: {error}"
         );
     }
+}
+
+/// The type Exasol supplies for `SUM` over `total`, a `DECIMAL(12,4)`.
+fn sum_type() -> Value {
+    json!({"type": "DECIMAL", "precision": 23, "scale": 4})
+}
+
+/// The type Exasol supplies for `AVG` and for `SUM` over a `DOUBLE` operand.
+fn double_type() -> Value {
+    json!({"type": "DOUBLE"})
+}
+
+/// `entry` with `DISTINCT` set, which Exasol sends as a `distinct` field.
+fn distinct(mut entry: Value) -> Value {
+    entry["distinct"] = json!(true);
+    entry
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "SUM renders as the source's
+/// SUM over the operand": PostgreSQL's own `SUM` over the column, with
+/// `DISTINCT` before the operand exactly when the request sets it. A `DECIMAL`
+/// operand renders without a cast, because PostgreSQL's `sum` over an integer
+/// or `numeric` operand is already exact.
+#[test]
+fn sum_renders_with_and_without_distinct() {
+    let sql = render_statement(&typed_request(
+        json!([
+            aggregate("SUM", Some(column("total"))),
+            distinct(aggregate("SUM", Some(column("total")))),
+        ]),
+        json!([sum_type(), sum_type()]),
+    ));
+
+    assert_eq!(
+        sql,
+        r#"SELECT SUM("total"), SUM(DISTINCT "total") FROM "public"."orders""#
+    );
+}
+
+/// `vs-adapter/postgresql-pushdown`, scenario "SUM over a real column
+/// accumulates in double precision": PostgreSQL's `sum` over `real` returns
+/// `real`, so an operand declared `DOUBLE` is cast before it is summed, with
+/// and without `DISTINCT`, and the `AVG` count takes the operand uncast.
+#[test]
+fn sum_over_a_double_operand_casts_it_to_double_precision() {
+    let mut request = typed_request(
+        json!([
+            aggregate("SUM", Some(column("ratio"))),
+            distinct(aggregate("SUM", Some(column("ratio")))),
+            aggregate("AVG", Some(column("ratio"))),
+        ]),
+        json!([double_type(), double_type(), double_type()]),
+    );
+    request["involvedTables"][0]["columns"] = json!([
+        {"name": "ratio", "dataType": {"type": "DOUBLE"}},
+    ]);
+
+    assert_eq!(
+        render_statement(&request),
+        r#"SELECT SUM(CAST("ratio" AS DOUBLE PRECISION)), SUM(DISTINCT CAST("ratio" AS DOUBLE PRECISION)), (CAST(SUM(CAST("ratio" AS DOUBLE PRECISION)) AS DOUBLE PRECISION) / COUNT("ratio")) FROM "public"."orders""#
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "AVG renders as the
+/// double-precision quotient of SUM and COUNT": the quotient is parenthesized,
+/// both halves carry `DISTINCT` for `AVG(DISTINCT)`, and PostgreSQL's own
+/// `AVG`, which returns `numeric` over an exact-numeric operand, never renders.
+#[test]
+fn avg_renders_as_the_double_quotient_of_sum_and_count() {
+    let sql = render_statement(&typed_request(
+        json!([
+            aggregate("AVG", Some(column("total"))),
+            distinct(aggregate("AVG", Some(column("total")))),
+        ]),
+        json!([double_type(), double_type()]),
+    ));
+
+    assert_eq!(
+        sql,
+        r#"SELECT (CAST(SUM("total") AS DOUBLE PRECISION) / COUNT("total")), (CAST(SUM(DISTINCT "total") AS DOUBLE PRECISION) / COUNT(DISTINCT "total")) FROM "public"."orders""#
+    );
+    assert!(
+        !sql.contains("AVG("),
+        "PostgreSQL's own AVG must not render: {sql}"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A BOOLEAN or character SUM and
+/// AVG operand renders converted as Exasol converts it": PostgreSQL defines no
+/// `sum` over a boolean or a character type, so a `BOOLEAN` column or
+/// predicate sums as an `INTEGER`, and a character column or literal reads
+/// through `NULLIF` and a `DOUBLE PRECISION` cast, with the `AVG` count taking
+/// the operand before the cast.
+#[test]
+fn sum_and_avg_convert_boolean_and_character_operands() {
+    let mut request = typed_request(
+        json!([
+            aggregate("SUM", Some(less(numeric_literal("2"), column("id")))),
+            aggregate("SUM", Some(column("flag"))),
+            aggregate("AVG", Some(column("flag"))),
+            aggregate("SUM", Some(column("note"))),
+            distinct(aggregate("SUM", Some(column("note")))),
+            aggregate("AVG", Some(column("note"))),
+            distinct(aggregate("AVG", Some(column("note")))),
+            aggregate("SUM", Some(string_literal("5"))),
+        ]),
+        json!([
+            sum_type(),
+            sum_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+        ]),
+    );
+    request["involvedTables"][0]["columns"] = json!([
+        {"name": "id", "dataType": id_type()},
+        {"name": "flag", "dataType": boolean_type(), "adapterNotes": r#"{"sourceType":"boolean"}"#},
+        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
+    ]);
+
+    assert_eq!(
+        render_statement(&request),
+        r#"SELECT SUM(CAST((2 < "id") AS INTEGER)), SUM(CAST("flag" AS INTEGER)), (CAST(SUM(CAST("flag" AS INTEGER)) AS DOUBLE PRECISION) / COUNT("flag")), SUM(CAST(NULLIF("note", '') AS DOUBLE PRECISION)), SUM(DISTINCT CAST(NULLIF("note", '') AS DOUBLE PRECISION)), (CAST(SUM(CAST(NULLIF("note", '') AS DOUBLE PRECISION)) AS DOUBLE PRECISION) / COUNT(NULLIF("note", ''))), (CAST(SUM(DISTINCT CAST(NULLIF("note", '') AS DOUBLE PRECISION)) AS DOUBLE PRECISION) / COUNT(DISTINCT NULLIF("note", ''))), SUM(CAST(NULLIF(E'5', '') AS DOUBLE PRECISION)) FROM "public"."orders""#
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A having element renders as a
+/// HAVING clause": the clause follows `GROUP BY`, and a single-group request
+/// carries the clause with no `GROUP BY`.
+#[test]
+fn having_renders_after_group_by_and_on_a_single_group() {
+    let having = less(numeric_literal("12"), aggregate("COUNT", None));
+    let mut grouped = grouped_request(
+        json!([column("note"), aggregate("COUNT", None)]),
+        json!([note_type(), count_type()]),
+        json!([column("note")]),
+    );
+    grouped["pushdownRequest"]["having"] = having.clone();
+
+    let mut single = typed_request(json!([aggregate("COUNT", None)]), json!([count_type()]));
+    single["pushdownRequest"]["aggregationType"] = json!("single_group");
+    single["pushdownRequest"]["having"] = having;
+
+    assert_eq!(
+        render_statement(&grouped),
+        r#"SELECT "note", COUNT(*) FROM "public"."orders" GROUP BY "note" HAVING (12 < COUNT(*))"#
+    );
+    assert_eq!(
+        render_statement(&single),
+        r#"SELECT COUNT(*) FROM "public"."orders" HAVING (12 < COUNT(*))"#
+    );
 }
 
 /// `COUNT(*)` is the only aggregate PostgreSQL writes over no argument, and it
@@ -1456,6 +1607,48 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
                 "MAX",
                 Expression::Column(decimal_column()),
                 false,
+            ))]),
+        ),
+        "AGGREGATE_HAVING" => (
+            " HAVING (0 < COUNT(*))",
+            Query {
+                having: Some(Predicate::Less(Comparison {
+                    left: numeric("0"),
+                    right: Expression::Aggregate(count_star()),
+                })),
+                ..aggregated(vec![aggregate_item(count_star())])
+            },
+        ),
+        "FN_AGG_SUM" => (
+            r#"SUM("id")"#,
+            aggregated(vec![aggregate_item(aggregate_call(
+                "SUM",
+                Expression::Column(decimal_column()),
+                false,
+            ))]),
+        ),
+        "FN_AGG_SUM_DISTINCT" => (
+            r#"SUM(DISTINCT "id")"#,
+            aggregated(vec![aggregate_item(aggregate_call(
+                "SUM",
+                Expression::Column(decimal_column()),
+                true,
+            ))]),
+        ),
+        "FN_AGG_AVG" => (
+            r#"(CAST(SUM("id") AS DOUBLE PRECISION) / COUNT("id"))"#,
+            aggregated(vec![aggregate_item(aggregate_call(
+                "AVG",
+                Expression::Column(decimal_column()),
+                false,
+            ))]),
+        ),
+        "FN_AGG_AVG_DISTINCT" => (
+            r#"(CAST(SUM(DISTINCT "id") AS DOUBLE PRECISION) / COUNT(DISTINCT "id"))"#,
+            aggregated(vec![aggregate_item(aggregate_call(
+                "AVG",
+                Expression::Column(decimal_column()),
+                true,
             ))]),
         ),
         "FN_PRED_AND" => (

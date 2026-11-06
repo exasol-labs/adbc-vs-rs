@@ -322,11 +322,20 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
+    // A `SUM` or `AVG` over a `double precision` column follows the source's accumulation
+    // order, so a delegated result can differ from Exasol's in its low-order digits; the
+    // capability admits every numeric operand, so refusing a `DOUBLE` at render time would
+    // turn a query Exasol answers into a failure.
+    "FN_AGG_SUM",
+    "FN_AGG_SUM_DISTINCT",
+    "FN_AGG_AVG",
+    "FN_AGG_AVG_DISTINCT",
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",
@@ -361,8 +370,8 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// `vs-adapter/postgresql-pushdown`: PostgreSQL advertises exactly the set
-/// `drivers/postgresql.toml` declares, element for element.
+/// `vs-adapter/postgresql-pushdown`: PostgreSQL advertises exactly the 40
+/// entries of [`POSTGRES_CAPABILITIES`], element for element.
 #[test]
 fn postgres_capability_set_is_exact() {
     assert_set_is(Driver::Postgres, POSTGRES_CAPABILITIES);
@@ -446,7 +455,17 @@ fn trino_and_postgresql_sets_differ_by_two_named_entries() {
         .collect();
 
     assert_eq!(only_trino, ["AGGREGATE_GROUP_BY_TUPLE"]);
-    assert_eq!(only_postgresql, ["FN_PRED_LIKE_ESCAPE"]);
+    assert_eq!(
+        only_postgresql,
+        [
+            "AGGREGATE_HAVING",
+            "FN_AGG_SUM",
+            "FN_AGG_SUM_DISTINCT",
+            "FN_AGG_AVG",
+            "FN_AGG_AVG_DISTINCT",
+            "FN_PRED_LIKE_ESCAPE",
+        ]
+    );
 }
 
 /// Asserts that `driver` advertises exactly `expected`, compared as sets.
