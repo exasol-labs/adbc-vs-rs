@@ -27,7 +27,7 @@
 //! independently stated type set, asserted equal to the virtual table's by an
 //! end-to-end test, catches a mapping change instead of absorbing it.
 //!
-//! `items`, `items_bin`, `item_notes`, and `type_coverage` are mirrored, each
+//! `items`, `items_bin`, `item_notes`, `type_coverage`, and `measures` are mirrored, each
 //! with the values Exasol reads rather than the values MySQL stores: a `BIT`
 //! holds a `BOOLEAN`, a `FLOAT` its double-precision widening, a `CHAR`, `ENUM`,
 //! and `SET` a `CHAR`, a `TIME` a timestamp on 1970-01-01, and a `YEAR` a date.
@@ -277,6 +277,55 @@ const TYPE_COVERAGE_VALUES: &str = "\
      NULL, NULL, NULL, \
      NULL, NULL, NULL, NULL, NULL, NULL)";
 
+/// The mirrored `measures` columns, in the order of the fixture's own
+/// `CREATE TABLE`: a `BIGINT` is `DECIMAL(19,0)`, a `FLOAT` and a `DOUBLE` are
+/// `DOUBLE`, a `BIT(1)` is `BOOLEAN`, and a `VARCHAR` is `VARCHAR(n) UTF8`.
+const MEASURES_COLUMNS: [Column; 8] = [
+    Column {
+        name: "id",
+        declaration: "DECIMAL(10,0) NOT NULL",
+    },
+    Column {
+        name: "grp",
+        declaration: "VARCHAR(10) UTF8 NOT NULL",
+    },
+    Column {
+        name: "big_value",
+        declaration: "DECIMAL(19,0)",
+    },
+    Column {
+        name: "decimal_value",
+        declaration: "DECIMAL(30,2)",
+    },
+    Column {
+        name: "double_value",
+        declaration: "DOUBLE",
+    },
+    Column {
+        name: "float_value",
+        declaration: "DOUBLE",
+    },
+    Column {
+        name: "flag",
+        declaration: "BOOLEAN",
+    },
+    Column {
+        name: "label",
+        declaration: "VARCHAR(20) UTF8",
+    },
+];
+
+/// The `measures` rows as Exasol reads them, copied by hand from
+/// `MEASURES_SCRIPT` in [`super::mysql`], every `BIT(1)` as a `BOOLEAN`.
+const MEASURES_VALUES: &str = "\
+    (1, 'a', 10, 1.25, 0.5, 0.25, TRUE, '5'), \
+    (2, 'a', 20, 2.50, 1.5, 0.5, FALSE, '5.0'), \
+    (3, 'a', 20, 3.75, 1.5, 0.5, TRUE, ''), \
+    (4, 'b', 1, -0.25, 2.25, 1.0, TRUE, '7'), \
+    (5, 'b', 9223372036854775807, 0.25, 4.25, 2.0, NULL, '7.5'), \
+    (6, 'b', NULL, NULL, NULL, NULL, FALSE, NULL), \
+    (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL)";
+
 /// Creates the mirror schema and its tables, seeded from [`items`](super::items)
 /// and the literals above.
 ///
@@ -313,6 +362,13 @@ pub fn install(exasol: &Exasol) {
         "type_coverage",
         &TYPE_COVERAGE_COLUMNS,
         TYPE_COVERAGE_VALUES,
+    );
+    mirror_table::seed(
+        exasol,
+        SCHEMA,
+        "measures",
+        &MEASURES_COLUMNS,
+        MEASURES_VALUES,
     );
 }
 
@@ -397,6 +453,11 @@ mod tests {
                 "type_coverage",
                 TYPE_COVERAGE_COLUMNS.len(),
                 TYPE_COVERAGE_VALUES.to_string(),
+            ),
+            (
+                "measures",
+                MEASURES_COLUMNS.len(),
+                MEASURES_VALUES.to_string(),
             ),
         ] {
             let counts = values_per_tuple(&values);

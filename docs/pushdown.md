@@ -19,9 +19,9 @@
 | `GROUP BY` several columns | `AGGREGATE_GROUP_BY_TUPLE` | No | No | Yes |
 | `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)` | `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT` | Yes | Yes | Yes |
 | `MIN`, `MAX` | `FN_AGG_MIN`, `FN_AGG_MAX` | Yes | Yes | Yes |
-| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | No | No | No |
-| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | No | No | No |
-| `HAVING` | `AGGREGATE_HAVING` | No | No | No |
+| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | Yes | No | No |
+| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | Yes | No | No |
+| `HAVING` | `AGGREGATE_HAVING` | Yes | No | No |
 | Inner, left outer, and right outer join on an equality | `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI` | Yes | Yes | Yes |
 | Full outer join on an equality | `JOIN_TYPE_FULL_OUTER` | No | Yes | Yes |
 
@@ -40,6 +40,8 @@ To get the Exasol result, wrap the operand in an expression that `adbc-vs-rs` do
 ### MySQL
 
 - MySQL has no `FULL OUTER JOIN`. Exasol runs a full outer join.
+- A delegated `AVG` needs MySQL 8.0.17 or later, because the `CAST(... AS DOUBLE)` in the query that `adbc-vs-rs` sends needs it. On an older MySQL, the query fails.
+- A `SUM` or `AVG` over a character column reads a value that is not a number as its numeric prefix, or as 0. Exasol fails the query for such a value.
 
 ### PostgreSQL
 

@@ -648,16 +648,21 @@ fn count_star_differs_from_count_column() {
 /// request arrives in must not reach the generated statement.
 #[test]
 fn mixed_case_function_names_render_identically() {
-    let entries = |count: &str, min: &str| {
+    let entries = |count: &str, min: &str, sum: &str, avg: &str| {
         json!([
             aggregate(count, Some(column_operand("total"))),
             aggregate(min, Some(column_operand("note"))),
+            aggregate(sum, Some(column_operand("total"))),
+            aggregate(avg, Some(column_operand("total"))),
         ])
     };
-    let types = json!([count_type(), note_type()]);
+    let types = json!([count_type(), note_type(), sum_type(), double_type()]);
 
-    let lower_case = render_statement(&typed_request(entries("count", "min"), types.clone()));
-    let upper_case = render_statement(&typed_request(entries("COUNT", "MIN"), types));
+    let lower_case = render_statement(&typed_request(
+        entries("count", "min", "sum", "avg"),
+        types.clone(),
+    ));
+    let upper_case = render_statement(&typed_request(entries("COUNT", "MIN", "SUM", "AVG"), types));
 
     assert_eq!(
         lower_case, upper_case,
@@ -665,24 +670,16 @@ fn mixed_case_function_names_render_identically() {
     );
     assert_eq!(
         lower_case,
-        "SELECT COUNT(`total`), MIN(`note`) FROM `shop`.`orders`"
+        "SELECT COUNT(`total`), MIN(`note`), SUM(`total`), \
+         (CAST(SUM(`total`) AS DOUBLE) / COUNT(`total`)) FROM `shop`.`orders`"
     );
 }
 
 /// Rendering the aggregate's argument alone would leave Exasol aggregating
-/// nothing and returning the wrong value, so an unknown function fails. `AVG`
-/// and `SUM` fail the same way: both are withheld capabilities, so neither
-/// reaches `renderable_function` from an advertising Exasol, but a request
-/// that somehow sends one anyway must still fail naming it rather than
-/// rendering an argument Exasol never asked to aggregate.
+/// nothing and returning the wrong value, so an unknown function fails.
 #[test]
 fn unrenderable_aggregate_named_in_error() {
-    for (function, named) in [
-        ("STDDEV", "STDDEV"),
-        ("stddev", "STDDEV"),
-        ("AVG", "AVG"),
-        ("SUM", "SUM"),
-    ] {
+    for (function, named) in [("STDDEV", "STDDEV"), ("stddev", "STDDEV")] {
         let error = render_error(&typed_request(
             json!([aggregate(function, Some(column_operand("total")))]),
             json!([{"type": "DOUBLE"}]),
@@ -693,6 +690,182 @@ fn unrenderable_aggregate_named_in_error() {
             "the error must name the aggregate function it received: {error}"
         );
     }
+}
+
+/// The type Exasol supplies for `SUM` over `total`, a `DECIMAL(12,4)`.
+fn sum_type() -> Value {
+    json!({"type": "DECIMAL", "precision": 23, "scale": 4})
+}
+
+/// The type Exasol supplies for `AVG` and for `SUM` over a `DOUBLE` operand.
+fn double_type() -> Value {
+    json!({"type": "DOUBLE"})
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "SUM renders as the source's
+/// SUM over the operand": MySQL's own `SUM` over the column, with `DISTINCT`
+/// before the operand exactly when the request sets it.
+#[test]
+fn sum_renders_with_and_without_distinct() {
+    let sql = render_statement(&typed_request(
+        json!([
+            aggregate("SUM", Some(column_operand("total"))),
+            distinct(aggregate("SUM", Some(column_operand("total")))),
+        ]),
+        json!([sum_type(), sum_type()]),
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT SUM(`total`), SUM(DISTINCT `total`) FROM `shop`.`orders`"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "AVG renders as the
+/// double-precision quotient of SUM and COUNT": the quotient is parenthesized,
+/// both halves carry `DISTINCT` for `AVG(DISTINCT)`, and MySQL's own `AVG` is
+/// never rendered.
+#[test]
+fn avg_renders_as_the_double_quotient_of_sum_and_count() {
+    let sql = render_statement(&typed_request(
+        json!([
+            aggregate("AVG", Some(column_operand("total"))),
+            distinct(aggregate("AVG", Some(column_operand("total")))),
+        ]),
+        json!([double_type(), double_type()]),
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT (CAST(SUM(`total`) AS DOUBLE) / COUNT(`total`)), \
+         (CAST(SUM(DISTINCT `total`) AS DOUBLE) / COUNT(DISTINCT `total`)) \
+         FROM `shop`.`orders`"
+    );
+    assert!(
+        !sql.contains("AVG("),
+        "MySQL's own AVG must not render: {sql}"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A BOOLEAN or character SUM and
+/// AVG operand renders converted as Exasol converts it": MySQL evaluates a
+/// boolean as 1 or 0, so a `BOOLEAN` column and a predicate render unchanged,
+/// and a character column or literal reads through `NULLIF` and a `DOUBLE`
+/// cast, with the `AVG` count taking the operand before the cast.
+#[test]
+fn sum_and_avg_convert_boolean_and_character_operands() {
+    let sql = render_statement(&typed_request(
+        json!([
+            aggregate(
+                "SUM",
+                Some(equal(column_operand("id"), numeric_literal("2")))
+            ),
+            aggregate("SUM", Some(column_operand("note"))),
+            distinct(aggregate("SUM", Some(column_operand("note")))),
+            aggregate("AVG", Some(column_operand("note"))),
+            distinct(aggregate("AVG", Some(column_operand("note")))),
+            aggregate("SUM", Some(string_literal("5"))),
+        ]),
+        json!([
+            sum_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+            double_type(),
+        ]),
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT SUM((`id` = 2)), SUM(CAST(NULLIF(`note`, '') AS DOUBLE)), \
+         SUM(DISTINCT CAST(NULLIF(`note`, '') AS DOUBLE)), \
+         (CAST(SUM(CAST(NULLIF(`note`, '') AS DOUBLE)) AS DOUBLE) / COUNT(NULLIF(`note`, ''))), \
+         (CAST(SUM(DISTINCT CAST(NULLIF(`note`, '') AS DOUBLE)) AS DOUBLE) \
+         / COUNT(DISTINCT NULLIF(`note`, ''))), \
+         SUM(CAST(NULLIF(_utf8mb4 X'35', '') AS DOUBLE)) FROM `shop`.`orders`"
+    );
+}
+
+/// A `BOOLEAN` column reads through its own read expression and then renders
+/// unchanged, since MySQL sums the 1 or 0 a comparison yields.
+#[test]
+fn a_boolean_column_operand_of_sum_reads_through_its_read_expression() {
+    let sql = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            fixtures::aggregate_over("SUM", "flag", false),
+            fixtures::aggregate_over("SUM", "active", true),
+        ]),
+        json!([sum_type(), sum_type()]),
+        "id",
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT SUM((`flag` <> 0)), SUM(DISTINCT `active`) FROM `shop`.`orders` GROUP BY `id`"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A having element renders as a
+/// HAVING clause": the clause follows `GROUP BY`, and a single-group request
+/// carries the clause with no `GROUP BY`.
+#[test]
+fn having_renders_after_group_by_and_on_a_single_group() {
+    let having = less(numeric_literal("12"), aggregate("COUNT", None));
+    let mut grouped = grouped_request(
+        json!([column_operand("note"), aggregate("COUNT", None)]),
+        json!([note_type(), count_type()]),
+        json!([column_operand("note")]),
+    );
+    grouped["pushdownRequest"]["having"] = having.clone();
+
+    let mut single = typed_request(json!([aggregate("COUNT", None)]), json!([count_type()]));
+    single["pushdownRequest"]["aggregationType"] = json!("single_group");
+    single["pushdownRequest"]["having"] = having;
+
+    assert_eq!(
+        render_statement(&grouped),
+        "SELECT `note`, COUNT(*) FROM `shop`.`orders` GROUP BY `note` HAVING (12 < COUNT(*))"
+    );
+    assert_eq!(
+        render_statement(&single),
+        "SELECT COUNT(*) FROM `shop`.`orders` HAVING (12 < COUNT(*))"
+    );
+}
+
+/// `vs-adapter/mysql-pushdown`, scenario "A HAVING clause reads a grouped
+/// converted column the way the select list does": `GROUP BY` names the read
+/// expression, `HAVING` reads the column inside `ANY_VALUE`, and a grouped
+/// column with no read expression stays bare in both.
+#[test]
+fn having_reads_a_grouped_converted_column_inside_any_value() {
+    let mut converted = fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([column_operand("uid"), aggregate("COUNT", None)]),
+        json!([{"type": "VARCHAR", "size": 36}, count_type()]),
+        "uid",
+    );
+    converted["pushdownRequest"]["having"] = equal(column_operand("uid"), string_literal("a"));
+
+    let mut bare = fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([column_operand("note"), aggregate("COUNT", None)]),
+        json!([note_type(), count_type()]),
+        "note",
+    );
+    bare["pushdownRequest"]["having"] = equal(column_operand("note"), string_literal("a"));
+
+    assert_eq!(
+        render_statement(&converted),
+        "SELECT ANY_VALUE(CAST(`uid` AS CHAR)), COUNT(*) FROM `shop`.`orders` \
+         GROUP BY CAST(`uid` AS CHAR) HAVING (ANY_VALUE(CAST(`uid` AS CHAR)) = _utf8mb4 X'61')"
+    );
+    assert_eq!(
+        render_statement(&bare),
+        "SELECT `note`, COUNT(*) FROM `shop`.`orders` GROUP BY `note` \
+         HAVING (`note` = _utf8mb4 X'61')"
+    );
 }
 
 /// `COUNT(*)` is the only aggregate MySQL writes over no argument, and it
@@ -1040,6 +1213,48 @@ pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
                 "MAX",
                 Expression::Column(decimal_column()),
                 false,
+            ))]),
+        ),
+        "AGGREGATE_HAVING" => (
+            " HAVING (0 < COUNT(*))",
+            Query {
+                having: Some(Predicate::Less(Comparison {
+                    left: numeric("0"),
+                    right: Expression::Aggregate(count_star()),
+                })),
+                ..aggregated(vec![aggregate_item(count_star())])
+            },
+        ),
+        "FN_AGG_SUM" => (
+            "SUM(`id`)",
+            aggregated(vec![aggregate_item(aggregate_call(
+                "SUM",
+                Expression::Column(decimal_column()),
+                false,
+            ))]),
+        ),
+        "FN_AGG_SUM_DISTINCT" => (
+            "SUM(DISTINCT `id`)",
+            aggregated(vec![aggregate_item(aggregate_call(
+                "SUM",
+                Expression::Column(decimal_column()),
+                true,
+            ))]),
+        ),
+        "FN_AGG_AVG" => (
+            "(CAST(SUM(`id`) AS DOUBLE) / COUNT(`id`))",
+            aggregated(vec![aggregate_item(aggregate_call(
+                "AVG",
+                Expression::Column(decimal_column()),
+                false,
+            ))]),
+        ),
+        "FN_AGG_AVG_DISTINCT" => (
+            "(CAST(SUM(DISTINCT `id`) AS DOUBLE) / COUNT(DISTINCT `id`))",
+            aggregated(vec![aggregate_item(aggregate_call(
+                "AVG",
+                Expression::Column(decimal_column()),
+                true,
             ))]),
         ),
         "FN_PRED_AND" => (

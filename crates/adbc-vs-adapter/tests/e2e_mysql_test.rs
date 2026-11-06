@@ -532,15 +532,10 @@ fn projection_reaches_mysql() {
     );
 }
 
-/// The shipped `MySqlDialect` deliberately withholds `FN_AGG_SUM`,
-/// `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, and `FN_AGG_AVG_DISTINCT`
-/// (decision-log `[implement-gate] Delegated AVG returns a different value
-/// from Exasol's own AVG`), so no query a shipped virtual schema delegates
-/// can make Exasol declare a `SUM` or `AVG` `selectListDataTypes` entry. Both
-/// tests below reach Exasol's compiler through [`common::probe`] instead, a
-/// scratch adapter that advertises those four capabilities anyway, so the
-/// declared types this task pins are measured against the deployed stack
-/// rather than assumed.
+/// Both tests below reach Exasol's compiler through [`common::probe`], a
+/// scratch adapter that records the `pushdown` request Exasol sends, so the
+/// declared types they pin are measured against the deployed stack, independent
+/// of what any shipped dialect renders for them.
 #[test]
 fn exasol_supplies_the_measured_aggregate_types() {
     let stack = stack::shared();
@@ -1428,73 +1423,150 @@ fn aggregation_matches_local_exasol_result() {
     );
 }
 
-/// `mysql_dialect.rs` withholds `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT`,
-/// `FN_AGG_SUM`, and `FN_AGG_SUM_DISTINCT` whole, so Exasol never delegates
-/// either function and computes both itself over whatever the pushed-down
-/// statement projects — the evidence that withholding costs no answer.
-#[test]
-fn avg_and_sum_are_withdrawn_and_match_local_exasol_result() {
-    for function in ["AVG", "SUM"] {
-        let query = |schema: &str, items: &str| {
-            format!("SELECT {function}(\"quantity\") AS VAL FROM {schema}.\"{items}\"")
-        };
+/// The table `SUM`, `AVG`, and `HAVING` read, whose local mirror holds the same
+/// rows.
+const MEASURES: &str = "measures";
 
-        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
-        assert!(
-            !statement.contains(function),
-            "a query {} \"quantity\" must render no delegated {function}, since this release \
-             withholds {function} and Exasol computes it itself: {statement}",
-            if function == "AVG" {
-                "averaging"
-            } else {
-                "summing"
-            }
-        );
-
-        let rows = assert_matches_mirror(ITEMS, query);
-        assert_eq!(
-            rows.len(),
-            1,
-            "a single-group aggregation returns exactly one row: {rows:?}"
-        );
-    }
-
-    assert_sum_over_a_double_column_answers();
+/// The four aggregates a numeric operand answers, each aliased so a result
+/// row names them.
+fn numeric_aggregates(column: &str) -> String {
+    format!(
+        "SUM(\"{column}\") AS S, SUM(DISTINCT \"{column}\") AS SD, AVG(\"{column}\") AS A, \
+         AVG(DISTINCT \"{column}\") AS AD"
+    )
 }
 
-/// `pushdown-aggregation` requires a `SUM` over a `DOUBLE` column to return
-/// Exasol's own value rather than an adapter error, and that clause is the
-/// whole difference between the shipped design and the one it replaced: a
-/// render-time operand-type guard would fail this query while passing every
-/// other test in this tier. The capabilities are withheld instead, so no
-/// operand type reaches the renderer at all.
-///
-/// `orders."price"` is the fixture's `DOUBLE NOT NULL` column. The `items`
-/// mirror carries no `DOUBLE` column and gains none: the gate-6.3a correction
-/// settled that `SUM` is delegated over no operand type, so there is no
-/// delegated value to compare differentially and the fixture stays as it is.
-/// What is left to prove is that the statement carries no `SUM` and the query
-/// still answers with the sum of the seeded values.
-fn assert_sum_over_a_double_column_answers() {
-    let query = format!("SELECT SUM(\"price\") AS TOTAL FROM {VIRTUAL_SCHEMA}.\"orders\"");
-    let seeded_total = 19.99 + 42.5 + 0.01;
-
-    let statement = pushdown_statement(&query);
+/// Asserts the statement MySQL received carries the `SUM` and the `SUM` and
+/// `COUNT` quotient the aggregates of [`numeric_aggregates`] render as, and no
+/// MySQL `AVG`.
+fn assert_sum_and_avg_delegated(statement: &str) {
+    for fragment in ["SUM(", "SUM(DISTINCT ", "CAST(SUM(", "AS DOUBLE) / COUNT("] {
+        assert!(
+            statement.contains(fragment),
+            "the generated statement must carry {fragment}: {statement}"
+        );
+    }
     assert!(
-        !statement.to_uppercase().contains("SUM"),
-        "a query summing the DOUBLE column must render no delegated SUM: {statement}"
+        !statement.contains("AVG("),
+        "`AVG` must render as the quotient of `SUM` and `COUNT`, never as MySQL's own: \
+         {statement}"
     );
+}
 
-    let rows = stack::shared().exasol.query_rows(&query);
-    let total: f64 = cell(&rows[0], "TOTAL")
-        .expect("summing a NOT NULL column over three rows returns a value")
-        .parse()
-        .expect("Exasol returns the sum as a number");
-    assert!(
-        (total - seeded_total).abs() < 1e-9,
-        "the query must answer with Exasol's own sum of the seeded prices rather than failing: \
-         {total} against {seeded_total}"
-    );
+/// `pushdown-aggregation-delegation`: `SUM` and `AVG`, each with and without
+/// `DISTINCT`, over every numeric column, once without grouping and once
+/// grouped, return the rows Exasol returns over the mirror. The `BIGINT` and
+/// `DECIMAL(30,2)` sums read a MySQL `DECIMAL` wider than Exasol's 38 digits,
+/// the `FLOAT` column is summed in double precision, and group `c`, which
+/// holds only null operands, returns null for both functions.
+#[test]
+fn sum_and_avg_are_delegated_and_match_the_mirror() {
+    for column in ["big_value", "decimal_value", "double_value", "float_value"] {
+        let aggregates = numeric_aggregates(column);
+        let single_group = |schema: &str, measures: &str| {
+            format!("SELECT {aggregates} FROM {schema}.\"{measures}\"")
+        };
+        let grouped = |schema: &str, measures: &str| {
+            format!(
+                "SELECT \"grp\", {aggregates} FROM {schema}.\"{measures}\" GROUP BY \"grp\" \
+                 ORDER BY \"grp\""
+            )
+        };
+
+        let single_statement = pushdown_statement(&single_group(VIRTUAL_SCHEMA, MEASURES));
+        assert_sum_and_avg_delegated(&single_statement);
+        assert!(
+            !single_statement.contains("GROUP BY"),
+            "a single-group aggregation must render no GROUP BY clause: {single_statement}"
+        );
+        let single_rows = assert_matches_mirror(MEASURES, single_group);
+        assert_eq!(single_rows.len(), 1, "{column}: {single_rows:?}");
+
+        assert_sum_and_avg_delegated(&pushdown_statement(&grouped(VIRTUAL_SCHEMA, MEASURES)));
+        let grouped_rows = assert_matches_mirror(MEASURES, grouped);
+        assert_eq!(grouped_rows.len(), 3, "{column}: {grouped_rows:?}");
+        let null_group = &grouped_rows[2];
+        for aggregate in ["S", "SD", "A", "AD"] {
+            assert_eq!(
+                cell(null_group, aggregate),
+                None,
+                "{column}: the group holding only null operands must return null for \
+                 {aggregate}: {null_group:?}"
+            );
+        }
+    }
+}
+
+/// `pushdown-aggregation-delegation`: `SUM` and `AVG` over a `BOOLEAN` column
+/// and over a `VARCHAR` column holding numbers as text convert the operand as
+/// Exasol does. `label` holds an empty string, which Exasol reads as null, and
+/// `'5'` beside `'5.0'`, which `SUM(DISTINCT)` takes as one value and
+/// `AVG(DISTINCT)` divides as two.
+#[test]
+fn sum_and_avg_over_boolean_and_character_columns_match_the_mirror() {
+    for (column, converted_fragment) in [
+        ("flag", "SUM((`flag` <> 0))"),
+        ("label", "CAST(NULLIF(`label`, "),
+    ] {
+        let aggregates = numeric_aggregates(column);
+        let single_group = |schema: &str, measures: &str| {
+            format!("SELECT {aggregates} FROM {schema}.\"{measures}\"")
+        };
+        let grouped = |schema: &str, measures: &str| {
+            format!(
+                "SELECT \"grp\", {aggregates} FROM {schema}.\"{measures}\" GROUP BY \"grp\" \
+                 ORDER BY \"grp\""
+            )
+        };
+
+        let statement = pushdown_statement(&single_group(VIRTUAL_SCHEMA, MEASURES));
+        assert_sum_and_avg_delegated(&statement);
+        assert!(
+            statement.contains(converted_fragment),
+            "the operand must render as {converted_fragment}: {statement}"
+        );
+        let single_rows = assert_matches_mirror(MEASURES, single_group);
+        assert_eq!(single_rows.len(), 1, "{column}: {single_rows:?}");
+
+        let grouped_rows = assert_matches_mirror(MEASURES, grouped);
+        assert_eq!(grouped_rows.len(), 3, "{column}: {grouped_rows:?}");
+    }
+
+    let predicate = |schema: &str, measures: &str| {
+        format!(
+            "SELECT SUM(\"big_value\" > 5) AS S, AVG(\"big_value\" > 5) AS A \
+             FROM {schema}.\"{measures}\""
+        )
+    };
+    assert_matches_mirror(MEASURES, predicate);
+}
+
+/// `pushdown-aggregation-delegation`: a `HAVING` clause over `COUNT(*)`, over
+/// `SUM`, and over `AVG` reaches MySQL and keeps the groups the mirror keeps,
+/// which are fewer than all three.
+#[test]
+fn having_is_delegated_and_matches_the_mirror() {
+    for (having, kept_groups) in [
+        ("COUNT(*) > 2", 2),
+        ("SUM(\"decimal_value\") > 1", 1),
+        ("AVG(\"double_value\") > 2", 1),
+    ] {
+        let query = |schema: &str, measures: &str| {
+            format!(
+                "SELECT \"grp\", COUNT(*) AS N, SUM(\"decimal_value\") AS S \
+                 FROM {schema}.\"{measures}\" GROUP BY \"grp\" HAVING {having} ORDER BY \"grp\""
+            )
+        };
+
+        let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, MEASURES));
+        assert!(
+            statement.contains("GROUP BY `grp` HAVING"),
+            "the generated statement must carry the HAVING clause after the grouping for \
+             {having}: {statement}"
+        );
+        let rows = assert_matches_mirror(MEASURES, query);
+        assert_eq!(rows.len(), kept_groups, "{having}: {rows:?}");
+    }
 }
 
 #[test]
@@ -2712,14 +2784,14 @@ fn aggregation_not_delegable_whole_is_withdrawn_and_matches_local_exasol_result(
             "SELECT COUNT(\"quantity\") + 1 AS VAL FROM {schema}.\"items\"",
         ),
         (
-            "a withheld aggregate beside a delegable one",
-            "SELECT SUM(\"quantity\") AS S, COUNT(*) AS N FROM {schema}.\"items\"",
+            "an aggregate no dialect advertises beside a delegable one",
+            "SELECT STDDEV(\"quantity\") AS S, COUNT(*) AS N FROM {schema}.\"items\"",
         ),
     ] {
         let query = |schema: &str, _items: &str| query_text.replace("{schema}", schema);
 
         let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
-        for forbidden in ["COUNT", "SUM"] {
+        for forbidden in ["COUNT", "STDDEV"] {
             assert!(
                 !statement.contains(forbidden),
                 "{label} must be withdrawn whole, so the statement carries no {forbidden}: \

@@ -227,8 +227,7 @@ fn advertised_set_matches_the_rendered_fragments() {
     }
 }
 
-/// Every capability release 0.2 advertised for MySQL, in that release's own
-/// order.
+/// Every capability the MySQL dialect advertises.
 ///
 /// The set is a released interface: Exasol delegates a fragment for each entry
 /// and re-applies none of them, so an entry gained or lost changes which
@@ -237,28 +236,29 @@ fn advertised_set_matches_the_rendered_fragments() {
 /// list `vs-adapter/pushdown-dialect` forbids, and because the point of
 /// asserting it is to have one statement of the set that did not move when the
 /// values did.
-const RELEASE_0_2_MYSQL_CAPABILITIES: &[&str] = &[
+const MYSQL_CAPABILITIES: &[&str] = &[
     "SELECTLIST_PROJECTION",
     "SELECTLIST_EXPRESSIONS",
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
-    // `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, and `FN_AGG_AVG_DISTINCT` are
-    // withheld for every dialect, for one reason that is not about any target's SQL:
-    // a floating-point sum is order-dependent because addition is not associative, and
-    // the accumulation order is not stable between two runs under a parallel plan.
-    // Advertising either would return a value that can differ from Exasol's own — the
-    // silent wrong-value failure, not an error. PostgreSQL's exact-numeric `sum` being
-    // exact and order-independent is not a reason to advertise it there either.
+    "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
-    // `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, and
-    // `AGGREGATE_HAVING` are withheld: gate 3.0 measured that no aggregate reaches the
-    // adapter without `SELECTLIST_EXPRESSIONS`, and the grouping cap is withheld by
-    // omission rather than by a separate flag.
+    // A floating-point `SUM` and `AVG` follow the source's accumulation order, so a
+    // delegated result can differ from Exasol's in its low-order digits; the capability
+    // admits every numeric operand, so refusing a `DOUBLE` at render time would turn a
+    // query Exasol answers into a failure.
+    "FN_AGG_SUM",
+    "FN_AGG_SUM_DISTINCT",
+    "FN_AGG_AVG",
+    "FN_AGG_AVG_DISTINCT",
+    // `AGGREGATE_GROUP_BY_EXPRESSION` and `AGGREGATE_GROUP_BY_TUPLE` are withheld: this
+    // release groups by one column, and no aggregate reaches the adapter without
+    // `SELECTLIST_EXPRESSIONS`.
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",
@@ -294,8 +294,8 @@ const RELEASE_0_2_MYSQL_CAPABILITIES: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// `vs-adapter/mysql-pushdown`: MySQL advertises exactly what release 0.2
-/// advertised, element for element.
+/// `vs-adapter/mysql-pushdown`: MySQL advertises exactly the 39 entries of
+/// [`MYSQL_CAPABILITIES`], element for element.
 ///
 /// The values themselves are declared data now — they live in
 /// `crates/adbc-vs-scan/drivers/mysql.toml` and reach the dialect through the
@@ -304,14 +304,14 @@ const RELEASE_0_2_MYSQL_CAPABILITIES: &[&str] = &[
 /// added one delegates a fragment the renderer may not express. Compared as
 /// sets rather than in order, because Exasol reads the array as a set and the
 /// declaration groups it for a reader; a duplicate still fails, since it makes
-/// the advertised sequence one element longer than the released one.
+/// the advertised sequence one element longer than the stated one.
 #[test]
 fn mysql_capability_set_is_exact() {
-    assert_set_is(Driver::MySql, RELEASE_0_2_MYSQL_CAPABILITIES);
+    assert_set_is(Driver::MySql, MYSQL_CAPABILITIES);
 }
 
 /// Every capability the PostgreSQL dialect advertises, written out in full for
-/// the reason [`RELEASE_0_2_MYSQL_CAPABILITIES`] is: a set that is generated is
+/// the reason [`MYSQL_CAPABILITIES`] is: a set that is generated is
 /// a set that can be generated wrong, and deriving this one from MySQL's would
 /// be the second capability list `vs-adapter/pushdown-dialect` forbids — and
 /// would state that the two sets are one decision, which
@@ -351,7 +351,7 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "JOIN_TYPE_LEFT_OUTER",
     "JOIN_TYPE_RIGHT_OUTER",
     // `JOIN_TYPE_FULL_OUTER` is the whole of the difference between this set and
-    // `RELEASE_0_2_MYSQL_CAPABILITIES`: PostgreSQL implements the keyword directly,
+    // `MYSQL_CAPABILITIES`: PostgreSQL implements the keyword directly,
     // where MySQL implements none and emulating one needs the union rewrite mission.md
     // places out of scope. It withholds `JOIN_CONDITION_ALL` for the same reason MySQL
     // does, which is what keeps the full join safe as well: PostgreSQL refuses a full
@@ -369,7 +369,7 @@ fn postgres_capability_set_is_exact() {
 }
 
 /// Every capability the Trino dialect advertises, written out independently
-/// of [`POSTGRES_CAPABILITIES`] for the reason [`RELEASE_0_2_MYSQL_CAPABILITIES`]
+/// of [`POSTGRES_CAPABILITIES`] for the reason [`MYSQL_CAPABILITIES`]
 /// is: a set that is generated is a set that can be generated wrong, and
 /// deriving this one from PostgreSQL's would be the second capability list
 /// `vs-adapter/pushdown-dialect` forbids.

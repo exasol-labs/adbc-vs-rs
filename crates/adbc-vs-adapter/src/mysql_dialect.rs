@@ -63,7 +63,8 @@ use adbc_vs_scan::driver::Driver;
 use crate::mysql_type_mapping;
 use crate::pushdown_query::{
     AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
-    InConstListPredicate, LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
+    InConstListPredicate, LikePredicate, Literal, OperandConversion, Predicate, Query, SelectItem,
+    SourceTable,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
 
@@ -74,7 +75,14 @@ use crate::sql_dialect::{RenderError, SqlDialect};
 /// non-canonically. A function outside the list has no rendering path, and
 /// rendering its argument in its place would leave Exasol aggregating
 /// nothing and returning the wrong value.
-const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX"];
+const AGGREGATE_FUNCTIONS: &[&str] = &["COUNT", "MIN", "MAX", "SUM", "AVG"];
+
+const SUM_FUNCTION: &str = "SUM";
+
+/// Rendered as the quotient of its `SUM` and `COUNT`, never as MySQL's own
+/// `AVG`, which returns a `DECIMAL` over an exact-numeric operand where Exasol
+/// declares a `DOUBLE`.
+const AVG_FUNCTION: &str = "AVG";
 
 /// The one aggregate MySQL writes over no argument, as `COUNT(*)`.
 const COUNT_FUNCTION: &str = "COUNT";
@@ -153,7 +161,14 @@ impl SqlDialect for MySqlDialect {
             format!(" GROUP BY {}", grouping_keys.join(", "))
         };
 
-        Ok(format!("SELECT {projection} FROM {from}{filter}{grouping}"))
+        let having = match &query.having {
+            Some(predicate) => format!(" HAVING {}", select_list.render_predicate(predicate)?),
+            None => String::new(),
+        };
+
+        Ok(format!(
+            "SELECT {projection} FROM {from}{filter}{grouping}{having}"
+        ))
     }
 }
 
@@ -504,8 +519,17 @@ impl Statement<'_> {
 
         let distinct = if call.distinct { "DISTINCT " } else { "" };
         let operand = self.per_row().render_expression(argument)?;
+        let conversion = argument.aggregate_operand_conversion();
 
-        Ok(format!("{function}({distinct}{operand})"))
+        Ok(match function {
+            SUM_FUNCTION => format!("SUM({distinct}{})", summed(&operand, conversion)),
+            AVG_FUNCTION => format!(
+                "(CAST(SUM({distinct}{}) AS DOUBLE) / COUNT({distinct}{}))",
+                summed(&operand, conversion),
+                counted(&operand, conversion)
+            ),
+            _ => format!("{function}({distinct}{operand})"),
+        })
     }
 
     fn render_expression(&self, expression: &Expression) -> Result<String, RenderError> {
@@ -647,6 +671,27 @@ fn quoted_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
         .map(|name| format!("`{name}`"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The operand a `SUM` adds, converted as Exasol converts it before it sums.
+/// MySQL evaluates a boolean as 1 or 0, so only a character operand changes.
+fn summed(operand: &str, conversion: Option<OperandConversion>) -> String {
+    match conversion {
+        Some(OperandConversion::Character) => {
+            format!("CAST({} AS DOUBLE)", counted(operand, conversion))
+        }
+        Some(OperandConversion::Boolean) | None => operand.to_string(),
+    }
+}
+
+/// The operand an `AVG` counts: the one Exasol divides by, before any number
+/// conversion, so a character operand differs from the summed one only in
+/// that it is not yet a `DOUBLE`.
+fn counted(operand: &str, conversion: Option<OperandConversion>) -> String {
+    match conversion {
+        Some(OperandConversion::Character) => format!("NULLIF({operand}, '')"),
+        Some(OperandConversion::Boolean) | None => operand.to_string(),
+    }
 }
 
 fn renderable_function(function: &str) -> Result<&'static str, RenderError> {
