@@ -201,7 +201,7 @@ jobs:
             target: docker
             image: exasol/docker-db:latest-2026.1
           - name: personal-x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: personal
           - name: personal-arm64
             runner: ubuntu-24.04-arm
@@ -284,7 +284,7 @@ jobs:
             target: docker
             image: exasol/docker-db:latest-2026.1
           - name: personal-x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: personal
           - name: personal-arm64
             runner: ubuntu-24.04-arm
@@ -367,7 +367,7 @@ jobs:
             target: docker
             image: exasol/docker-db:latest-2026.1
           - name: personal-x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: personal
           - name: personal-arm64
             runner: ubuntu-24.04-arm
