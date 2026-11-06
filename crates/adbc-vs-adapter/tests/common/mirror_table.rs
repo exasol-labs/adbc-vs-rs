@@ -17,6 +17,10 @@ pub struct Column {
     pub declaration: &'static str,
 }
 
+pub const fn column(name: &'static str, declaration: &'static str) -> Column {
+    Column { name, declaration }
+}
+
 /// Creates one table and fills it, in that order and never one without the
 /// other: a mirror table that exists but holds nothing looks to a
 /// differential test exactly like a delegated query returning no row.

@@ -443,3 +443,209 @@ pub(crate) fn sum_type() -> Value {
 pub(crate) fn double_type() -> Value {
     json!({"type": "DOUBLE"})
 }
+
+/// A `function_aggregate` select-list entry over at most one argument. `None`
+/// is the `COUNT(*)` shape: Exasol sends it carrying no `arguments` at all,
+/// which is how it is told apart from `COUNT(column)`.
+pub(crate) fn aggregate(function: &str, argument: Option<Value>) -> Value {
+    let mut entry = json!({"type": "function_aggregate", "name": function});
+    if let Some(argument) = argument {
+        entry["arguments"] = json!([argument]);
+    }
+    entry
+}
+
+/// A `pushdown` request over `orders` carrying `select_list` and the
+/// `selectListDataTypes` Exasol supplies for it, which is the only type source
+/// an aggregate or a select-list predicate entry has.
+pub(crate) fn typed_request(select_list: Value, data_types: Value) -> Value {
+    let mut request = request(orders_columns(), Some(select_list));
+    request["pushdownRequest"]["selectListDataTypes"] = data_types;
+    request
+}
+
+/// A `pushdown` request whose `aggregationType` is `group_by` over `group_by`.
+pub(crate) fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
+    let mut request = typed_request(select_list, data_types);
+    request["pushdownRequest"]["aggregationType"] = json!("group_by");
+    request["pushdownRequest"]["groupBy"] = group_by;
+    request
+}
+
+/// The type Exasol supplies for `COUNT` over any operand, measured on Exasol
+/// 2025.2.1.
+pub(crate) fn count_type() -> Value {
+    json!({"type": "DECIMAL", "precision": 18, "scale": 0})
+}
+
+/// The type Exasol supplies for `MIN` or `MAX` over `note`, a `VARCHAR(100)`:
+/// the operand's own type, spelled without the `characterSet` field
+/// `involvedTables[].columns[].dataType` carries.
+pub(crate) fn note_type() -> Value {
+    json!({"type": "VARCHAR", "size": 100})
+}
+
+/// The type Exasol supplies for `id`, a `DECIMAL(19,0)`: the operand's own
+/// type, as `MIN`, `MAX`, and a projected grouping column all carry.
+pub(crate) fn id_type() -> Value {
+    json!({"type": "DECIMAL", "precision": 19, "scale": 0})
+}
+
+/// The type Exasol supplies for a select-list predicate: one `BOOLEAN` column.
+pub(crate) fn boolean_type() -> Value {
+    json!({"type": "BOOLEAN"})
+}
+
+/// A column node as Exasol sends one inside a join: qualified by the
+/// `tableName` of the table it belongs to, which arrives on every column node
+/// of a join.
+pub(crate) fn joined_column(name: &str, table: &str) -> Value {
+    json!({"type": "column", "name": name, "tableName": table})
+}
+
+pub(crate) fn joined_orders_columns() -> Value {
+    json!([
+        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+        {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
+    ])
+}
+
+fn joined_customers_columns() -> Value {
+    json!([
+        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+        {"name": "name", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
+    ])
+}
+
+/// The `from` element joining `orders` to `customers` over the foreign key, in
+/// the shape a join whose query aliased no table arrives in: neither table
+/// carries an `alias` and both condition operands carry a `tableName`.
+pub(crate) fn orders_to_customers(join_type: &str) -> Value {
+    json!({
+        "type": "join",
+        "join_type": join_type,
+        "left": {"type": "table", "name": "orders"},
+        "right": {"type": "table", "name": "customers"},
+        "condition": {
+            "type": "predicate_equal",
+            "left": joined_column("customer_id", "orders"),
+            "right": joined_column("id", "customers"),
+        },
+    })
+}
+
+/// A `pushdown` request over `from`, carrying `select_list` and the two
+/// involved tables `orders_to_customers` names.
+pub(crate) fn join_request(from: Value, select_list: Value) -> Value {
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": {
+            "type": "select",
+            "from": from,
+            "selectList": select_list,
+        },
+        "involvedTables": [
+            {"name": "orders", "columns": joined_orders_columns()},
+            {"name": "customers", "columns": joined_customers_columns()},
+        ],
+    })
+}
+
+/// A `Query` over `orders` with the given select list and nothing else, for
+/// the refusal every dialect makes of a projection that selects nothing.
+pub(crate) fn empty_projection_error(
+    dialect: &dyn SqlDialect,
+    namespace: SourceQualifier,
+) -> String {
+    let query = Query {
+        select_list: vec![],
+        filter: None,
+        aggregation: None,
+        having: None,
+        from: FromClause::Table(SourceTable {
+            namespace,
+            name: "orders".to_string(),
+            alias: None,
+        }),
+    };
+    dialect
+        .render(&query)
+        .expect_err("a query projecting no column must fail")
+        .to_string()
+}
+
+/// Asserts every empty `AND`, `OR`, and `IN` group fails to render, naming its
+/// form, through `filter_render_error`.
+pub(crate) fn assert_empty_predicate_groups_fail(
+    filter_render_error: &dyn Fn(Value) -> String,
+    dialect_name: &str,
+) {
+    for (filter, named) in [
+        (json!({"type": "predicate_and", "expressions": []}), "AND"),
+        (json!({"type": "predicate_or", "expressions": []}), "OR"),
+        (
+            json!({
+                "type": "predicate_in_constlist",
+                "expression": column("id"),
+                "arguments": [],
+            }),
+            "IN",
+        ),
+    ] {
+        let error = filter_render_error(filter);
+
+        assert!(
+            error.contains(named),
+            "the error must name the empty {dialect_name} form: {error}"
+        );
+    }
+}
+
+/// Asserts an argument-less `MIN` and a `DISTINCT COUNT(*)` both fail to
+/// render through `render_error`, naming the fragment the dialect refused.
+pub(crate) fn assert_argumentless_aggregates_fail(
+    render_error: &dyn Fn(&Value) -> String,
+    dialect_name: &str,
+) {
+    let min_error = render_error(&typed_request(
+        json!([aggregate("MIN", None)]),
+        json!([count_type()]),
+    ));
+
+    assert!(
+        min_error.contains("MIN"),
+        "the error must name the aggregate that carries no argument: {min_error}"
+    );
+
+    let mut distinct_count = aggregate("COUNT", None);
+    distinct_count["distinct"] = json!(true);
+    let count_error = render_error(&typed_request(
+        json!([distinct_count]),
+        json!([count_type()]),
+    ));
+
+    assert!(
+        count_error.contains("DISTINCT"),
+        "the error must name the fragment {dialect_name} has no form for: {count_error}"
+    );
+}
+
+/// Asserts a `GROUP BY` over no column fails to render through `render_error`.
+pub(crate) fn assert_empty_group_by_fails(
+    render_error: &dyn Fn(&Value) -> String,
+    dialect_name: &str,
+) {
+    let request = grouped_request(
+        json!([aggregate("COUNT", None)]),
+        json!([count_type()]),
+        json!([]),
+    );
+
+    let error = render_error(&request);
+
+    assert!(
+        error.contains("GROUP BY"),
+        "the error must name the empty {dialect_name} clause: {error}"
+    );
+}

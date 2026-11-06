@@ -4,11 +4,15 @@ use super::*;
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column, distinct, double_literal, double_type, equal, filtered_request, less, numeric_literal,
-    orders_columns, request, string_literal, sum_type,
+    aggregate, column, count_type, distinct, double_literal, double_type, equal, filtered_request,
+    grouped_request, join_request, joined_column, joined_orders_columns, less, numeric_literal,
+    orders_columns, orders_to_customers, request, string_literal, sum_type, typed_request,
 };
 use crate::exa_type::ExasolType;
-use crate::pushdown_query;
+use crate::pushdown_query::{
+    self, BetweenPredicate, Comparison, Expression, FromClause, InConstListPredicate,
+    LikePredicate, Literal, Predicate, Query, SelectItem,
+};
 
 /// The namespace a Trino virtual schema records and every rendered table is
 /// qualified by: the catalog and the schema, the two segments
@@ -119,21 +123,7 @@ fn an_empty_select_list_projects_a_single_constant() {
 
 #[test]
 fn a_query_projecting_nothing_fails_rather_than_rendering_an_empty_projection() {
-    let query = pushdown_query::Query {
-        select_list: vec![],
-        filter: None,
-        aggregation: None,
-        having: None,
-        from: pushdown_query::FromClause::Table(pushdown_query::SourceTable {
-            namespace: namespace(),
-            name: "orders".to_string(),
-            alias: None,
-        }),
-    };
-    let error = TrinoDialect
-        .render(&query)
-        .expect_err("an empty select list must fail to render")
-        .to_string();
+    let error = fixtures::empty_projection_error(&TrinoDialect, namespace());
     assert!(error.contains("empty"), "{error}");
 }
 
@@ -318,51 +308,6 @@ fn a_like_carrying_an_escape_char_fails_naming_the_capability() {
 // Joins
 // ---------------------------------------------------------------------------
 
-fn joined_column(name: &str, table: &str) -> Value {
-    json!({"type": "column", "name": name, "tableName": table})
-}
-
-fn joined_orders_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
-}
-
-fn joined_customers_columns() -> Value {
-    json!([{"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}}])
-}
-
-fn orders_to_customers(join_type: &str) -> Value {
-    json!({
-        "type": "join",
-        "join_type": join_type,
-        "left": {"type": "table", "name": "orders"},
-        "right": {"type": "table", "name": "customers"},
-        "condition": {
-            "type": "predicate_equal",
-            "left": joined_column("customer_id", "orders"),
-            "right": joined_column("id", "customers"),
-        },
-    })
-}
-
-fn join_request(from: Value, select_list: Value) -> Value {
-    json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": from,
-            "selectList": select_list,
-        },
-        "involvedTables": [
-            {"name": "orders", "columns": joined_orders_columns()},
-            {"name": "customers", "columns": joined_customers_columns()},
-        ],
-    })
-}
-
 #[test]
 fn inner_join_renders_positionally_aliased_and_qualified() {
     let sql = render_statement(&join_request(
@@ -428,35 +373,6 @@ fn a_single_table_query_renders_no_alias_even_when_the_request_assigned_one() {
 // ---------------------------------------------------------------------------
 // Aggregation and GROUP BY
 // ---------------------------------------------------------------------------
-
-fn aggregate(function: &str, argument: Option<Value>) -> Value {
-    let mut node = json!({"type": "function_aggregate", "name": function});
-    if let Some(argument) = argument {
-        node["arguments"] = json!([argument]);
-    }
-    node
-}
-
-fn count_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 18, "scale": 0})
-}
-
-/// A `pushdown` request over `orders` carrying `select_list` and the
-/// `selectListDataTypes` Exasol supplies for it, which is the only type
-/// source an aggregate or a select-list predicate entry has.
-fn typed_request(select_list: Value, data_types: Value) -> Value {
-    let mut built = request(orders_columns(), Some(select_list));
-    built["pushdownRequest"]["selectListDataTypes"] = data_types;
-    built
-}
-
-/// A `pushdown` request whose `aggregationType` is `group_by` over `group_by`.
-fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
-    let mut built = typed_request(select_list, data_types);
-    built["pushdownRequest"]["aggregationType"] = json!("group_by");
-    built["pushdownRequest"]["groupBy"] = group_by;
-    built
-}
 
 #[test]
 fn single_group_renders_without_group_by() {
@@ -704,25 +620,7 @@ fn a_request_renders_byte_identically_on_every_call() {
 /// it never asked for.
 #[test]
 fn a_predicate_with_no_operand_fails_rather_than_rendering_an_empty_group() {
-    for (filter, named) in [
-        (json!({"type": "predicate_and", "expressions": []}), "AND"),
-        (json!({"type": "predicate_or", "expressions": []}), "OR"),
-        (
-            json!({
-                "type": "predicate_in_constlist",
-                "expression": column("id"),
-                "arguments": [],
-            }),
-            "IN",
-        ),
-    ] {
-        let error = filter_render_error(filter);
-
-        assert!(
-            error.contains(named),
-            "the error must name the empty Trino form: {error}"
-        );
-    }
+    fixtures::assert_empty_predicate_groups_fail(&filter_render_error, "Trino");
 }
 
 /// Trino writes no empty `GROUP BY` clause, and a renderer that dropped the
@@ -730,18 +628,7 @@ fn a_predicate_with_no_operand_fails_rather_than_rendering_an_empty_group() {
 /// asked for one row per group.
 #[test]
 fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_clause() {
-    let request = grouped_request(
-        json!([aggregate("COUNT", None)]),
-        json!([count_type()]),
-        json!([]),
-    );
-
-    let error = render_error(&request);
-
-    assert!(
-        error.contains("GROUP BY"),
-        "the error must name the empty Trino clause: {error}"
-    );
+    fixtures::assert_empty_group_by_fails(&render_error, "Trino");
 }
 
 /// `COUNT(*)` is the only aggregate Trino writes over no argument, and it
@@ -750,27 +637,7 @@ fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_cla
 /// every row where it asked for the distinct values.
 #[test]
 fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
-    let min_error = render_error(&typed_request(
-        json!([aggregate("MIN", None)]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        min_error.contains("MIN"),
-        "the error must name the aggregate that carries no argument: {min_error}"
-    );
-
-    let mut distinct_count = aggregate("COUNT", None);
-    distinct_count["distinct"] = json!(true);
-    let count_error = render_error(&typed_request(
-        json!([distinct_count]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        count_error.contains("DISTINCT"),
-        "the error must name the fragment Trino has no form for: {count_error}"
-    );
+    fixtures::assert_argumentless_aggregates_fail(&render_error, "Trino");
 }
 
 /// A reference carrying neither half has nothing to resolve against, and it

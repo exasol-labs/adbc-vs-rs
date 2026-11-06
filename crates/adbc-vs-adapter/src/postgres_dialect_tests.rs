@@ -4,11 +4,16 @@ use super::*;
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column, distinct, double_type, equal, filtered_request, less, numeric_literal, orders_columns,
-    request, string_literal, sum_type,
+    aggregate, boolean_type, column, count_type, distinct, double_type, equal, filtered_request,
+    grouped_request, id_type, join_request, joined_column, joined_orders_columns, less, note_type,
+    numeric_literal, orders_columns, orders_to_customers, request, string_literal, sum_type,
+    typed_request,
 };
 use crate::exa_type::ExasolType;
-use crate::pushdown_query;
+use crate::pushdown_query::{
+    self, BetweenPredicate, Comparison, Expression, FromClause, InConstListPredicate,
+    LikePredicate, Literal, Predicate, Query, SelectItem, SourceTable,
+};
 
 /// The namespace a PostgreSQL virtual schema records and every rendered table
 /// is qualified by: the `public` schema, never the database the connection
@@ -481,25 +486,7 @@ fn a_literal_that_could_change_the_statement_shape_fails_to_render() {
 /// dropped the node instead would hand Exasol rows it never asked for.
 #[test]
 fn a_predicate_with_no_operand_fails_rather_than_rendering_an_empty_group() {
-    for (filter, named) in [
-        (json!({"type": "predicate_and", "expressions": []}), "AND"),
-        (json!({"type": "predicate_or", "expressions": []}), "OR"),
-        (
-            json!({
-                "type": "predicate_in_constlist",
-                "expression": column("id"),
-                "arguments": [],
-            }),
-            "IN",
-        ),
-    ] {
-        let error = filter_render_error(filter);
-
-        assert!(
-            error.contains(named),
-            "the error must name the empty PostgreSQL form: {error}"
-        );
-    }
+    fixtures::assert_empty_predicate_groups_fail(&filter_render_error, "PostgreSQL");
 }
 
 /// The transition case between empty, refused above, and multi-operand: one
@@ -610,63 +597,6 @@ fn a_table_is_qualified_by_the_recorded_namespace() {
         sql.ends_with(r#"FROM "public"."orders""#),
         "the table must be qualified by the recorded namespace: {sql}"
     );
-}
-
-/// A column node as Exasol sends one inside a join: qualified by the
-/// `tableName` of the table it belongs to. Measured on Exasol 2025.2.1, that
-/// field arrives on every column node of a join, and `tableAlias` joins it only
-/// once the operator's query aliased the table.
-fn joined_column(name: &str, table: &str) -> Value {
-    json!({"type": "column", "name": name, "tableName": table})
-}
-
-fn joined_orders_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
-}
-
-fn joined_customers_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "name", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
-}
-
-/// The `from` element joining `orders` to `customers` over the foreign key, in
-/// the shape a join whose query aliased no table arrives in: neither table
-/// carries an `alias` and both condition operands carry a `tableName`.
-fn orders_to_customers(join_type: &str) -> Value {
-    json!({
-        "type": "join",
-        "join_type": join_type,
-        "left": {"type": "table", "name": "orders"},
-        "right": {"type": "table", "name": "customers"},
-        "condition": {
-            "type": "predicate_equal",
-            "left": joined_column("customer_id", "orders"),
-            "right": joined_column("id", "customers"),
-        },
-    })
-}
-
-/// A `pushdown` request over `from`, carrying `select_list` and the two
-/// involved tables `orders_to_customers` names.
-fn join_request(from: Value, select_list: Value) -> Value {
-    json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": from,
-            "selectList": select_list,
-        },
-        "involvedTables": [
-            {"name": "orders", "columns": joined_orders_columns()},
-            {"name": "customers", "columns": joined_customers_columns()},
-        ],
-    })
 }
 
 /// `vs-adapter/pushdown-join`: the two `id` columns share a name, so the
@@ -966,57 +896,6 @@ fn a_single_table_query_renders_no_alias_even_when_the_request_assigned_one() {
     );
 }
 
-/// A `function_aggregate` select-list entry over at most one argument. `None`
-/// is the `COUNT(*)` shape: Exasol sends it carrying no `arguments` at all,
-/// which is how it is told apart from `COUNT(column)`.
-fn aggregate(function: &str, argument: Option<Value>) -> Value {
-    let mut entry = json!({"type": "function_aggregate", "name": function});
-    if let Some(argument) = argument {
-        entry["arguments"] = json!([argument]);
-    }
-    entry
-}
-
-/// A `pushdown` request over `orders` carrying `select_list` and the
-/// `selectListDataTypes` Exasol supplies for it, which is the only type source
-/// an aggregate or a select-list predicate entry has.
-fn typed_request(select_list: Value, data_types: Value) -> Value {
-    let mut request = request(orders_columns(), Some(select_list));
-    request["pushdownRequest"]["selectListDataTypes"] = data_types;
-    request
-}
-
-/// A `pushdown` request whose `aggregationType` is `group_by` over
-/// `group_by`.
-fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
-    let mut request = typed_request(select_list, data_types);
-    request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = group_by;
-    request
-}
-
-/// The type Exasol supplies for `COUNT` over any operand, measured on Exasol
-/// 2025.2.1 over a PostgreSQL-shaped schema by gate 2.3(h).
-fn count_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 18, "scale": 0})
-}
-
-/// The type Exasol supplies for `MIN` or `MAX` over `note`, a `VARCHAR(100)` —
-/// the operand's own type, spelled without the `characterSet` field
-/// `involvedTables[].columns[].dataType` carries.
-fn note_type() -> Value {
-    json!({"type": "VARCHAR", "size": 100})
-}
-
-fn id_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 19, "scale": 0})
-}
-
-/// The type Exasol supplies for a select-list predicate: one `BOOLEAN` column.
-fn boolean_type() -> Value {
-    json!({"type": "BOOLEAN"})
-}
-
 /// A single-group aggregation groups by nothing, which the exact match this
 /// test pins already proves: it carries no `GROUP BY`.
 #[test]
@@ -1261,27 +1140,7 @@ fn having_renders_after_group_by_and_on_a_single_group() {
 /// counts rows rather than values, so `COUNT(DISTINCT *)` is not a form either.
 #[test]
 fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
-    let min_error = render_error(&typed_request(
-        json!([aggregate("MIN", None)]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        min_error.contains("MIN"),
-        "the error must name the aggregate that carries no argument: {min_error}"
-    );
-
-    let mut distinct_count = aggregate("COUNT", None);
-    distinct_count["distinct"] = json!(true);
-    let count_error = render_error(&typed_request(
-        json!([distinct_count]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        count_error.contains("DISTINCT"),
-        "the error must name the fragment PostgreSQL has no form for: {count_error}"
-    );
+    fixtures::assert_argumentless_aggregates_fail(&render_error, "PostgreSQL");
 }
 
 /// PostgreSQL writes no empty `GROUP BY` clause, and a renderer that dropped
@@ -1289,16 +1148,7 @@ fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
 /// asked for one row per group.
 #[test]
 fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_clause() {
-    let mut request = typed_request(json!([aggregate("COUNT", None)]), json!([count_type()]));
-    request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = json!([]);
-
-    let error = render_error(&request);
-
-    assert!(
-        error.contains("GROUP BY"),
-        "the error must name the empty PostgreSQL clause: {error}"
-    );
+    fixtures::assert_empty_group_by_fails(&render_error, "PostgreSQL");
 }
 
 /// `vs-adapter/postgresql-collation`: a select-list predicate reading the
@@ -1407,24 +1257,10 @@ fn order_by_and_limit_elements_fail_named() {
 /// dialect only from a future model change.
 #[test]
 fn a_query_projecting_nothing_fails_rather_than_rendering_an_empty_projection() {
-    let query = Query {
-        select_list: vec![],
-        filter: None,
-        aggregation: None,
-        having: None,
-        from: FromClause::Table(SourceTable {
-            namespace: SourceQualifier::single(NAMESPACE),
-            name: "orders".to_string(),
-            alias: None,
-        }),
-    };
-
-    let error = PostgresDialect
-        .render(&query)
-        .expect_err("a query projecting no column must fail");
+    let error = fixtures::empty_projection_error(&PostgresDialect, namespace());
 
     assert!(
-        error.to_string().contains("select list"),
+        error.contains("select list"),
         "the error must name the empty part of the query: {error}"
     );
 }

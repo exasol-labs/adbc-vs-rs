@@ -45,7 +45,7 @@
 //! text, which is what a reviewer diffs against `docker/trino/init.sql`.
 
 use super::exasol::Exasol;
-use super::mirror_table::{self, Column};
+use super::mirror_table::{self, column, Column};
 
 /// The schema holding the Trino mirror tables, distinct from
 /// [`super::mirror::SCHEMA`] and [`super::postgres_mirror::SCHEMA`] so no two
@@ -58,22 +58,10 @@ pub const SCHEMA: &str = "TR_MIRROR";
 /// `integer` maps to Exasol `DECIMAL(10,0)` and `varchar(n)` maps to Exasol
 /// `VARCHAR(n) UTF8`, per `trino_type_mapping::map_data_type`.
 const ITEM_COLUMNS: [Column; 4] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "category",
-        declaration: "VARCHAR(20) UTF8 NOT NULL",
-    },
-    Column {
-        name: "sort_key",
-        declaration: "VARCHAR(5) UTF8 NOT NULL",
-    },
-    Column {
-        name: "tag",
-        declaration: "VARCHAR(10) UTF8 NOT NULL",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("category", "VARCHAR(20) UTF8 NOT NULL"),
+    column("sort_key", "VARCHAR(5) UTF8 NOT NULL"),
+    column("tag", "VARCHAR(10) UTF8 NOT NULL"),
 ];
 
 /// The `items` rows, `(id, category, sort_key, tag)`, copied verbatim from
@@ -89,14 +77,8 @@ const ITEM_VALUES: &str = "\
 /// The mirrored `item_notes` columns, in `docker/trino/init.sql`'s column
 /// order. Both columns are mapped, so both are mirrored.
 const NOTE_COLUMNS: [Column; 2] = [
-    Column {
-        name: "item_id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "note",
-        declaration: "VARCHAR(50) UTF8 NOT NULL",
-    },
+    column("item_id", "DECIMAL(10,0) NOT NULL"),
+    column("note", "VARCHAR(50) UTF8 NOT NULL"),
 ];
 
 /// The `item_notes` rows, `(item_id, note)`, copied verbatim from
@@ -116,30 +98,12 @@ const NOTE_VALUES: &str = "\
 /// `decimal(12,4)` keeps its precision and scale, a `double` is `DOUBLE`, and a
 /// `varchar(n)` is `VARCHAR(n) UTF8`.
 const MEASURES_COLUMNS: [Column; 6] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0)",
-    },
-    Column {
-        name: "grp",
-        declaration: "VARCHAR(10) UTF8",
-    },
-    Column {
-        name: "big_value",
-        declaration: "DECIMAL(19,0)",
-    },
-    Column {
-        name: "decimal_value",
-        declaration: "DECIMAL(12,4)",
-    },
-    Column {
-        name: "double_value",
-        declaration: "DOUBLE",
-    },
-    Column {
-        name: "label",
-        declaration: "VARCHAR(20) UTF8",
-    },
+    column("id", "DECIMAL(10,0)"),
+    column("grp", "VARCHAR(10) UTF8"),
+    column("big_value", "DECIMAL(19,0)"),
+    column("decimal_value", "DECIMAL(12,4)"),
+    column("double_value", "DOUBLE"),
+    column("label", "VARCHAR(20) UTF8"),
 ];
 
 /// The `measures` rows as Exasol reads them, copied by hand from
