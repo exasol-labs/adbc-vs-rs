@@ -10,6 +10,10 @@ on:
   merge_group:
   workflow_dispatch:
 
+env:
+  # Pinned: the installer's "latest" lookup calls the GitHub API and fails on rate limits.
+  EXAPUMP_VERSION: "0.13.1"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
