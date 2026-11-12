@@ -188,12 +188,12 @@ impl Statement<'_> {
 }
 
 impl StatementRenderer for Statement<'_> {
-    const TARGET: &'static str = "MySQL";
-    const SQL_NAME: &'static str = "MySQL";
+    const TARGET: &'static str = "MySQL"; // NOSONAR: an associated const cannot elide its lifetime
+    const SQL_NAME: &'static str = "MySQL"; // NOSONAR: an associated const cannot elide its lifetime
     const QUOTE: char = '`';
-    const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS;
-    const JOIN_NOTE: &'static str = "MySQL implements no `FULL OUTER JOIN`, and ";
-    const DOUBLE_TYPE: &'static str = "DOUBLE";
+    const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS; // NOSONAR: an associated const cannot elide its lifetime
+    const JOIN_NOTE: &'static str = "MySQL implements no `FULL OUTER JOIN`, and "; // NOSONAR: an associated const cannot elide its lifetime
+    const DOUBLE_TYPE: &'static str = "DOUBLE"; // NOSONAR: an associated const cannot elide its lifetime
 
     fn tables(&self) -> &Tables<'_> {
         self.tables

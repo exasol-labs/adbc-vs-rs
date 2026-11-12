@@ -324,13 +324,13 @@ INSERT INTO "MixedCase" ("ItemId", "Label") VALUES
 -- binary fractions so no accumulation order changes a sum, and real 16777216 + 1 needs double precision.
 CREATE TABLE measures (
     id INTEGER NOT NULL,
-    grp VARCHAR(10) NOT NULL,
+    grp VARCHAR(10) NOT NULL, -- NOSONAR: PostgreSQL has no VARCHAR2
     big_value BIGINT NULL,
     decimal_value NUMERIC(30,2) NULL,
     double_value DOUBLE PRECISION NULL,
     float_value REAL NULL,
     flag BOOLEAN NULL,
-    label VARCHAR(20) NULL,
+    label VARCHAR(20) NULL, -- NOSONAR: PostgreSQL has no VARCHAR2
     PRIMARY KEY (id)
 );
 
@@ -346,7 +346,7 @@ INSERT INTO measures (id, grp, big_value, decimal_value, double_value, float_val
 -- nan_measures holds a NaN, which Exasol cannot store, so no mirror copies it.
 CREATE TABLE nan_measures (
     id INTEGER NOT NULL,
-    grp VARCHAR(10) NOT NULL,
+    grp VARCHAR(10) NOT NULL, -- NOSONAR: PostgreSQL has no VARCHAR2
     value DOUBLE PRECISION NULL,
     PRIMARY KEY (id)
 );

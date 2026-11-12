@@ -147,20 +147,20 @@ impl<'a> Tables<'a> {
 pub trait StatementRenderer {
     /// How an error message names the target, as in "PostgreSQL writes no empty
     /// `IN` list".
-    const TARGET: &'static str;
+    const TARGET: &'static str; // NOSONAR: an associated const cannot elide its lifetime
     /// How the "valid ..." clause of an empty select list error names the
     /// target's SQL.
-    const SQL_NAME: &'static str;
+    const SQL_NAME: &'static str; // NOSONAR: an associated const cannot elide its lifetime
     /// The character that quotes an identifier, doubled inside it.
     const QUOTE: char = '"';
     /// The keyword each `join_type` the dialect renders spells, which is also
     /// the closed set of values it renders at all.
-    const JOIN_KEYWORDS: &'static [(&'static str, &'static str)];
+    const JOIN_KEYWORDS: &'static [(&'static str, &'static str)]; // NOSONAR: an associated const cannot elide its lifetime
     /// What a `join_type` error says between the list of join types and the
     /// reason substitution is wrong, for a target missing a join type.
-    const JOIN_NOTE: &'static str = "";
+    const JOIN_NOTE: &'static str = ""; // NOSONAR: an associated const cannot elide its lifetime
     /// The target's double-precision type, which an `AVG` quotient casts to.
-    const DOUBLE_TYPE: &'static str;
+    const DOUBLE_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
 
     fn tables(&self) -> &Tables<'_>;
 
