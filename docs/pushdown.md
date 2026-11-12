@@ -10,24 +10,32 @@
 
 | Part of a query | Capabilities | MySQL | PostgreSQL | Trino |
 |-----------------|--------------|-------|------------|-------|
-| Column selection | `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS` | Yes | Yes | Yes |
-| Filters with comparisons, `IS NULL`, `IS NOT NULL`, `BETWEEN`, `IN` with a list of constants, `LIKE`, `AND`, `OR`, and `NOT` | `FILTER_EXPRESSIONS`, `FN_PRED_EQUAL`, `FN_PRED_NOTEQUAL`, `FN_PRED_LESS`, `FN_PRED_LESSEQUAL`, `FN_PRED_IS_NULL`, `FN_PRED_IS_NOT_NULL`, `FN_PRED_BETWEEN`, `FN_PRED_IN_CONSTLIST`, `FN_PRED_LIKE`, `FN_PRED_AND`, `FN_PRED_OR`, `FN_PRED_NOT` | Yes | Yes | Yes |
-| `LIKE` with an `ESCAPE` clause | `FN_PRED_LIKE_ESCAPE` | Yes | Yes | No |
-| `NULL`, number, string, date, and timestamp literals | `LITERAL_NULL`, `LITERAL_EXACTNUMERIC`, `LITERAL_DOUBLE`, `LITERAL_STRING`, `LITERAL_DATE`, `LITERAL_TIMESTAMP` | Yes | Yes | Yes |
-| Aggregation without `GROUP BY` | `AGGREGATE_SINGLE_GROUP` | Yes | Yes | Yes |
-| `GROUP BY` one column | `AGGREGATE_GROUP_BY_COLUMN` | Yes | Yes | Yes |
-| `GROUP BY` several columns | `AGGREGATE_GROUP_BY_TUPLE` | No | No | Yes |
-| `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)` | `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT` | Yes | Yes | Yes |
-| `MIN`, `MAX` | `FN_AGG_MIN`, `FN_AGG_MAX` | Yes | Yes | Yes |
-| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | Yes | Yes | Yes |
-| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | Yes | Yes | Yes |
-| `HAVING` | `AGGREGATE_HAVING` | Yes | Yes | Yes |
-| Inner, left outer, and right outer join on an equality | `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI` | Yes | Yes | Yes |
-| Full outer join on an equality | `JOIN_TYPE_FULL_OUTER` | No | Yes | Yes |
+| Column selection | `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS` | ✅ | ✅ | ✅ |
+| Filters with comparisons, `IS NULL`, `IS NOT NULL`, `BETWEEN`, `IN` with a list of constants, `LIKE`, `AND`, `OR`, and `NOT` | `FILTER_EXPRESSIONS`, `FN_PRED_EQUAL`, `FN_PRED_NOTEQUAL`, `FN_PRED_LESS`, `FN_PRED_LESSEQUAL`, `FN_PRED_IS_NULL`, `FN_PRED_IS_NOT_NULL`, `FN_PRED_BETWEEN`, `FN_PRED_IN_CONSTLIST`, `FN_PRED_LIKE`, `FN_PRED_AND`, `FN_PRED_OR`, `FN_PRED_NOT` | ✅ | ✅ | ✅ |
+| `LIKE` with an `ESCAPE` clause | `FN_PRED_LIKE_ESCAPE` | ✅ | ✅ | ❌ |
+| `NULL`, number, string, date, and timestamp literals | `LITERAL_NULL`, `LITERAL_EXACTNUMERIC`, `LITERAL_DOUBLE`, `LITERAL_STRING`, `LITERAL_DATE`, `LITERAL_TIMESTAMP` | ✅ | ✅ | ✅ |
+| Aggregation without `GROUP BY` | `AGGREGATE_SINGLE_GROUP` | ✅ | ✅ | ✅ |
+| `GROUP BY` one column | `AGGREGATE_GROUP_BY_COLUMN` | ✅ | ✅ | ✅ |
+| `GROUP BY` several columns | `AGGREGATE_GROUP_BY_TUPLE` | ❌ | ❌ | ✅ |
+| `COUNT`, `COUNT(*)`, `COUNT(DISTINCT)` | `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT` | ✅ | ✅ | ✅ |
+| `MIN`, `MAX` | `FN_AGG_MIN`, `FN_AGG_MAX` | ✅ | ✅ | ✅ |
+| `SUM`, `SUM(DISTINCT)` | `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT` | ✅ | ✅ | ✅ |
+| `AVG`, `AVG(DISTINCT)` | `FN_AGG_AVG`, `FN_AGG_AVG_DISTINCT` | ✅ | ✅ | ✅ |
+| `HAVING` | `AGGREGATE_HAVING` | ✅ | ✅ | ✅ |
+| Inner, left outer, and right outer join on an equality | `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI` | ✅ | ✅ | ✅ |
+| Full outer join on an equality | `JOIN_TYPE_FULL_OUTER` | ❌ | ✅ | ✅ |
 
 ## What runs in Exasol
 
-Exasol runs these parts for every database: `ORDER BY`, `LIMIT`, `OFFSET`, `GROUP BY` over an expression, a join on a condition other than equality, and scalar functions and arithmetic, such as `"price" + 0`. A query with such a part still works, but Exasol fetches more rows.
+Exasol runs these parts for every database. A query with such a part still works, but Exasol fetches more rows.
+
+| Part of a query | Example |
+|-----------------|---------|
+| `ORDER BY` | `ORDER BY "price"` |
+| `LIMIT` and `OFFSET` | `LIMIT 10 OFFSET 5` |
+| `GROUP BY` over an expression | `GROUP BY "price" + 0` |
+| A join on a condition other than equality | `ON a."x" < b."y"` |
+| Scalar functions and arithmetic | `"price" + 0` |
 
 ## Floating-point sums follow the source
 
