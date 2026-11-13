@@ -19,20 +19,11 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 
 * *GIVEN* a virtual schema whose driver is `mysql`
 * *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_HAVING`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI`, `LIMIT`, and `LIMIT_WITH_OFFSET`
-* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, `JOIN_TYPE_FULL_OUTER`, or `JOIN_CONDITION_ALL`
+* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_HAVING`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_CONDITION_EQUI`, and `LIMIT`
+* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, `JOIN_TYPE_FULL_OUTER`, `JOIN_CONDITION_ALL`, or `LIMIT_WITH_OFFSET`
 * *AND* the array MUST NOT contain `ORDER_BY_COLUMN` or `ORDER_BY_EXPRESSION`
 * *AND* every entry MUST be a `MainCapability` constant, or carry the prefix `FN_PRED_`, `FN_AGG_`, or `LITERAL_`
 <!-- /DELTA:CHANGED -->
-
-<!-- DELTA:NEW -->
-### Scenario: A limit renders as LIMIT with its offset after the count
-
-* *GIVEN* a `pushdown` request carrying a `limit` with `numElements` 5, and a second one carrying `numElements` 5 and `offset` 2
-* *WHEN* the MySQL dialect renders each request
-* *THEN* the first statement MUST end with `LIMIT 5`
-* *AND* the second statement MUST end with `LIMIT 5 OFFSET 2`, a form MySQL's `SELECT` syntax accepts
-<!-- /DELTA:NEW -->
 
 <!-- DELTA:NEW -->
 ### Scenario: LIMIT pushdown reaches MySQL rather than Exasol

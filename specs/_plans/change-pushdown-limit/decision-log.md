@@ -12,23 +12,24 @@
 
 ### [1] A new framework feature owns limit delegation
 
-- **Decision:** `vs-adapter/pushdown-limit` owns the `LIMIT` and `LIMIT_WITH_OFFSET` capabilities, the `limit` element, and the query shapes a delegated limit must answer correctly. `vs-adapter/result-ordering` keeps the ordering capabilities and the rule that a limit after an `ORDER BY` stays in Exasol.
+- **Decision:** `vs-adapter/pushdown-limit` owns the advertised `LIMIT` capability, the withheld `LIMIT_WITH_OFFSET` capability, the `limit` element, and the query shapes a delegated limit must answer correctly. `vs-adapter/result-ordering` keeps the ordering capabilities and the rule that a limit after an `ORDER BY` stays in Exasol.
 - **Rationale:** The two change for different reasons. Ordering is withheld because the emitting-UDF transport carries no ordering guarantee. A limit with no ordering is a row-count fragment, like a filter, and the existing framework features are named after the protocol element they own (`pushdown-filter`, `pushdown-join`, `pushdown-aggregation`).
 - **Alternatives:** Add the limit scenarios to `result-ordering`. Rejected: its name and description would state an ordering decision while most of its scenarios state a delegation.
 - **Promotes to ADR:** no
 
-### [2] Advertise LIMIT_WITH_OFFSET although Exasol sends an offset only with ORDER BY
+### [2] [pr-feedback] Every OFFSET stays in Exasol: no dialect advertises LIMIT_WITH_OFFSET
 
-- **Decision:** Every dialect advertises and renders `LIMIT_WITH_OFFSET`, as the interview decided.
-- **Rationale:** Exasol's SQL reference accepts an `OFFSET` only together with `ORDER BY`, and ordering stays in Exasol, so Exasol applies every offset itself in this release. Advertising the capability costs one rendering arm per dialect and changes no query result, and add-pushdown-top-n needs the rendering.
-- **Alternatives:** Withhold `LIMIT_WITH_OFFSET` until add-pushdown-top-n. Not taken, because the interview chose to include it.
-- **Consequences:** No end-to-end query reaches the offset form. Unit tests pin each dialect's rendering, integration tests run each form at its source, and gate task 1.3 records whether Exasol ever sends an offset.
+- **Finding:** On PR #24, the user reversed the interview answer on `OFFSET` (`notes/pr-feedback.md`, Feedback 1). The interview chose to advertise and render `LIMIT_WITH_OFFSET` in all three dialects.
+- **Decision:** Every dialect advertises `LIMIT` only, and Exasol applies every `OFFSET` itself. A `limit` element that carries an `offset` fails with an error naming `limit` and `LIMIT_WITH_OFFSET`, so the adapter never renders a count without its offset.
+- **Rationale:** Exasol's SQL reference accepts an `OFFSET` only together with `ORDER BY`, and every `ORDER BY` stays in Exasol (`vs-adapter/result-ordering`). An advertised `LIMIT_WITH_OFFSET` would add one rendering arm per dialect, and tests for it, that no query reaches.
+- **Alternatives:** Advertise and render `LIMIT_WITH_OFFSET`, as the interview first chose. Rejected on the PR, because no query reaches the offset form.
+- **Consequences:** Every dialect renders the same `LIMIT n` clause, so no dialect overrides the shared rendering. add-pushdown-top-n decides `LIMIT_WITH_OFFSET` again if it delegates an `ORDER BY`. Gate task 1.3 still runs `LIMIT 3 OFFSET 1` with no `ORDER BY` as an observation and reports any request that carries an `offset` to the user.
 - **Promotes to ADR:** no
 
 ### [3] Measure the query shapes against PostgreSQL only
 
-- **Decision:** The query-shape scenarios of `vs-adapter/pushdown-limit` run against PostgreSQL, and the gate measurement runs against the probe adapter with the PostgreSQL capability set. The capability sets, the clause forms, the basic `LIMIT` reach, and the ordered-limit scenario run for every driver.
-- **Rationale:** Exasol's planner decides which request carries `limit` from the query and the advertised capabilities, not from the source. The three dialects advertise the same capabilities for every shape measured: filters, a one-column `GROUP BY`, `HAVING`, an inner equi-join, and both limiting capabilities. No dialect advertises `FN_ADD` or `AGGREGATE_GROUP_BY_EXPRESSION`, and no capability delegates an analytic function, so Exasol evaluates the shapes that keep their limit in Exasol itself for every dialect. Each dialect's clause placement is covered by its own unit tests.
+- **Decision:** The query-shape scenarios of `vs-adapter/pushdown-limit` run against PostgreSQL, and the gate measurement runs against the probe adapter with the PostgreSQL capability set. The capability sets, the limit rendering, the basic `LIMIT` reach, and the ordered-limit scenario run for every driver.
+- **Rationale:** Exasol's planner decides which request carries `limit` from the query and the advertised capabilities, not from the source. The three dialects advertise the same capabilities for every shape measured: filters, a one-column `GROUP BY`, `HAVING`, an inner equi-join, and `LIMIT`. No dialect advertises `FN_ADD` or `AGGREGATE_GROUP_BY_EXPRESSION`, and no capability delegates an analytic function, so Exasol evaluates the shapes that keep their limit in Exasol itself for every dialect. Each dialect's clause placement is covered by its own unit tests.
 - **Alternatives:** Repeat every shape per driver. Rejected: it triples the end-to-end run time without exercising a code path that differs between dialects.
 - **Promotes to ADR:** no
 

@@ -9,7 +9,7 @@ Separates the query fragment Exasol delegates from the target dialect's SQL text
 - `vs-adapter/driver-selection` resolves one dialect for both `getCapabilities` and `pushdown`, and each technology's advertised set and SQL live in its `<technology>-pushdown` feature.
 - Capability names are `virtual-schema-common-java`'s serialized forms, identical across dialects: `MainCapability` constants verbatim, `FN_PRED_<NAME>`, `FN_AGG_<NAME>`, `LITERAL_<NAME>`, and `FN_<NAME>`.
 - A `pushdown` request is parsed into a dialect-neutral query model of a select list, an optional filter, an optional aggregation with an optional `having` predicate, an optional limit, and a `from` tree, named in Exasol's protocol vocabulary rather than any target's syntax, which every dialect renders.
-- `vs-adapter/pushdown-aggregation` owns the aggregate, grouping, and `HAVING` shapes, `vs-adapter/pushdown-join` the `join_type` discriminator, `vs-adapter/result-ordering` the ordering capabilities, `vs-adapter/pushdown-limit` the limiting capabilities and the `limit` element, and `vs-adapter/pushdown-declared-types` the `EMITS` naming and declared-type contract.
+- `vs-adapter/pushdown-aggregation` owns the aggregate, grouping, and `HAVING` shapes, `vs-adapter/pushdown-join` the `join_type` discriminator, `vs-adapter/result-ordering` the ordering capabilities, `vs-adapter/pushdown-limit` the advertised `LIMIT`, the withheld `LIMIT_WITH_OFFSET`, and the `limit` element, and `vs-adapter/pushdown-declared-types` the `EMITS` naming and declared-type contract.
 <!-- /DELTA:CHANGED -->
 
 ## Scenarios
