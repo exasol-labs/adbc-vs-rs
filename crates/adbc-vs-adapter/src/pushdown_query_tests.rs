@@ -219,29 +219,37 @@ fn a_limit_element_is_refused() {
     );
 }
 
-/// `AGGREGATE_HAVING` is withheld for the reason the ordering capabilities
-/// are: Exasol applies the clause itself at no correctness cost, and no
-/// renderer here writes it. Reading past the element instead would return a
-/// statement Exasol believes has `HAVING` applied.
 #[test]
-fn a_having_element_is_refused() {
+fn a_having_element_parses_into_the_query_model() {
     let mut request = request(None);
+    request["pushdownRequest"]["aggregationType"] = json!("group_by");
+    request["pushdownRequest"]["groupBy"] = json!([{"type": "column", "name": "note"}]);
     request["pushdownRequest"]["having"] = json!({
         "type": "predicate_less",
         "left": {"type": "literal_exactnumeric", "value": "1"},
         "right": {"type": "function_aggregate", "name": "COUNT"},
     });
 
-    let message = parse_failure(&request);
+    let query = parse(&request, &namespace()).expect("parse must succeed");
 
-    assert!(
-        message.contains("having"),
-        "the error must name the refused element: {message}"
+    assert_eq!(
+        query.having,
+        Some(Predicate::Less(Comparison {
+            left: Expression::Literal(Literal::ExactNumeric("1".to_string())),
+            right: Expression::Aggregate(AggregateCall {
+                function: "COUNT".to_string(),
+                argument: None,
+                distinct: false,
+            }),
+        }))
     );
-    assert!(
-        message.contains("AGGREGATE_HAVING"),
-        "the error must name the withheld capability that gates the element: {message}"
-    );
+}
+
+#[test]
+fn an_absent_having_element_parses_to_no_having_predicate() {
+    let query = parse(&request(None), &namespace()).expect("parse must succeed");
+
+    assert_eq!(query.having, None);
 }
 
 #[test]
@@ -1637,5 +1645,48 @@ fn an_unqualified_column_ambiguous_between_two_tables_names_it_in_the_error() {
     assert!(
         message.contains("id"),
         "the error must name the ambiguous column: {message}"
+    );
+}
+
+#[test]
+fn aggregate_operand_conversion_follows_the_exasol_type() {
+    let typed = |declared_type| {
+        Expression::Column(ColumnRef {
+            name: "c".to_string(),
+            declared_type,
+            source_type: None,
+            table_name: None,
+            table_alias: None,
+        })
+    };
+    let predicate = Expression::Predicate(Box::new(Predicate::IsNull(column("id"))));
+
+    let conversions = [
+        typed(ExasolType::Boolean),
+        predicate,
+        typed(ExasolType::Varchar { size: 10 }),
+        typed(ExasolType::Char { size: 10 }),
+        Expression::Literal(Literal::String("5".to_string())),
+        typed(ExasolType::Double),
+        typed(ExasolType::Decimal {
+            precision: 12,
+            scale: 2,
+        }),
+        Expression::Literal(Literal::ExactNumeric("5".to_string())),
+    ]
+    .map(|operand| operand.aggregate_operand_conversion());
+
+    assert_eq!(
+        conversions,
+        [
+            Some(OperandConversion::Boolean),
+            Some(OperandConversion::Boolean),
+            Some(OperandConversion::Character),
+            Some(OperandConversion::Character),
+            Some(OperandConversion::Character),
+            None,
+            None,
+            None,
+        ]
     );
 }

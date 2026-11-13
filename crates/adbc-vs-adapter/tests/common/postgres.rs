@@ -58,6 +58,8 @@ const SEEDED_OBJECTS: &[&str] = &[
     "type_coverage",
     "text_overflow",
     "collated_names",
+    "measures",
+    "nan_measures",
 ];
 
 /// The types `docker/postgres/init.sql` seeds, which `information_schema.tables`

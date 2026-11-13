@@ -52,12 +52,8 @@ segment_count = 1
 # merge-joinable nor hash-joinable — measured, `ON "l"."k" < "r"."k"` is
 # rejected on 18.6 — and the equality `JOIN_CONDITION_EQUI` admits is both.
 #
-# `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, and `FN_AGG_AVG_DISTINCT`
-# stay absent, and their absence is a framework decision rather than a
-# PostgreSQL one: `vs-adapter/pushdown-aggregation` withholds all four for
-# every dialect, because a capability is advertised once per session and admits
-# every numeric operand, including `double precision`, whose sum is
-# order-dependent under a parallel plan.
+# FN_AGG_SUM and FN_AGG_AVG cast a real operand to double precision, because sum(real) adds in
+# single precision; a double precision sum follows the source's accumulation order (docs/pushdown.md).
 #
 # The names are `virtual-schema-common-java`'s protocol vocabulary. Nothing
 # validates them at build time — this list is the adapter's only list of
@@ -72,11 +68,16 @@ advertised = [
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
     "FN_AGG_COUNT_DISTINCT",
     "FN_AGG_MIN",
     "FN_AGG_MAX",
+    "FN_AGG_SUM",
+    "FN_AGG_SUM_DISTINCT",
+    "FN_AGG_AVG",
+    "FN_AGG_AVG_DISTINCT",
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",

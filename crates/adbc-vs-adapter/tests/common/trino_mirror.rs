@@ -21,6 +21,9 @@
 //! filled from the source's answers would agree with the source by
 //! construction and prove nothing.
 //!
+//! `measures` is mirrored whole, because the `SUM`, `AVG`, and `HAVING` tests read
+//! every column of it.
+//!
 //! Only `items`'s mapped columns are mirrored here. `items` also carries
 //! `code`, `bio`, and `active`, which `docker/trino/init.sql` documents as
 //! unmapped — no delegated query can reach them, so no mirror column
@@ -42,7 +45,7 @@
 //! text, which is what a reviewer diffs against `docker/trino/init.sql`.
 
 use super::exasol::Exasol;
-use super::mirror_table::{self, Column};
+use super::mirror_table::{self, column, Column};
 
 /// The schema holding the Trino mirror tables, distinct from
 /// [`super::mirror::SCHEMA`] and [`super::postgres_mirror::SCHEMA`] so no two
@@ -55,22 +58,10 @@ pub const SCHEMA: &str = "TR_MIRROR";
 /// `integer` maps to Exasol `DECIMAL(10,0)` and `varchar(n)` maps to Exasol
 /// `VARCHAR(n) UTF8`, per `trino_type_mapping::map_data_type`.
 const ITEM_COLUMNS: [Column; 4] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "category",
-        declaration: "VARCHAR(20) UTF8 NOT NULL",
-    },
-    Column {
-        name: "sort_key",
-        declaration: "VARCHAR(5) UTF8 NOT NULL",
-    },
-    Column {
-        name: "tag",
-        declaration: "VARCHAR(10) UTF8 NOT NULL",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("category", "VARCHAR(20) UTF8 NOT NULL"),
+    column("sort_key", "VARCHAR(5) UTF8 NOT NULL"),
+    column("tag", "VARCHAR(10) UTF8 NOT NULL"),
 ];
 
 /// The `items` rows, `(id, category, sort_key, tag)`, copied verbatim from
@@ -82,19 +73,6 @@ const ITEM_VALUES: &str = "\
     (4, 'Widget', 'B', 'ab '), \
     (5, 'cafe', 'a', 'ab'), \
     (6, 'café', 'C', 'ab!')";
-
-/// The mirrored `item_notes` columns, in `docker/trino/init.sql`'s column
-/// order. Both columns are mapped, so both are mirrored.
-const NOTE_COLUMNS: [Column; 2] = [
-    Column {
-        name: "item_id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "note",
-        declaration: "VARCHAR(50) UTF8 NOT NULL",
-    },
-];
 
 /// The `item_notes` rows, `(item_id, note)`, copied verbatim from
 /// `docker/trino/init.sql`'s `INSERT INTO item_notes` statement. `item_id` 1
@@ -108,7 +86,31 @@ const NOTE_VALUES: &str = "\
     (6, 'discontinued'), \
     (99, 'orphan')";
 
-/// Creates the Trino mirror schema and both tables, seeded from the literals
+/// The mirrored `measures` columns, in the order of the fixture's own `CREATE
+/// TABLE`: an `integer` is `DECIMAL(10,0)`, a `bigint` is `DECIMAL(19,0)`, a
+/// `decimal(12,4)` keeps its precision and scale, a `double` is `DOUBLE`, and a
+/// `varchar(n)` is `VARCHAR(n) UTF8`.
+const MEASURES_COLUMNS: [Column; 6] = [
+    column("id", "DECIMAL(10,0)"),
+    column("grp", "VARCHAR(10) UTF8"),
+    column("big_value", "DECIMAL(19,0)"),
+    column("decimal_value", "DECIMAL(12,4)"),
+    column("double_value", "DOUBLE"),
+    column("label", "VARCHAR(20) UTF8"),
+];
+
+/// The `measures` rows as Exasol reads them, copied by hand from
+/// `docker/trino/init.sql`. The empty `label` in row 3 is null to Exasol.
+const MEASURES_VALUES: &str = "\
+    (1, 'a', 10, 1.25, 0.5, '5'), \
+    (2, 'a', 20, 2.50, 1.5, '5.0'), \
+    (3, 'a', 20, 3.75, 1.5, ''), \
+    (4, 'b', 1, -0.25, 2.25, '7'), \
+    (5, 'b', 9223372036854775807, 0.25, 4.25, '7.5'), \
+    (6, 'b', NULL, NULL, NULL, NULL), \
+    (7, 'c', NULL, NULL, NULL, NULL)";
+
+/// Creates the Trino mirror schema and every table, seeded from the literals
 /// above.
 ///
 /// Replaces whatever an earlier run left behind rather than adding to it: the
@@ -116,9 +118,10 @@ const NOTE_VALUES: &str = "\
 /// fixture would make every differential comparison report a pushdown defect
 /// that is really a stale table.
 pub fn install(exasol: &Exasol) {
-    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"));
-    mirror_table::seed(exasol, SCHEMA, "items", &ITEM_COLUMNS, ITEM_VALUES);
-    mirror_table::seed(exasol, SCHEMA, "item_notes", &NOTE_COLUMNS, NOTE_VALUES);
+    let seed = mirror_table::seeder(exasol, SCHEMA);
+    seed("items", &ITEM_COLUMNS, ITEM_VALUES);
+    seed("item_notes", &mirror_table::NOTE_COLUMNS, NOTE_VALUES);
+    seed("measures", &MEASURES_COLUMNS, MEASURES_VALUES);
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {
@@ -165,6 +168,18 @@ mod tests {
                  mirror column would be compared against nothing: {declarations}"
             );
         }
+    }
+
+    #[test]
+    fn every_mirrored_measures_row_carries_one_value_per_declared_column() {
+        let counts = mirror_table::values_per_tuple(MEASURES_VALUES);
+
+        assert!(!counts.is_empty(), "`measures` must hold rows");
+        assert!(
+            counts.iter().all(|count| *count == MEASURES_COLUMNS.len()),
+            "every `measures` row must carry one value per declared column, or Exasol \
+             assigns them to the wrong columns: {counts:?}"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod adapter_notes;
 pub mod capabilities;
 pub mod create_schema;
+pub mod dialect_common;
 pub mod dispatch;
 pub mod emit_type;
 pub mod exa_type;

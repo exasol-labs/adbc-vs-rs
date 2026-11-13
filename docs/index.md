@@ -7,6 +7,7 @@
 - [Install & Set Up](install.md) - Requirements, the Script Language Container, the adapter scripts, and the driver
 - [Create a Virtual Schema](create-virtual-schema.md) - Connections, properties, and one example for each source
 - [How Does It Work](how-it-works.md) - The adapter and the scan UDF, and the [limits](how-it-works.md#limits) of `adbc-vs-rs`
+- [Pushdown](pushdown.md) - The parts of a query that run at the source, and the parts that run in Exasol
 - [Type Mapping](type-mapping.md) - The Exasol type of each source type, the columns that are left out, and the [known differences](type-mapping.md#known-differences) from Exasol's comparison
 
 ## Additional Resources

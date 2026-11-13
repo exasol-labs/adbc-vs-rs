@@ -7,13 +7,9 @@
 //! carries, that a `VARCHAR` entry there carries no `characterSet`, that a
 //! `TIMESTAMP` entry carries `fractionalSecondsPrecision`, and that a
 //! select-list predicate is declared `BOOLEAN` — against the deployed stack.
-//! The shipped `MySqlDialect` withholds `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`,
-//! `FN_AGG_AVG`, and `FN_AGG_AVG_DISTINCT` (decision-log
-//! `[implement-gate] Delegated AVG returns a different value from Exasol's
-//! own AVG`), so no query it delegates can make Exasol declare a `SUM` or
-//! `AVG` type. Measuring those declared types anyway needs an adapter that
-//! advertises the four withheld capabilities: a scratch adapter, not the
-//! adapter under test.
+//! Measuring those declared types needs no shipped dialect: the probe is a
+//! scratch adapter that advertises the aggregate capabilities itself, so the
+//! measurement is independent of what the adapter under test renders.
 //!
 //! This probe answers `createVirtualSchema` with one fixed table, `t`,
 //! carrying no MySQL connection at all — a schema over Exasol types made up

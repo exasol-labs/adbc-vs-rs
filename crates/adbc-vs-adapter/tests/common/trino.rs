@@ -84,6 +84,7 @@ const SEEDED_OBJECTS: &[&str] = &[
     "all_unmapped",
     "refresh_target",
     "orders_view",
+    "measures",
 ];
 
 /// The Trino instance under test.

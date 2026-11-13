@@ -27,7 +27,7 @@
 //! independently stated type set, asserted equal to the virtual table's by an
 //! end-to-end test, catches a mapping change instead of absorbing it.
 //!
-//! `items`, `items_bin`, `item_notes`, and `type_coverage` are mirrored, each
+//! `items`, `items_bin`, `item_notes`, `type_coverage`, and `measures` are mirrored, each
 //! with the values Exasol reads rather than the values MySQL stores: a `BIT`
 //! holds a `BOOLEAN`, a `FLOAT` its double-precision widening, a `CHAR`, `ENUM`,
 //! and `SET` a `CHAR`, a `TIME` a timestamp on 1970-01-01, and a `YEAR` a date.
@@ -38,7 +38,7 @@
 
 use super::exasol::Exasol;
 use super::items;
-use super::mirror_table::{self, Column};
+use super::mirror_table::{self, column, Column};
 use super::mysql;
 
 /// The schema holding the mirror tables. A differential test substitutes this
@@ -53,51 +53,14 @@ pub const SCHEMA: &str = "MIRROR";
 /// becomes `VARCHAR(n) UTF8`, and MySQL `CHAR(8)` becomes `CHAR(8) UTF8`, the
 /// fixed-width type Exasol pads.
 const ITEM_COLUMNS: [Column; 8] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "category",
-        declaration: "VARCHAR(50) UTF8 NOT NULL",
-    },
-    Column {
-        name: "code",
-        declaration: "CHAR(8) UTF8 NOT NULL",
-    },
-    Column {
-        name: "batch",
-        declaration: "VARCHAR(20) UTF8 NOT NULL",
-    },
-    Column {
-        name: "quantity",
-        declaration: "DECIMAL(9,0)",
-    },
-    Column {
-        name: "rank_key",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "tie_break",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "region",
-        declaration: "VARCHAR(30) UTF8 NOT NULL",
-    },
-];
-
-/// The mirrored `item_notes` columns, in the order
-/// [`items::note_values`](super::items::note_values) renders them.
-const NOTE_COLUMNS: [Column; 2] = [
-    Column {
-        name: "item_id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "note",
-        declaration: "VARCHAR(50) UTF8 NOT NULL",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("category", "VARCHAR(50) UTF8 NOT NULL"),
+    column("code", "CHAR(8) UTF8 NOT NULL"),
+    column("batch", "VARCHAR(20) UTF8 NOT NULL"),
+    column("quantity", "DECIMAL(9,0)"),
+    column("rank_key", "DECIMAL(10,0) NOT NULL"),
+    column("tie_break", "DECIMAL(10,0) NOT NULL"),
+    column("region", "VARCHAR(30) UTF8 NOT NULL"),
 ];
 
 /// The mirrored `type_coverage` columns, in the order of the fixture's own
@@ -111,142 +74,40 @@ const NOTE_COLUMNS: [Column; 2] = [
 /// MySQL's text, a `TIME` is a `TIMESTAMP` on 1970-01-01, and a `YEAR` is a
 /// `DATE`.
 const TYPE_COVERAGE_COLUMNS: [Column; 34] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "tiny_value",
-        declaration: "DECIMAL(3,0)",
-    },
-    Column {
-        name: "small_value",
-        declaration: "DECIMAL(5,0)",
-    },
-    Column {
-        name: "medium_value",
-        declaration: "DECIMAL(7,0)",
-    },
-    Column {
-        name: "int_value",
-        declaration: "DECIMAL(10,0)",
-    },
-    Column {
-        name: "big_value",
-        declaration: "DECIMAL(19,0)",
-    },
-    Column {
-        name: "utiny_value",
-        declaration: "DECIMAL(3,0)",
-    },
-    Column {
-        name: "usmall_value",
-        declaration: "DECIMAL(5,0)",
-    },
-    Column {
-        name: "umedium_value",
-        declaration: "DECIMAL(8,0)",
-    },
-    Column {
-        name: "uint_value",
-        declaration: "DECIMAL(10,0)",
-    },
-    Column {
-        name: "ubig_value",
-        declaration: "DECIMAL(20,0)",
-    },
-    Column {
-        name: "flag_value",
-        declaration: "DECIMAL(3,0)",
-    },
-    Column {
-        name: "approx",
-        declaration: "DOUBLE",
-    },
-    Column {
-        name: "wide_amount",
-        declaration: "VARCHAR(2000000) UTF8",
-    },
-    Column {
-        name: "bit_flag",
-        declaration: "BOOLEAN",
-    },
-    Column {
-        name: "bits",
-        declaration: "BOOLEAN",
-    },
-    Column {
-        name: "wide_bits",
-        declaration: "BOOLEAN",
-    },
-    Column {
-        name: "fixed",
-        declaration: "CHAR(10) UTF8",
-    },
-    Column {
-        name: "tiny_text",
-        declaration: "VARCHAR(255) UTF8",
-    },
-    Column {
-        name: "plain_text",
-        declaration: "VARCHAR(65535) UTF8",
-    },
-    Column {
-        name: "medium_text",
-        declaration: "VARCHAR(2000000) UTF8",
-    },
-    Column {
-        name: "long_text",
-        declaration: "VARCHAR(2000000) UTF8",
-    },
-    Column {
-        name: "latin_varchar",
-        declaration: "VARCHAR(20) UTF8",
-    },
-    Column {
-        name: "latin_char",
-        declaration: "CHAR(10) UTF8",
-    },
-    Column {
-        name: "latin_text",
-        declaration: "VARCHAR(65535) UTF8",
-    },
-    Column {
-        name: "kind",
-        declaration: "CHAR(5) UTF8",
-    },
-    Column {
-        name: "tags",
-        declaration: "CHAR(4) UTF8",
-    },
-    Column {
-        name: "doc",
-        declaration: "VARCHAR(2000000) UTF8",
-    },
-    Column {
-        name: "elapsed",
-        declaration: "TIMESTAMP(3)",
-    },
-    Column {
-        name: "y",
-        declaration: "DATE",
-    },
-    Column {
-        name: "at_second",
-        declaration: "TIMESTAMP(0)",
-    },
-    Column {
-        name: "at_micro",
-        declaration: "TIMESTAMP(6)",
-    },
-    Column {
-        name: "happened_at",
-        declaration: "TIMESTAMP(6)",
-    },
-    Column {
-        name: "local_at",
-        declaration: "TIMESTAMP(6)",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("tiny_value", "DECIMAL(3,0)"),
+    column("small_value", "DECIMAL(5,0)"),
+    column("medium_value", "DECIMAL(7,0)"),
+    column("int_value", "DECIMAL(10,0)"),
+    column("big_value", "DECIMAL(19,0)"),
+    column("utiny_value", "DECIMAL(3,0)"),
+    column("usmall_value", "DECIMAL(5,0)"),
+    column("umedium_value", "DECIMAL(8,0)"),
+    column("uint_value", "DECIMAL(10,0)"),
+    column("ubig_value", "DECIMAL(20,0)"),
+    column("flag_value", "DECIMAL(3,0)"),
+    column("approx", "DOUBLE"),
+    column("wide_amount", "VARCHAR(2000000) UTF8"),
+    column("bit_flag", "BOOLEAN"),
+    column("bits", "BOOLEAN"),
+    column("wide_bits", "BOOLEAN"),
+    column("fixed", "CHAR(10) UTF8"),
+    column("tiny_text", "VARCHAR(255) UTF8"),
+    column("plain_text", "VARCHAR(65535) UTF8"),
+    column("medium_text", "VARCHAR(2000000) UTF8"),
+    column("long_text", "VARCHAR(2000000) UTF8"),
+    column("latin_varchar", "VARCHAR(20) UTF8"),
+    column("latin_char", "CHAR(10) UTF8"),
+    column("latin_text", "VARCHAR(65535) UTF8"),
+    column("kind", "CHAR(5) UTF8"),
+    column("tags", "CHAR(4) UTF8"),
+    column("doc", "VARCHAR(2000000) UTF8"),
+    column("elapsed", "TIMESTAMP(3)"),
+    column("y", "DATE"),
+    column("at_second", "TIMESTAMP(0)"),
+    column("at_micro", "TIMESTAMP(6)"),
+    column("happened_at", "TIMESTAMP(6)"),
+    column("local_at", "TIMESTAMP(6)"),
 ];
 
 /// The `type_coverage` rows as Exasol reads them, copied by hand from
@@ -277,6 +138,17 @@ const TYPE_COVERAGE_VALUES: &str = "\
      NULL, NULL, NULL, \
      NULL, NULL, NULL, NULL, NULL, NULL)";
 
+/// The `measures` rows as Exasol reads them, copied by hand from
+/// `MEASURES_SCRIPT` in [`super::mysql`], every `BIT(1)` as a `BOOLEAN`.
+const MEASURES_VALUES: &str = "\
+    (1, 'a', 10, 1.25, 0.5, 0.25, TRUE, '5'), \
+    (2, 'a', 20, 2.50, 1.5, 0.5, FALSE, '5.0'), \
+    (3, 'a', 20, 3.75, 1.5, 0.5, TRUE, ''), \
+    (4, 'b', 1, -0.25, 2.25, 1.0, TRUE, '7'), \
+    (5, 'b', 9223372036854775807, 0.25, 4.25, 2.0, NULL, '7.5'), \
+    (6, 'b', NULL, NULL, NULL, NULL, FALSE, NULL), \
+    (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL)";
+
 /// Creates the mirror schema and its tables, seeded from [`items`](super::items)
 /// and the literals above.
 ///
@@ -285,35 +157,24 @@ const TYPE_COVERAGE_VALUES: &str = "\
 /// fixture would make every differential comparison report a pushdown defect
 /// that is really a stale table.
 pub fn install(exasol: &Exasol) {
-    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"));
-    mirror_table::seed(
-        exasol,
-        SCHEMA,
-        "items",
-        &ITEM_COLUMNS,
-        &items::mirror_values(),
-    );
-    mirror_table::seed(
-        exasol,
-        SCHEMA,
+    let seed = mirror_table::seeder(exasol, SCHEMA);
+    seed("items", &ITEM_COLUMNS, &items::mirror_values());
+    seed(
         mysql::CODE_POINT_ITEMS,
         &ITEM_COLUMNS,
         &items::code_point_mirror_values(),
     );
-    mirror_table::seed(
-        exasol,
-        SCHEMA,
+    seed(
         "item_notes",
-        &NOTE_COLUMNS,
+        &mirror_table::NOTE_COLUMNS,
         &items::note_values(),
     );
-    mirror_table::seed(
-        exasol,
-        SCHEMA,
+    seed(
         "type_coverage",
         &TYPE_COVERAGE_COLUMNS,
         TYPE_COVERAGE_VALUES,
     );
+    seed("measures", &mirror_table::MEASURES_COLUMNS, MEASURES_VALUES);
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {
@@ -359,34 +220,9 @@ mod tests {
         );
     }
 
-    /// The number of values each parenthesized tuple of `values` carries, read
-    /// outside single-quoted strings, whose own commas and parentheses are text.
-    fn values_per_tuple(values: &str) -> Vec<usize> {
-        let mut counts = Vec::new();
-        let mut in_string = false;
-        let mut open = false;
-        let mut commas = 0;
-        for character in values.chars() {
-            match character {
-                '\'' => in_string = !in_string,
-                '(' if !in_string => {
-                    open = true;
-                    commas = 0;
-                }
-                ',' if !in_string && open => commas += 1,
-                ')' if !in_string && open => {
-                    counts.push(commas + 1);
-                    open = false;
-                }
-                _ => {}
-            }
-        }
-        counts
-    }
-
     #[test]
     fn every_mirrored_row_carries_one_value_per_declared_column() {
-        for (table, columns, values) in [
+        mirror_table::assert_one_value_per_column(&[
             ("items", ITEM_COLUMNS.len(), items::mirror_values()),
             (
                 "items_bin",
@@ -398,15 +234,11 @@ mod tests {
                 TYPE_COVERAGE_COLUMNS.len(),
                 TYPE_COVERAGE_VALUES.to_string(),
             ),
-        ] {
-            let counts = values_per_tuple(&values);
-
-            assert!(!counts.is_empty(), "`{table}` must hold rows");
-            assert!(
-                counts.iter().all(|count| *count == columns),
-                "every `{table}` row must carry {columns} values, one per declared column, or \
-                 Exasol assigns the values to the wrong columns: {counts:?}"
-            );
-        }
+            (
+                "measures",
+                mirror_table::MEASURES_COLUMNS.len(),
+                MEASURES_VALUES.to_string(),
+            ),
+        ]);
     }
 }

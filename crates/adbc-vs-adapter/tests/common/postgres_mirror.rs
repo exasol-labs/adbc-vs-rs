@@ -23,7 +23,7 @@
 //! mirror filled from the source's answers would agree with the source by
 //! construction and prove nothing.
 //!
-//! `items`, `items_c`, `item_notes`, and `type_coverage` are mirrored, each
+//! `items`, `items_c`, `item_notes`, `type_coverage`, and `measures` are mirrored, each
 //! with the values Exasol reads rather than the values PostgreSQL stores: a
 //! column read as text holds PostgreSQL's text for the value, `money` and
 //! `real` hold a `DOUBLE`, a `bit` column holds a `BOOLEAN`, a `character(n)`
@@ -34,9 +34,9 @@
 //! failure of a constrained `numeric` rather than a row comparison, and
 //! `all_unmapped` has no mapped column for a delegated query to reach.
 //! `text_overflow` and `collated_names` are read for a failure and for
-//! PostgreSQL's own answer. `refresh_target`, the `order_names` view, and
-//! `"MixedCase"` are likewise unmirrored: none of the three is read
-//! differentially.
+//! PostgreSQL's own answer, and `nan_measures` for a `NaN` Exasol cannot hold.
+//! `refresh_target`, the `order_names` view, and `"MixedCase"` are likewise
+//! unmirrored: none of the three is read differentially.
 //!
 //! There is no Rust module shared between `docker/postgres/init.sql` and this
 //! one the way `super::items` is shared between `super::mysql` and
@@ -48,7 +48,7 @@
 //! text, which is what a reviewer diffs against `docker/postgres/init.sql`.
 
 use super::exasol::Exasol;
-use super::mirror_table::{self, Column};
+use super::mirror_table::{self, column, Column};
 
 /// The schema holding the PostgreSQL mirror tables, distinct from
 /// [`super::mirror::SCHEMA`] so the two sources' `items` tables never
@@ -63,46 +63,16 @@ pub const SCHEMA: &str = "PG_MIRROR";
 /// zone` to `TIMESTAMP(6)`, and `text`, `jsonb`, `bytea`, and `uuid` to
 /// `VARCHAR(2000000) UTF8`, per `postgres_type_mapping::map_data_type`.
 const ITEM_COLUMNS: [Column; 10] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "category",
-        declaration: "VARCHAR(20) UTF8 NOT NULL",
-    },
-    Column {
-        name: "sort_key",
-        declaration: "VARCHAR(5) UTF8 NOT NULL",
-    },
-    Column {
-        name: "tag",
-        declaration: "VARCHAR(10) UTF8 NOT NULL",
-    },
-    Column {
-        name: "code",
-        declaration: "CHAR(8) UTF8 NOT NULL",
-    },
-    Column {
-        name: "description",
-        declaration: "VARCHAR(2000000) UTF8 NOT NULL",
-    },
-    Column {
-        name: "details",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "photo",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "uid",
-        declaration: "VARCHAR(2000000) UTF8 NOT NULL",
-    },
-    Column {
-        name: "seen_at",
-        declaration: "TIMESTAMP(6) NOT NULL",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("category", "VARCHAR(20) UTF8 NOT NULL"),
+    column("sort_key", "VARCHAR(5) UTF8 NOT NULL"),
+    column("tag", "VARCHAR(10) UTF8 NOT NULL"),
+    column("code", "CHAR(8) UTF8 NOT NULL"),
+    column("description", "VARCHAR(2000000) UTF8 NOT NULL"),
+    column("details", "VARCHAR(2000000) UTF8 NULL"),
+    column("photo", "VARCHAR(2000000) UTF8 NULL"),
+    column("uid", "VARCHAR(2000000) UTF8 NOT NULL"),
+    column("seen_at", "TIMESTAMP(6) NOT NULL"),
 ];
 
 /// The `items` rows, `(id, category, sort_key, tag, code, description,
@@ -121,22 +91,10 @@ const ITEM_VALUES: &str = "\
 /// The mirrored `items_c` columns: `items`'s first four, which are the ones
 /// `items_c` carries.
 const ITEM_C_COLUMNS: [Column; 4] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "category",
-        declaration: "VARCHAR(20) UTF8 NOT NULL",
-    },
-    Column {
-        name: "sort_key",
-        declaration: "VARCHAR(5) UTF8 NOT NULL",
-    },
-    Column {
-        name: "tag",
-        declaration: "VARCHAR(10) UTF8 NOT NULL",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("category", "VARCHAR(20) UTF8 NOT NULL"),
+    column("sort_key", "VARCHAR(5) UTF8 NOT NULL"),
+    column("tag", "VARCHAR(10) UTF8 NOT NULL"),
 ];
 
 /// The `items_c` rows, `(id, category, sort_key, tag)`: the first four columns
@@ -151,19 +109,6 @@ const ITEM_C_VALUES: &str = "\
     (6, 'café', 'C', 'ab!'), \
     (7, 'widget', 'B', '5%x'), \
     (8, 'widget', 'B', '5\\yx')";
-
-/// The mirrored `item_notes` columns, in `docker/postgres/init.sql`'s column
-/// order. Both columns are mapped, so both are mirrored.
-const NOTE_COLUMNS: [Column; 2] = [
-    Column {
-        name: "item_id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "note",
-        declaration: "VARCHAR(50) UTF8 NOT NULL",
-    },
-];
 
 /// The `item_notes` rows, `(item_id, note)`, copied verbatim from
 /// `docker/postgres/init.sql`'s `INSERT INTO item_notes` statement.
@@ -187,118 +132,34 @@ const NOTE_VALUES: &str = "\
 /// `CHAR(5)`, a `character(3000)` is `VARCHAR(3000)` because Exasol's `CHAR`
 /// holds 2000 characters at most, and every timestamp keeps its own precision.
 const TYPE_COVERAGE_COLUMNS: [Column; 28] = [
-    Column {
-        name: "id",
-        declaration: "DECIMAL(10,0) NOT NULL",
-    },
-    Column {
-        name: "small_id",
-        declaration: "DECIMAL(5,0) NOT NULL",
-    },
-    Column {
-        name: "unbounded_amount",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "wide_amount",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "uid",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "doc_json",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "doc_jsonb",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "doc_xml",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "raw",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "span",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "host",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "price",
-        declaration: "DOUBLE NULL",
-    },
-    Column {
-        name: "approx",
-        declaration: "DOUBLE NULL",
-    },
-    Column {
-        name: "flag",
-        declaration: "BOOLEAN NULL",
-    },
-    Column {
-        name: "other_flag",
-        declaration: "BOOLEAN NULL",
-    },
-    Column {
-        name: "bit_flag",
-        declaration: "BOOLEAN NULL",
-    },
-    Column {
-        name: "bits",
-        declaration: "BOOLEAN NULL",
-    },
-    Column {
-        name: "varbits",
-        declaration: "VARCHAR(16) UTF8 NULL",
-    },
-    Column {
-        name: "fixed_code",
-        declaration: "CHAR(5) UTF8 NULL",
-    },
-    Column {
-        name: "label",
-        declaration: "VARCHAR(5) UTF8 NULL",
-    },
-    Column {
-        name: "wide_code",
-        declaration: "VARCHAR(3000) UTF8 NULL",
-    },
-    Column {
-        name: "feeling",
-        declaration: "VARCHAR(2000000) UTF8 NULL",
-    },
-    Column {
-        name: "clock",
-        declaration: "VARCHAR(100) UTF8 NULL",
-    },
-    Column {
-        name: "clock_tz",
-        declaration: "VARCHAR(100) UTF8 NULL",
-    },
-    Column {
-        name: "precise_at",
-        declaration: "TIMESTAMP(6) NULL",
-    },
-    Column {
-        name: "whole_at",
-        declaration: "TIMESTAMP(0) NULL",
-    },
-    Column {
-        name: "happened_at",
-        declaration: "TIMESTAMP(6) NULL",
-    },
-    Column {
-        name: "local_at",
-        declaration: "TIMESTAMP(6) NULL",
-    },
+    column("id", "DECIMAL(10,0) NOT NULL"),
+    column("small_id", "DECIMAL(5,0) NOT NULL"),
+    column("unbounded_amount", "VARCHAR(2000000) UTF8 NULL"),
+    column("wide_amount", "VARCHAR(2000000) UTF8 NULL"),
+    column("uid", "VARCHAR(2000000) UTF8 NULL"),
+    column("doc_json", "VARCHAR(2000000) UTF8 NULL"),
+    column("doc_jsonb", "VARCHAR(2000000) UTF8 NULL"),
+    column("doc_xml", "VARCHAR(2000000) UTF8 NULL"),
+    column("raw", "VARCHAR(2000000) UTF8 NULL"),
+    column("span", "VARCHAR(2000000) UTF8 NULL"),
+    column("host", "VARCHAR(2000000) UTF8 NULL"),
+    column("price", "DOUBLE NULL"),
+    column("approx", "DOUBLE NULL"),
+    column("flag", "BOOLEAN NULL"),
+    column("other_flag", "BOOLEAN NULL"),
+    column("bit_flag", "BOOLEAN NULL"),
+    column("bits", "BOOLEAN NULL"),
+    column("varbits", "VARCHAR(16) UTF8 NULL"),
+    column("fixed_code", "CHAR(5) UTF8 NULL"),
+    column("label", "VARCHAR(5) UTF8 NULL"),
+    column("wide_code", "VARCHAR(3000) UTF8 NULL"),
+    column("feeling", "VARCHAR(2000000) UTF8 NULL"),
+    column("clock", "VARCHAR(100) UTF8 NULL"),
+    column("clock_tz", "VARCHAR(100) UTF8 NULL"),
+    column("precise_at", "TIMESTAMP(6) NULL"),
+    column("whole_at", "TIMESTAMP(0) NULL"),
+    column("happened_at", "TIMESTAMP(6) NULL"),
+    column("local_at", "TIMESTAMP(6) NULL"),
 ];
 
 /// The `type_coverage` rows, in the column order above, as the values Exasol
@@ -343,6 +204,17 @@ fn type_coverage_values() -> String {
     TYPE_COVERAGE_VALUES.replace(HUGE_NUMERIC, &digits)
 }
 
+/// The `measures` rows as Exasol reads them, copied by hand from
+/// `docker/postgres/init.sql`.
+const MEASURES_VALUES: &str = "\
+    (1, 'a', 10, 1.25, 0.5, 0.25, TRUE, '5'), \
+    (2, 'a', 20, 2.50, 1.5, 0.5, FALSE, '5.0'), \
+    (3, 'a', 20, 3.75, 1.5, 0.5, TRUE, ''), \
+    (4, 'b', 1, -0.25, 2.25, 16777216, TRUE, '7'), \
+    (5, 'b', 9223372036854775807, 0.25, 4.25, 1, NULL, '7.5'), \
+    (6, 'b', NULL, NULL, NULL, NULL, FALSE, NULL), \
+    (7, 'c', NULL, NULL, NULL, NULL, NULL, NULL)";
+
 /// Creates the PostgreSQL mirror schema and every table, seeded from the
 /// literals above.
 ///
@@ -351,17 +223,16 @@ fn type_coverage_values() -> String {
 /// fixture would make every differential comparison report a pushdown defect
 /// that is really a stale table.
 pub fn install(exasol: &Exasol) {
-    exasol.execute(&format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"));
-    mirror_table::seed(exasol, SCHEMA, "items", &ITEM_COLUMNS, ITEM_VALUES);
-    mirror_table::seed(exasol, SCHEMA, "items_c", &ITEM_C_COLUMNS, ITEM_C_VALUES);
-    mirror_table::seed(exasol, SCHEMA, "item_notes", &NOTE_COLUMNS, NOTE_VALUES);
-    mirror_table::seed(
-        exasol,
-        SCHEMA,
+    let seed = mirror_table::seeder(exasol, SCHEMA);
+    seed("items", &ITEM_COLUMNS, ITEM_VALUES);
+    seed("items_c", &ITEM_C_COLUMNS, ITEM_C_VALUES);
+    seed("item_notes", &mirror_table::NOTE_COLUMNS, NOTE_VALUES);
+    seed(
         "type_coverage",
         &TYPE_COVERAGE_COLUMNS,
         &type_coverage_values(),
     );
+    seed("measures", &mirror_table::MEASURES_COLUMNS, MEASURES_VALUES);
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {
@@ -402,34 +273,9 @@ mod tests {
         );
     }
 
-    /// The number of values each parenthesized tuple of `values` carries, read
-    /// outside single-quoted strings, whose own commas and parentheses are text.
-    fn values_per_tuple(values: &str) -> Vec<usize> {
-        let mut counts = Vec::new();
-        let mut in_string = false;
-        let mut open = false;
-        let mut commas = 0;
-        for character in values.chars() {
-            match character {
-                '\'' => in_string = !in_string,
-                '(' if !in_string => {
-                    open = true;
-                    commas = 0;
-                }
-                ',' if !in_string && open => commas += 1,
-                ')' if !in_string && open => {
-                    counts.push(commas + 1);
-                    open = false;
-                }
-                _ => {}
-            }
-        }
-        counts
-    }
-
     #[test]
     fn every_mirrored_row_carries_one_value_per_declared_column() {
-        for (table, columns, values) in [
+        mirror_table::assert_one_value_per_column(&[
             ("items", ITEM_COLUMNS.len(), ITEM_VALUES.to_string()),
             ("items_c", ITEM_C_COLUMNS.len(), ITEM_C_VALUES.to_string()),
             (
@@ -437,16 +283,12 @@ mod tests {
                 TYPE_COVERAGE_COLUMNS.len(),
                 type_coverage_values(),
             ),
-        ] {
-            let counts = values_per_tuple(&values);
-
-            assert!(!counts.is_empty(), "`{table}` must hold rows");
-            assert!(
-                counts.iter().all(|count| *count == columns),
-                "every `{table}` row must carry {columns} values, one per declared column, or \
-                 Exasol assigns them to the wrong columns: {counts:?}"
-            );
-        }
+            (
+                "measures",
+                mirror_table::MEASURES_COLUMNS.len(),
+                MEASURES_VALUES.to_string(),
+            ),
+        ]);
     }
 
     #[test]

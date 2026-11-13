@@ -50,6 +50,11 @@ pub struct Query {
     /// `aggregationType` element, which is not an error: a query with no
     /// aggregation is ordinary.
     pub aggregation: Option<Aggregation>,
+    /// The `HAVING` clause Exasol delegated, from `pushdownRequest.having`,
+    /// read through the predicate parser a `filter` reads through. `None` when
+    /// the request carries no `having` element, which is not an error: a
+    /// query with no `HAVING` clause is ordinary.
+    pub having: Option<Predicate>,
     pub from: FromClause,
 }
 
@@ -107,6 +112,39 @@ pub enum Expression {
     /// list rather than only `WHERE`, or an operand, as `b = (d > 5)` arrives.
     /// Declared `BOOLEAN`.
     Predicate(Box<Predicate>),
+}
+
+/// How Exasol converts a `SUM` or `AVG` operand before it aggregates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandConversion {
+    /// Exasol reads `true` as 1 and `false` as 0.
+    Boolean,
+    /// Exasol reads the text as a number, and an empty string as null.
+    Character,
+}
+
+impl Expression {
+    /// The conversion Exasol applies to this expression when it is the operand
+    /// of a `SUM` or `AVG`, or `None` when the operand is already numeric.
+    ///
+    /// It reproduces Exasol's implicit conversion of the emitted value, so a
+    /// delegated aggregate sums what Exasol would sum. It is not a read
+    /// expression: that one converts a source type for the scan, and this one
+    /// follows the Exasol type the operand declares.
+    pub fn aggregate_operand_conversion(&self) -> Option<OperandConversion> {
+        match self {
+            Expression::Column(column) => match column.declared_type {
+                ExasolType::Boolean => Some(OperandConversion::Boolean),
+                ExasolType::Varchar { .. } | ExasolType::Char { .. } => {
+                    Some(OperandConversion::Character)
+                }
+                _ => None,
+            },
+            Expression::Predicate(_) => Some(OperandConversion::Boolean),
+            Expression::Literal(Literal::String(_)) => Some(OperandConversion::Character),
+            _ => None,
+        }
+    }
 }
 
 /// A reference to a column of a table in the `from` tree, carrying the
@@ -310,6 +348,7 @@ pub fn parse(request: &Value, namespace: &SourceQualifier) -> Result<Query, Stri
         select_list: read_select_list(request, &tables)?,
         filter: read_filter(request, &tables)?,
         aggregation: read_aggregation(request, &tables)?,
+        having: read_having(request, &tables)?,
         from: read_from(request, &tables, namespace)?,
     })
 }
@@ -319,21 +358,18 @@ pub fn parse(request: &Value, namespace: &SourceQualifier) -> Result<Query, Stri
 ///
 /// `orderBy` and `limit` stay in Exasol because `vs-adapter/result-ordering`
 /// withholds their capabilities: a script-emitted derived table carries no
-/// ordering guarantee once an operator sits above the scan. `having` stays for
-/// the reason decision `[10]` withholds `AGGREGATE_HAVING`: Exasol applies the
-/// clause itself at no correctness cost, and no renderer here writes it.
+/// ordering guarantee once an operator sits above the scan.
 ///
-/// All three are the same case. Exasol sends an element only when the matching
+/// Both are the same case. Exasol sends an element only when the matching
 /// capability was advertised, so an element arriving here means the advertised
 /// set and this list have drifted apart, and reading past it would return a
 /// statement Exasol believes carries the clause — the wrong-rows failure mode
 /// this codebase never accepts. The error names the capabilities rather than
 /// the clause alone, because that set is the one place a change would have to
 /// be made for the element to be legal.
-const UNDELEGATED_ELEMENTS: [(&str, &str); 3] = [
+const UNDELEGATED_ELEMENTS: [(&str, &str); 2] = [
     ("orderBy", "`ORDER_BY_COLUMN` and `ORDER_BY_EXPRESSION`"),
     ("limit", "`LIMIT` and `LIMIT_WITH_OFFSET`"),
-    ("having", "`AGGREGATE_HAVING`"),
 ];
 
 fn reject_undelegated_elements(request: &Value) -> Result<(), String> {
@@ -757,6 +793,13 @@ fn project_column(column: &InvolvedColumn) -> SelectItem {
 fn read_filter(request: &Value, tables: &[InvolvedTable]) -> Result<Option<Predicate>, String> {
     match request.pointer("/pushdownRequest/filter") {
         Some(filter) => read_predicate(filter, tables).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn read_having(request: &Value, tables: &[InvolvedTable]) -> Result<Option<Predicate>, String> {
+    match request.pointer("/pushdownRequest/having") {
+        Some(having) => read_predicate(having, tables).map(Some),
         None => Ok(None),
     }
 }

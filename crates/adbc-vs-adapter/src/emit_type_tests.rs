@@ -52,8 +52,20 @@ fn declared_types_come_from_select_list_data_types() {
     let select_list = json!([
         {"type": "column", "name": "id"},
         {"type": "column", "name": "note"},
+        {"type": "function_aggregate", "name": "SUM", "arguments": [{"type": "column", "name": "total"}]},
+        {"type": "function_aggregate", "name": "SUM", "distinct": true, "arguments": [{"type": "column", "name": "total"}]},
+        {"type": "function_aggregate", "name": "AVG", "arguments": [{"type": "column", "name": "total"}]},
+        {"type": "function_aggregate", "name": "AVG", "distinct": true, "arguments": [{"type": "column", "name": "total"}]},
     ]);
-    let types = json!([{"type": "VARCHAR", "size": 9}, {"type": "DATE"}]);
+    let sum_type = json!({"type": "DECIMAL", "precision": 23, "scale": 4});
+    let types = json!([
+        {"type": "VARCHAR", "size": 9},
+        {"type": "DATE"},
+        sum_type,
+        sum_type,
+        {"type": "DOUBLE"},
+        {"type": "DOUBLE"},
+    ]);
 
     let query = parse(Some(select_list), Some(types)).expect("parse must succeed");
 
@@ -64,6 +76,20 @@ fn declared_types_come_from_select_list_data_types() {
          rather than from involvedTables"
     );
     assert_eq!(query.select_list[1].declared_type, ExasolType::Date);
+    let declared: Vec<ExasolType> = query.select_list[2..]
+        .iter()
+        .map(|item| item.declared_type)
+        .collect();
+    let sum = ExasolType::Decimal {
+        precision: 23,
+        scale: 4,
+    };
+    assert_eq!(
+        declared,
+        vec![sum, sum, ExasolType::Double, ExasolType::Double],
+        "`SUM`, `SUM(DISTINCT)`, `AVG`, and `AVG(DISTINCT)` take their declared type from \
+         selectListDataTypes"
+    );
 }
 
 #[test]

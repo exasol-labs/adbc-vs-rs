@@ -1,14 +1,18 @@
 use serde_json::{json, Value};
 
 use super::*;
+use adbc_vs_scan::driver::Driver;
+
 use crate::adapter_notes::SourceQualifier;
 use crate::dialect_test_fixtures as fixtures;
 use crate::dialect_test_fixtures::{
-    column as column_operand, equal, filtered_request, less, numeric_literal, orders_columns,
-    request, string_literal,
+    aggregate, boolean_type, column as column_operand, count_type, distinct, equal,
+    filtered_request, grouped_request, id_type, join_request, joined_column, less, note_type,
+    numeric_literal, orders_columns, orders_to_customers, request, string_literal, sum_type,
+    typed_request,
 };
 use crate::exa_type::ExasolType;
-use crate::pushdown_query;
+use crate::pushdown_query::{self, Expression, FromClause, Literal, Query, SourceTable};
 
 const DATABASE: &str = "shop";
 
@@ -193,28 +197,9 @@ fn string_literal_renders_as_hex() {
 
 #[test]
 fn temporal_literals_render_typed() {
-    let columns = json!([
-        {"name": "shipped", "dataType": {"type": "DATE"}},
-        {"name": "logged", "dataType": {"type": "TIMESTAMP"}},
-    ]);
-
-    let clause = where_clause_over(
-        columns,
-        json!({
-            "type": "predicate_and",
-            "expressions": [
-                equal(column_operand("shipped"), json!({"type": "literal_date", "value": "2015-12-01"})),
-                equal(
-                    column_operand("logged"),
-                    json!({"type": "literal_timestamp", "value": "2015-12-01 12:01:01.123"}),
-                ),
-            ],
-        }),
-    );
-
-    assert_eq!(
-        clause,
-        "((`shipped` = DATE '2015-12-01') AND (`logged` = TIMESTAMP '2015-12-01 12:01:01.123'))"
+    fixtures::assert_temporal_literals_render_typed(
+        &where_clause_over,
+        "((`shipped` = DATE '2015-12-01') AND (`logged` = TIMESTAMP '2015-12-01 12:01:01.123'))",
     );
 }
 
@@ -310,25 +295,7 @@ fn between_and_in_keep_operand_order() {
 /// dropped the node instead would hand Exasol rows it never asked for.
 #[test]
 fn a_predicate_with_no_operand_fails_rather_than_rendering_an_empty_group() {
-    for (filter, named) in [
-        (json!({"type": "predicate_and", "expressions": []}), "AND"),
-        (json!({"type": "predicate_or", "expressions": []}), "OR"),
-        (
-            json!({
-                "type": "predicate_in_constlist",
-                "expression": column_operand("id"),
-                "arguments": [],
-            }),
-            "IN",
-        ),
-    ] {
-        let error = filter_render_error(filter);
-
-        assert!(
-            error.contains(named),
-            "the error must name the empty MySQL form: {error}"
-        );
-    }
+    fixtures::assert_empty_predicate_groups_fail(&filter_render_error, "MySQL");
 }
 
 /// The transition case between empty (refused above) and multi-operand
@@ -434,58 +401,12 @@ fn backtick_is_doubled() {
 
 #[test]
 fn a_query_projecting_nothing_fails_rather_than_rendering_an_empty_projection() {
-    let query = Query {
-        select_list: vec![],
-        filter: None,
-        aggregation: None,
-        from: FromClause::Table(SourceTable {
-            namespace: SourceQualifier::single(DATABASE),
-            name: "orders".to_string(),
-            alias: None,
-        }),
-    };
-
-    let error = MySqlDialect
-        .render(&query)
-        .expect_err("a query projecting no column must fail");
+    let error = fixtures::empty_projection_error(&MySqlDialect, namespace());
 
     assert!(
-        error.to_string().contains("select list"),
+        error.contains("select list"),
         "the error must name the empty part of the query: {error}"
     );
-}
-
-/// A `function_aggregate` select-list entry over at most one argument.
-/// `None` is the `COUNT(*)` shape: Exasol sends it carrying no `arguments`
-/// at all, which is how it is told apart from `COUNT(column)`.
-fn aggregate(function: &str, argument: Option<Value>) -> Value {
-    let mut entry = json!({"type": "function_aggregate", "name": function});
-    if let Some(argument) = argument {
-        entry["arguments"] = json!([argument]);
-    }
-    entry
-}
-
-/// A `pushdown` request over `orders` carrying `select_list` and the
-/// `selectListDataTypes` Exasol supplies for it, which is the only type
-/// source an aggregate entry has.
-fn typed_request(select_list: Value, data_types: Value) -> Value {
-    let mut request = request(orders_columns(), Some(select_list));
-    request["pushdownRequest"]["selectListDataTypes"] = data_types;
-    request
-}
-
-/// The type Exasol supplies for `COUNT` over any operand, measured on
-/// Exasol 2025.2.1.
-fn count_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 18, "scale": 0})
-}
-
-/// The type Exasol supplies for `MIN` or `MAX` over `note`, a
-/// `VARCHAR(100)` — the operand's own type, spelled without the
-/// `characterSet` field `involvedTables[].columns[].dataType` carries.
-fn note_type() -> Value {
-    json!({"type": "VARCHAR", "size": 100})
 }
 
 /// A single-group aggregation groups by nothing, which the exact match this
@@ -501,22 +422,6 @@ fn single_group_renders_without_group_by() {
     let sql = render_statement(&request);
 
     assert_eq!(sql, "SELECT COUNT(`total`) FROM `shop`.`orders`");
-}
-
-/// The type Exasol supplies for `id`, a `DECIMAL(19,0)` — the operand's own
-/// type, as `MIN`, `MAX`, and a projected grouping column all carry.
-fn id_type() -> Value {
-    json!({"type": "DECIMAL", "precision": 19, "scale": 0})
-}
-
-/// A `pushdown` request over `orders` whose `aggregationType` is `group_by`
-/// over `group_by`, the shape whose `GROUP BY` clause and select list MySQL's
-/// `ONLY_FULL_GROUP_BY` reads together.
-fn grouped_request(select_list: Value, data_types: Value, group_by: Value) -> Value {
-    let mut request = typed_request(select_list, data_types);
-    request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = group_by;
-    request
 }
 
 /// Exasol orders `groupBy` independently of `selectList`, so the two orders
@@ -597,13 +502,6 @@ fn a_joined_grouping_key_is_recognized_however_the_request_qualifies_its_occurre
     );
 }
 
-/// An aggregate entry with `distinct` set, the shape Exasol sends for
-/// `COUNT(DISTINCT "c")` and `MIN(DISTINCT "c")`.
-fn distinct(mut entry: Value) -> Value {
-    entry["distinct"] = json!(true);
-    entry
-}
-
 /// `DISTINCT` reaches the statement as a keyword before the operand, whatever
 /// the function and the operand's type. `COUNT` over the same column without
 /// `distinct` renders no keyword. The exact match carries no `COLLATE`.
@@ -647,51 +545,143 @@ fn count_star_differs_from_count_column() {
 /// request arrives in must not reach the generated statement.
 #[test]
 fn mixed_case_function_names_render_identically() {
-    let entries = |count: &str, min: &str| {
-        json!([
-            aggregate(count, Some(column_operand("total"))),
-            aggregate(min, Some(column_operand("note"))),
-        ])
-    };
-    let types = json!([count_type(), note_type()]);
-
-    let lower_case = render_statement(&typed_request(entries("count", "min"), types.clone()));
-    let upper_case = render_statement(&typed_request(entries("COUNT", "MIN"), types));
-
-    assert_eq!(
-        lower_case, upper_case,
-        "two requests differing only in the aggregate function's case must render identically"
-    );
-    assert_eq!(
-        lower_case,
-        "SELECT COUNT(`total`), MIN(`note`) FROM `shop`.`orders`"
+    fixtures::assert_mixed_case_renders_identically(
+        &render_statement,
+        "total",
+        "SELECT COUNT(`total`), MIN(`note`), SUM(`total`), \
+         (CAST(SUM(`total`) AS DOUBLE) / COUNT(`total`)) FROM `shop`.`orders`",
     );
 }
 
 /// Rendering the aggregate's argument alone would leave Exasol aggregating
-/// nothing and returning the wrong value, so an unknown function fails. `AVG`
-/// and `SUM` fail the same way: both are withheld capabilities, so neither
-/// reaches `renderable_function` from an advertising Exasol, but a request
-/// that somehow sends one anyway must still fail naming it rather than
-/// rendering an argument Exasol never asked to aggregate.
+/// nothing and returning the wrong value, so an unknown function fails.
 #[test]
 fn unrenderable_aggregate_named_in_error() {
-    for (function, named) in [
-        ("STDDEV", "STDDEV"),
-        ("stddev", "STDDEV"),
-        ("AVG", "AVG"),
-        ("SUM", "SUM"),
-    ] {
-        let error = render_error(&typed_request(
-            json!([aggregate(function, Some(column_operand("total")))]),
-            json!([{"type": "DOUBLE"}]),
-        ));
+    fixtures::assert_unknown_aggregate_named(&render_error);
+}
 
-        assert!(
-            error.contains(named),
-            "the error must name the aggregate function it received: {error}"
-        );
-    }
+/// `vs-adapter/pushdown-aggregation`, scenario "SUM renders as the source's
+/// SUM over the operand": MySQL's own `SUM` over the column, with `DISTINCT`
+/// before the operand exactly when the request sets it.
+#[test]
+fn sum_renders_with_and_without_distinct() {
+    let sql = render_statement(&fixtures::sum_request());
+
+    assert_eq!(
+        sql,
+        "SELECT SUM(`total`), SUM(DISTINCT `total`) FROM `shop`.`orders`"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "AVG renders as the
+/// double-precision quotient of SUM and COUNT": the quotient is parenthesized,
+/// both halves carry `DISTINCT` for `AVG(DISTINCT)`, and MySQL's own `AVG` is
+/// never rendered.
+#[test]
+fn avg_renders_as_the_double_quotient_of_sum_and_count() {
+    fixtures::assert_avg_renders_as_quotient(
+        &render_statement,
+        "SELECT (CAST(SUM(`total`) AS DOUBLE) / COUNT(`total`)), \
+         (CAST(SUM(DISTINCT `total`) AS DOUBLE) / COUNT(DISTINCT `total`)) \
+         FROM `shop`.`orders`",
+        "MySQL",
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A BOOLEAN or character SUM and
+/// AVG operand renders converted as Exasol converts it": MySQL evaluates a
+/// boolean as 1 or 0, so a `BOOLEAN` column and a predicate render unchanged,
+/// and a character column or literal reads through `NULLIF` and a `DOUBLE`
+/// cast, with the `AVG` count taking the operand before the cast.
+#[test]
+fn sum_and_avg_convert_boolean_and_character_operands() {
+    let mut entries = vec![(
+        aggregate(
+            "SUM",
+            Some(equal(column_operand("id"), numeric_literal("2"))),
+        ),
+        sum_type(),
+    )];
+    entries.extend(fixtures::character_sum_avg_entries());
+    let sql = render_statement(&fixtures::typed_entries_request(entries));
+
+    assert_eq!(
+        sql,
+        "SELECT SUM((`id` = 2)), SUM(CAST(NULLIF(`note`, '') AS DOUBLE)), \
+         SUM(DISTINCT CAST(NULLIF(`note`, '') AS DOUBLE)), \
+         (CAST(SUM(CAST(NULLIF(`note`, '') AS DOUBLE)) AS DOUBLE) / COUNT(NULLIF(`note`, ''))), \
+         (CAST(SUM(DISTINCT CAST(NULLIF(`note`, '') AS DOUBLE)) AS DOUBLE) \
+         / COUNT(DISTINCT NULLIF(`note`, ''))), \
+         SUM(CAST(NULLIF(_utf8mb4 X'35', '') AS DOUBLE)) FROM `shop`.`orders`"
+    );
+}
+
+/// A `BOOLEAN` column reads through its own read expression and then renders
+/// unchanged, since MySQL sums the 1 or 0 a comparison yields.
+#[test]
+fn a_boolean_column_operand_of_sum_reads_through_its_read_expression() {
+    let sql = render_statement(&fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([
+            fixtures::aggregate_over("SUM", "flag", false),
+            fixtures::aggregate_over("SUM", "active", true),
+        ]),
+        json!([sum_type(), sum_type()]),
+        "id",
+    ));
+
+    assert_eq!(
+        sql,
+        "SELECT SUM((`flag` <> 0)), SUM(DISTINCT `active`) FROM `shop`.`orders` GROUP BY `id`"
+    );
+}
+
+/// `vs-adapter/pushdown-aggregation`, scenario "A having element renders as a
+/// HAVING clause": the clause follows `GROUP BY`, and a single-group request
+/// carries the clause with no `GROUP BY`.
+#[test]
+fn having_renders_after_group_by_and_on_a_single_group() {
+    fixtures::assert_having_renders(
+        &render_statement,
+        [
+            "SELECT `note`, COUNT(*) FROM `shop`.`orders` GROUP BY `note` HAVING (12 < COUNT(*))",
+            "SELECT COUNT(*) FROM `shop`.`orders` HAVING (12 < COUNT(*))",
+        ],
+    );
+}
+
+/// `vs-adapter/mysql-pushdown`, scenario "A HAVING clause reads a grouped
+/// converted column the way the select list does": `GROUP BY` names the read
+/// expression, `HAVING` reads the column inside `ANY_VALUE`, and a grouped
+/// column with no read expression stays bare in both.
+#[test]
+fn having_reads_a_grouped_converted_column_inside_any_value() {
+    let mut converted = fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([column_operand("uid"), aggregate("COUNT", None)]),
+        json!([{"type": "VARCHAR", "size": 36}, count_type()]),
+        "uid",
+    );
+    converted["pushdownRequest"]["having"] = equal(column_operand("uid"), string_literal("a"));
+
+    let mut bare = fixtures::converted_column_grouped_request(
+        CONVERTED_NOTES,
+        json!([column_operand("note"), aggregate("COUNT", None)]),
+        json!([note_type(), count_type()]),
+        "note",
+    );
+    bare["pushdownRequest"]["having"] = equal(column_operand("note"), string_literal("a"));
+
+    assert_eq!(
+        render_statement(&converted),
+        "SELECT ANY_VALUE(CAST(`uid` AS CHAR)), COUNT(*) FROM `shop`.`orders` \
+         GROUP BY CAST(`uid` AS CHAR) HAVING (ANY_VALUE(CAST(`uid` AS CHAR)) = _utf8mb4 X'61')"
+    );
+    assert_eq!(
+        render_statement(&bare),
+        "SELECT `note`, COUNT(*) FROM `shop`.`orders` GROUP BY `note` \
+         HAVING (`note` = _utf8mb4 X'61')"
+    );
 }
 
 /// `COUNT(*)` is the only aggregate MySQL writes over no argument, and it
@@ -700,27 +690,7 @@ fn unrenderable_aggregate_named_in_error() {
 /// count every row where it asked for the distinct values.
 #[test]
 fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
-    let min_error = render_error(&typed_request(
-        json!([aggregate("MIN", None)]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        min_error.contains("MIN"),
-        "the error must name the aggregate that carries no argument: {min_error}"
-    );
-
-    let mut distinct_count = aggregate("COUNT", None);
-    distinct_count["distinct"] = json!(true);
-    let count_error = render_error(&typed_request(
-        json!([distinct_count]),
-        json!([count_type()]),
-    ));
-
-    assert!(
-        count_error.contains("DISTINCT"),
-        "the error must name the fragment MySQL has no form for: {count_error}"
-    );
+    fixtures::assert_argumentless_aggregates_fail(&render_error, "MySQL");
 }
 
 /// MySQL writes no empty `GROUP BY` clause, and a renderer that dropped the
@@ -728,22 +698,7 @@ fn an_aggregate_carrying_no_argument_fails_unless_it_is_count_star() {
 /// asked for one row per group.
 #[test]
 fn an_aggregation_grouping_by_no_column_fails_rather_than_rendering_an_empty_clause() {
-    let mut request = typed_request(json!([aggregate("COUNT", None)]), json!([count_type()]));
-    request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = json!([]);
-
-    let error = render_error(&request);
-
-    assert!(
-        error.contains("GROUP BY"),
-        "the error must name the empty MySQL clause: {error}"
-    );
-}
-
-/// The type Exasol supplies for a select-list predicate, measured on Exasol
-/// 2025.2.1: a delegated predicate emits one `BOOLEAN` column.
-fn boolean_type() -> Value {
-    json!({"type": "BOOLEAN"})
+    fixtures::assert_empty_group_by_fails(&render_error, "MySQL");
 }
 
 /// Every predicate kind this dialect renders over a character operand, each
@@ -917,6 +872,7 @@ fn a_literal_select_list_entry_renders_through_the_literal_renderer() {
         }],
         filter: None,
         aggregation: None,
+        having: None,
         from: FromClause::Table(SourceTable {
             namespace: SourceQualifier::single(DATABASE),
             name: "orders".to_string(),
@@ -947,279 +903,7 @@ fn a_literal_select_list_entry_renders_through_the_literal_renderer() {
 /// arm as the fixture it is true of, so a changed fixture cannot leave behind
 /// a fragment that no longer follows from it.
 pub(crate) fn query_exercising(capability: &str) -> (&'static str, Query) {
-    use fixtures::{
-        aggregate_call, aggregate_item, count_star, date_column, decimal_column, id_equals,
-        numeric, select_list, timestamp_column, varchar_column,
-    };
-
-    fn from() -> FromClause {
-        fixtures::from(&namespace())
-    }
-
-    fn filtered(filter: Predicate) -> Query {
-        fixtures::filtered(&namespace(), filter)
-    }
-
-    fn aggregated(select_list: Vec<pushdown_query::SelectItem>) -> Query {
-        fixtures::aggregated(&namespace(), select_list)
-    }
-
-    fn joined_query(join_type: &str) -> Query {
-        fixtures::joined_query(&namespace(), join_type)
-    }
-
-    match capability {
-        "SELECTLIST_PROJECTION" => (
-            "SELECT `id` FROM",
-            Query {
-                select_list: select_list(),
-                filter: None,
-                aggregation: None,
-                from: from(),
-            },
-        ),
-        "SELECTLIST_EXPRESSIONS" => (
-            "SELECT (`id` = 2)",
-            Query {
-                select_list: vec![pushdown_query::SelectItem {
-                    expression: Expression::Predicate(Box::new(id_equals(numeric("2")))),
-                    declared_type: ExasolType::Boolean,
-                }],
-                filter: None,
-                aggregation: None,
-                from: from(),
-            },
-        ),
-        "FILTER_EXPRESSIONS" => ("WHERE (`id` = 2)", filtered(id_equals(numeric("2")))),
-        "AGGREGATE_SINGLE_GROUP" => (
-            "SELECT COUNT(*) FROM",
-            aggregated(vec![aggregate_item(count_star())]),
-        ),
-        "AGGREGATE_GROUP_BY_COLUMN" => (
-            "GROUP BY `id`",
-            Query {
-                select_list: select_list(),
-                filter: None,
-                aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![decimal_column()])),
-                from: from(),
-            },
-        ),
-        "FN_AGG_COUNT" => (
-            "COUNT(`id`)",
-            aggregated(vec![aggregate_item(aggregate_call(
-                "COUNT",
-                Expression::Column(decimal_column()),
-                false,
-            ))]),
-        ),
-        "FN_AGG_COUNT_STAR" => ("COUNT(*)", aggregated(vec![aggregate_item(count_star())])),
-        "FN_AGG_COUNT_DISTINCT" => (
-            "COUNT(DISTINCT `id`)",
-            aggregated(vec![aggregate_item(aggregate_call(
-                "COUNT",
-                Expression::Column(decimal_column()),
-                true,
-            ))]),
-        ),
-        "FN_AGG_MIN" => (
-            "MIN(`id`)",
-            aggregated(vec![aggregate_item(aggregate_call(
-                "MIN",
-                Expression::Column(decimal_column()),
-                false,
-            ))]),
-        ),
-        "FN_AGG_MAX" => (
-            "MAX(`id`)",
-            aggregated(vec![aggregate_item(aggregate_call(
-                "MAX",
-                Expression::Column(decimal_column()),
-                false,
-            ))]),
-        ),
-        "FN_PRED_AND" => (
-            "((`id` = 1) AND (`id` = 2))",
-            filtered(Predicate::And(vec![
-                id_equals(numeric("1")),
-                id_equals(numeric("2")),
-            ])),
-        ),
-        "FN_PRED_OR" => (
-            "((`id` = 1) OR (`id` = 2))",
-            filtered(Predicate::Or(vec![
-                id_equals(numeric("1")),
-                id_equals(numeric("2")),
-            ])),
-        ),
-        "FN_PRED_NOT" => (
-            "(NOT (`id` = 2))",
-            filtered(Predicate::Not(Box::new(id_equals(numeric("2"))))),
-        ),
-        "FN_PRED_EQUAL" => ("(`id` = 2)", filtered(id_equals(numeric("2")))),
-        "FN_PRED_NOTEQUAL" => (
-            "(`id` <> 2)",
-            filtered(Predicate::NotEqual(Comparison {
-                left: Expression::Column(decimal_column()),
-                right: numeric("2"),
-            })),
-        ),
-        "FN_PRED_LESS" => (
-            "(`id` < 2)",
-            filtered(Predicate::Less(Comparison {
-                left: Expression::Column(decimal_column()),
-                right: numeric("2"),
-            })),
-        ),
-        "FN_PRED_LESSEQUAL" => (
-            "(`id` <= 2)",
-            filtered(Predicate::LessEqual(Comparison {
-                left: Expression::Column(decimal_column()),
-                right: numeric("2"),
-            })),
-        ),
-        "FN_PRED_IS_NULL" => (
-            "(`id` IS NULL)",
-            filtered(Predicate::IsNull(Expression::Column(decimal_column()))),
-        ),
-        "FN_PRED_IS_NOT_NULL" => (
-            "(`id` IS NOT NULL)",
-            filtered(Predicate::IsNotNull(Expression::Column(decimal_column()))),
-        ),
-        "FN_PRED_LIKE" => (
-            "LIKE _utf8mb4 X'57696425'",
-            filtered(Predicate::Like(LikePredicate {
-                expression: Expression::Column(varchar_column()),
-                pattern: Expression::Literal(Literal::String("Wid%".to_string())),
-                escape_char: None,
-            })),
-        ),
-        "FN_PRED_LIKE_ESCAPE" => (
-            "ESCAPE _utf8mb4 X'5C'",
-            filtered(Predicate::Like(LikePredicate {
-                expression: Expression::Column(varchar_column()),
-                pattern: Expression::Literal(Literal::String("Wid%".to_string())),
-                escape_char: Some(Expression::Literal(Literal::String("\\".to_string()))),
-            })),
-        ),
-        "FN_PRED_BETWEEN" => (
-            "BETWEEN 1 AND 9",
-            filtered(Predicate::Between(BetweenPredicate {
-                expression: Expression::Column(decimal_column()),
-                left: numeric("1"),
-                right: numeric("9"),
-            })),
-        ),
-        "FN_PRED_IN_CONSTLIST" => (
-            "IN (1, 2)",
-            filtered(Predicate::InConstList(InConstListPredicate {
-                expression: Expression::Column(decimal_column()),
-                arguments: vec![numeric("1"), numeric("2")],
-            })),
-        ),
-        "LITERAL_NULL" => (
-            "= NULL",
-            filtered(id_equals(Expression::Literal(Literal::Null))),
-        ),
-        "LITERAL_EXACTNUMERIC" => ("= 2", filtered(id_equals(numeric("2")))),
-        "LITERAL_DOUBLE" => (
-            "= 2.5",
-            filtered(id_equals(Expression::Literal(Literal::Double(
-                "2.5".to_string(),
-            )))),
-        ),
-        "LITERAL_STRING" => (
-            "_utf8mb4 X'776964676574'",
-            filtered(Predicate::Equal(Comparison {
-                left: Expression::Column(varchar_column()),
-                right: Expression::Literal(Literal::String("widget".to_string())),
-            })),
-        ),
-        "LITERAL_DATE" => (
-            "DATE '2015-12-01'",
-            filtered(Predicate::Equal(Comparison {
-                left: Expression::Column(date_column()),
-                right: Expression::Literal(Literal::Date("2015-12-01".to_string())),
-            })),
-        ),
-        "LITERAL_TIMESTAMP" => (
-            "TIMESTAMP '2015-12-01 12:01:01.123'",
-            filtered(Predicate::Equal(Comparison {
-                left: Expression::Column(timestamp_column()),
-                right: Expression::Literal(Literal::Timestamp(
-                    "2015-12-01 12:01:01.123".to_string(),
-                )),
-            })),
-        ),
-        "JOIN" => (
-            "`shop`.`orders` AS `t1` INNER JOIN `shop`.`customers` AS `t2`",
-            joined_query("inner"),
-        ),
-        "JOIN_TYPE_INNER" => ("INNER JOIN", joined_query("inner")),
-        "JOIN_TYPE_LEFT_OUTER" => ("LEFT OUTER JOIN", joined_query("left_outer")),
-        "JOIN_TYPE_RIGHT_OUTER" => ("RIGHT OUTER JOIN", joined_query("right_outer")),
-        "JOIN_CONDITION_EQUI" => ("ON (`t1`.`customer_id` = `t2`.`id`)", joined_query("inner")),
-        other => panic!(
-            "capability `{other}` is advertised but this test has no fixture that exercises it; \
-             add one alongside whichever task added the capability"
-        ),
-    }
-}
-
-/// A column node as Exasol sends one inside a join: qualified by the
-/// `tableName` of the table it belongs to. Measured on Exasol 2025.2.1, that
-/// field arrives on every column node of a join, and `tableAlias` joins it
-/// only once the operator's query aliased the table.
-fn joined_column(name: &str, table: &str) -> Value {
-    json!({"type": "column", "name": name, "tableName": table})
-}
-
-fn joined_orders_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "note", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
-}
-
-fn joined_customers_columns() -> Value {
-    json!([
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-        {"name": "name", "dataType": {"type": "VARCHAR", "size": 100, "characterSet": "UTF8"}},
-    ])
-}
-
-/// The `from` element joining `orders` to `customers` over the foreign key,
-/// in the shape a join whose query aliased no table arrives in: neither table
-/// carries an `alias` and both condition operands carry a `tableName`.
-fn orders_to_customers(join_type: &str) -> Value {
-    json!({
-        "type": "join",
-        "join_type": join_type,
-        "left": {"type": "table", "name": "orders"},
-        "right": {"type": "table", "name": "customers"},
-        "condition": {
-            "type": "predicate_equal",
-            "left": joined_column("customer_id", "orders"),
-            "right": joined_column("id", "customers"),
-        },
-    })
-}
-
-/// A `pushdown` request over `from`, carrying `select_list` and the two
-/// involved tables both `orders_to_customers` names.
-fn join_request(from: Value, select_list: Value) -> Value {
-    json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": from,
-            "selectList": select_list,
-        },
-        "involvedTables": [
-            {"name": "orders", "columns": joined_orders_columns()},
-            {"name": "customers", "columns": joined_customers_columns()},
-        ],
-    })
+    fixtures::query_exercising(Driver::MySql, &namespace(), capability)
 }
 
 /// The two `id` columns share a name, so the projection is readable only
@@ -1251,10 +935,7 @@ fn each_join_type_renders_its_mysql_keyword_in_the_requests_operand_order() {
         ("left_outer", "LEFT OUTER JOIN"),
         ("right_outer", "RIGHT OUTER JOIN"),
     ] {
-        let sql = render_statement(&join_request(
-            orders_to_customers(join_type),
-            json!([joined_column("id", "orders")]),
-        ));
+        let sql = render_statement(&fixtures::join_type_request(join_type));
 
         assert_eq!(
             sql,
@@ -1273,17 +954,7 @@ fn each_join_type_renders_its_mysql_keyword_in_the_requests_operand_order() {
 /// back instead.
 #[test]
 fn an_unrenderable_join_type_fails_naming_the_value_it_received() {
-    for join_type in ["full_outer", "cross"] {
-        let error = render_error(&join_request(
-            orders_to_customers(join_type),
-            json!([joined_column("id", "orders")]),
-        ));
-
-        assert!(
-            error.contains(join_type),
-            "the error must name the join type it received: {error}"
-        );
-    }
+    fixtures::assert_join_types_named(&render_error, &["full_outer", "cross"]);
 }
 
 /// A nested join renders inside its own parentheses, so the tree the request
@@ -1291,30 +962,7 @@ fn an_unrenderable_join_type_fails_naming_the_value_it_received() {
 /// shifted would return different rows.
 #[test]
 fn a_nested_join_renders_the_inner_join_parenthesized_inside_the_outer() {
-    let mut request = join_request(
-        json!({
-            "type": "join",
-            "join_type": "left_outer",
-            "left": orders_to_customers("inner"),
-            "right": {"type": "table", "name": "regions"},
-            "condition": {
-                "type": "predicate_equal",
-                "left": joined_column("id", "customers"),
-                "right": joined_column("customer_id", "regions"),
-            },
-        }),
-        json!([joined_column("code", "regions")]),
-    );
-    request["involvedTables"]
-        .as_array_mut()
-        .expect("involvedTables must be an array")
-        .push(json!({
-            "name": "regions",
-            "columns": [
-                {"name": "customer_id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-                {"name": "code", "dataType": {"type": "VARCHAR", "size": 10, "characterSet": "UTF8"}},
-            ],
-        }));
+    let request = fixtures::nested_join_request("left_outer");
 
     let sql = render_statement(&request);
 
@@ -1332,15 +980,7 @@ fn a_nested_join_renders_the_inner_join_parenthesized_inside_the_outer() {
 /// what MySQL rejects with error 1052.
 #[test]
 fn every_column_position_in_a_join_carries_its_tables_alias() {
-    let mut request = join_request(
-        orders_to_customers("inner"),
-        json!([joined_column("name", "customers")]),
-    );
-    request["pushdownRequest"]["filter"] = json!({
-        "type": "predicate_equal",
-        "left": joined_column("note", "orders"),
-        "right": string_literal("x"),
-    });
+    let request = fixtures::filtered_join_request(json!([joined_column("name", "customers")]));
 
     let sql = render_statement(&request);
 
@@ -1379,18 +1019,8 @@ fn a_grouped_numeric_column_carries_the_alias_and_no_collation() {
 /// three compose over a joined `FROM` rather than only over a single table.
 #[test]
 fn join_composes_with_filter_and_group_by() {
-    let mut request = join_request(
-        orders_to_customers("inner"),
-        json!([joined_column("name", "customers"), aggregate("COUNT", None)]),
-    );
-    request["pushdownRequest"]["filter"] = json!({
-        "type": "predicate_equal",
-        "left": joined_column("note", "orders"),
-        "right": string_literal("x"),
-    });
-    request["pushdownRequest"]["selectListDataTypes"] = json!([note_type(), count_type()]);
-    request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = json!([joined_column("name", "customers")]);
+    let request =
+        fixtures::filtered_grouped_join_request(joined_column("name", "customers"), note_type());
 
     let sql = render_statement(&request);
 
@@ -1427,19 +1057,7 @@ fn a_column_naming_no_table_in_the_from_tree_fails_naming_the_column_and_the_ref
 /// against a positionally derived `t2`.
 #[test]
 fn a_request_alias_resolves_the_reference_without_reaching_the_statement() {
-    let mut from = orders_to_customers("inner");
-    from["left"]["alias"] = json!("t2");
-    from["condition"]["left"] = json!({
-        "type": "column", "name": "customer_id", "tableName": "orders", "tableAlias": "t2",
-    });
-
-    let sql = render_statement(&join_request(
-        from,
-        json!([
-            {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "t2"},
-            joined_column("id", "customers"),
-        ]),
-    ));
+    let sql = render_statement(&fixtures::request_aliased_join_request());
 
     assert_eq!(
         sql,
@@ -1454,31 +1072,7 @@ fn a_request_alias_resolves_the_reference_without_reaching_the_statement() {
 /// itself.
 #[test]
 fn a_self_join_resolves_each_copy_to_its_own_alias() {
-    let request = json!({
-        "type": "pushdown",
-        "pushdownRequest": {
-            "type": "select",
-            "from": {
-                "type": "join",
-                "join_type": "inner",
-                "left": {"type": "table", "name": "orders", "alias": "a"},
-                "right": {"type": "table", "name": "orders", "alias": "b"},
-                "condition": {
-                    "type": "predicate_equal",
-                    "left": {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "a"},
-                    "right": {"type": "column", "name": "customer_id", "tableName": "orders", "tableAlias": "b"},
-                },
-            },
-            "selectList": [
-                {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "a"},
-                {"type": "column", "name": "id", "tableName": "orders", "tableAlias": "b"},
-            ],
-        },
-        "involvedTables": [
-            {"name": "orders", "columns": joined_orders_columns()},
-            {"name": "orders", "columns": joined_orders_columns()},
-        ],
-    });
+    let request = fixtures::self_join_request();
 
     let sql = render_statement(&request);
 
@@ -1508,15 +1102,7 @@ fn a_single_table_query_renders_no_alias_even_when_the_request_assigned_one() {
 /// do and the wrong table's column when one does.
 #[test]
 fn a_join_column_carrying_no_table_reference_at_all_fails_naming_it() {
-    let error = render_error(&join_request(
-        orders_to_customers("inner"),
-        json!([column_operand("note")]),
-    ));
-
-    assert!(
-        error.contains("`note`") && error.contains("tableName") && error.contains("tableAlias"),
-        "the error must name the column and both spellings it lacks: {error}"
-    );
+    fixtures::assert_unreferenced_join_column_fails(&render_error, "`note`");
 }
 
 /// One table joined to itself is told apart only by the alias the request
@@ -1525,15 +1111,7 @@ fn a_join_column_carrying_no_table_reference_at_all_fails_naming_it() {
 /// against itself.
 #[test]
 fn a_reference_more_than_one_joined_table_answers_to_fails_naming_it() {
-    let mut from = orders_to_customers("inner");
-    from["right"] = json!({"type": "table", "name": "orders"});
-
-    let error = render_error(&join_request(from, json!([joined_column("id", "orders")])));
-
-    assert!(
-        error.contains("`id`") && error.contains("orders") && error.contains("more than one"),
-        "the error must name the column and the reference two tables answer to: {error}"
-    );
+    fixtures::assert_ambiguous_join_reference_fails(&render_error, "`id`");
 }
 
 /// MySQL source types whose read expression converts: a `json` reads as
@@ -1561,38 +1139,15 @@ fn converted_select_list_types() -> Value {
 /// and a column without notes reads bare.
 #[test]
 fn column_reference_renders_identically_in_every_position() {
-    let filtered = render_statement(&fixtures::converted_column_filtered_request(
+    fixtures::assert_column_positions(
+        &render_statement,
         CONVERTED_NOTES,
-    ));
-    assert_eq!(
-        filtered,
-        "SELECT CAST(`uid` AS CHAR) FROM `shop`.`orders` \
-         WHERE (CAST(`uid` AS CHAR) = _utf8mb4 X'61')"
-    );
-
-    let grouped = render_statement(&fixtures::converted_column_grouped_request(
-        CONVERTED_NOTES,
-        json!([
-            fixtures::aggregate_over("MIN", "uid", false),
-            fixtures::aggregate_over("COUNT", "uid", true),
-        ]),
-        json!([
-            {"type": "VARCHAR", "size": 36},
-            {"type": "DECIMAL", "precision": 18, "scale": 0},
-        ]),
-        "uid",
-    ));
-    assert_eq!(
-        grouped,
-        "SELECT MIN(CAST(`uid` AS CHAR)), COUNT(DISTINCT CAST(`uid` AS CHAR)) \
-         FROM `shop`.`orders` GROUP BY CAST(`uid` AS CHAR)"
-    );
-
-    let joined = render_statement(&fixtures::converted_column_joined_request(CONVERTED_NOTES));
-    assert_eq!(
-        joined,
-        "SELECT `t1`.`id` FROM (`shop`.`orders` AS `t1` INNER JOIN `shop`.`customers` AS `t2` \
-         ON (CAST(`t1`.`uid` AS CHAR) = CAST(`t2`.`uid` AS CHAR)))"
+        false,
+        [
+            "SELECT CAST(`uid` AS CHAR) FROM `shop`.`orders` WHERE (CAST(`uid` AS CHAR) = _utf8mb4 X'61')",
+            "SELECT MIN(CAST(`uid` AS CHAR)), COUNT(DISTINCT CAST(`uid` AS CHAR)) FROM `shop`.`orders` GROUP BY CAST(`uid` AS CHAR)",
+            "SELECT `t1`.`id` FROM (`shop`.`orders` AS `t1` INNER JOIN `shop`.`customers` AS `t2` ON (CAST(`t1`.`uid` AS CHAR) = CAST(`t2`.`uid` AS CHAR)))",
+        ],
     );
 }
 
@@ -1678,32 +1233,18 @@ fn a_converted_column_the_query_does_not_group_by_reads_without_any_value() {
 /// added, alone and under `NOT`, `AND`, and `OR`.
 #[test]
 fn boolean_column_predicate_renders_through_its_read_expression() {
-    for (filter, expected) in [
-        (column_operand("flag"), "(`flag` <> 0)"),
-        (column_operand("active"), "`active`"),
-        (fixtures::not(column_operand("flag")), "(NOT (`flag` <> 0))"),
-        (
-            fixtures::and(json!([column_operand("flag"), column_operand("active")])),
+    fixtures::assert_boolean_predicates(
+        &render_statement,
+        CONVERTED_NOTES,
+        "SELECT `id` FROM `shop`.`orders` WHERE ",
+        [
+            "(`flag` <> 0)",
+            "`active`",
+            "(NOT (`flag` <> 0))",
             "((`flag` <> 0) AND `active`)",
-        ),
-        (
-            fixtures::or(json!([
-                column_operand("active"),
-                less(numeric_literal("5"), column_operand("id")),
-            ])),
             "(`active` OR (5 < `id`))",
-        ),
-    ] {
-        let sql = render_statement(&fixtures::converted_table_filtered_request(
-            CONVERTED_NOTES,
-            filter,
-        ));
-
-        assert_eq!(
-            sql,
-            format!("SELECT `id` FROM `shop`.`orders` WHERE {expected}")
-        );
-    }
+        ],
+    );
 }
 
 /// The select-list shape decision-log `[plan-review]` names, `NOT BITS`
@@ -1734,22 +1275,10 @@ fn a_negated_grouped_converted_boolean_column_reads_through_any_value() {
 /// predicate as the comparison's right operand.
 #[test]
 fn predicate_operand_of_a_comparison_renders_parenthesized() {
-    let columns = json!([
-        {"name": "active", "dataType": {"type": "BOOLEAN"}},
-        {"name": "id", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
-    ]);
-    for (operand, expected) in [
-        (
-            less(numeric_literal("5"), column_operand("id")),
-            "(`active` = (5 < `id`))",
-        ),
-        (
-            fixtures::not(column_operand("active")),
-            "(`active` = (NOT `active`))",
-        ),
-    ] {
-        let clause = where_clause_over(columns.clone(), equal(column_operand("active"), operand));
+    let clauses = fixtures::predicate_operand_clauses(&where_clause_over);
 
-        assert_eq!(clause, expected);
-    }
+    assert_eq!(
+        clauses,
+        ["(`active` = (5 < `id`))", "(`active` = (NOT `active`))"]
+    );
 }
