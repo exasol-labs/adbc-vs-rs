@@ -8,6 +8,10 @@
 - Q: If Exasol drops the outer `ORDER BY` once `ORDER BY` and `LIMIT` are advertised → A: no top-N; `ORDER BY` stays in Exasol, the ordering guarantee stays unconditional
 - Q: Which `limit` shapes arrive with only `LIMIT` advertised → A: measure on the test Exasol, specs state it
 - Q: `OFFSET` (PR #24 feedback, reverses the earlier answer) → A: advertise `LIMIT` only, every `OFFSET` stays in Exasol; a `limit` carrying an `offset` fails with a named error; the gate observes `LIMIT ... OFFSET` without `ORDER BY`
+- Q: Offset 0 (review finding) → A: refuse it like any offset
+- Q: Gate join shape (review finding) → A: probe gets a second table `u`, gate joins `t` and `u`
+- Q: Capabilities after upgrade without `REFRESH` (review finding) → A: do not measure; docs tell operators to run `REFRESH`
+- Q: Gate offset row (review finding) → A: a stop row with three accepted outcomes
 
 ## Directions
 

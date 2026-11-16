@@ -37,28 +37,28 @@ Delegates a `LIMIT` to MySQL, PostgreSQL, and Trino whenever no `ORDER BY` prece
 - A `SELECT ... LIMIT n` with no `ORDER BY` over a virtual table reads at most n rows at the source and returns them. Before, the scan read the whole table and Exasol cut it.
 - Behavior change: which n rows an unordered `LIMIT` returns is chosen by the source. They can differ from the rows an earlier release returned, and they can differ between runs. SQL promises no particular set, and `docs/pushdown.md` states how to get stable rows (add an `ORDER BY`).
 - A query with an `ORDER BY` returns the same rows in the same order as before, with or without a `LIMIT` or `OFFSET`. Every `OFFSET` stays in Exasol.
-- The `getCapabilities` response gains `LIMIT` for every driver, and `LIMIT_WITH_OFFSET` stays withheld. The adapter does not store the set in `adapterNotes`. This plan does not verify whether Exasol asks an existing virtual schema for its capabilities again without a refresh; `ALTER VIRTUAL SCHEMA <name> REFRESH` makes it ask.
+- The `getCapabilities` response gains `LIMIT` for every driver, and `LIMIT_WITH_OFFSET` stays withheld. The adapter does not store the set in `adapterNotes`. After an upgrade or a rollback, an operator runs `ALTER VIRTUAL SCHEMA <name> REFRESH` on each existing virtual schema, so that Exasol asks for the new capability set.
 
 ## Requirements
 
 | Requirement | Details |
 |-------------|---------|
-| Limit-shape gate | Before any product change, `exasol_sends_the_measured_limit_shapes` in `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` creates the probe adapter (`crates/adbc-vs-adapter/tests/common/probe.rs`) with `Driver::Postgres.capabilities()` plus `LIMIT` when absent, never `LIMIT_WITH_OFFSET`, and asserts each row of the table below. |
+| Limit-shape gate | Before any product change, the probe adapter also answers `createVirtualSchema` with a second table `u` that has a column `d`, and `exasol_sends_the_measured_limit_shapes` in `crates/adbc-vs-adapter/tests/e2e_postgres_test.rs` creates the probe adapter (`crates/adbc-vs-adapter/tests/common/probe.rs`) with `Driver::Postgres.capabilities()` plus `LIMIT` when absent, never `LIMIT_WITH_OFFSET`, and asserts each row of the table below. |
 | Gate: stop row fails | Stop the implementation and report the measured request to the user: a delegated limit would return wrong rows, and the interview rules out trading correctness for throughput. |
 | Gate: adjust row fails | Change that scenario's delegation step in `vs-adapter/pushdown-limit/spec.md` to "no generated statement MUST carry a limit", keep its row-count steps, change the gate row's assertion to "request carries no `limit`", rename the scenario's test to `limit_over_<shape>_stays_in_exasol`, and update its § Scenario Coverage row. |
-| Gate: offset row | An observation: if Exasol accepts `LIMIT 3 OFFSET 1` with no `ORDER BY` and a request carries an `offset`, report the measured request to the user. |
-| Gate: record | Append "measured on the test Exasol" with the observed request to the reason of each query-shape scenario in `vs-adapter/pushdown-limit/spec.md`, in the form `vs-adapter/pushdown-dialect` uses, and make its Background's offset bullet state the measured outcome. |
-| Limit parsing | `numElements` is a required non-negative integer. A `limit` with an `offset`, whatever its value, fails naming `limit` and `LIMIT_WITH_OFFSET`. `orderBy` stays refused before any element is read, also beside a `limit`. |
+| Gate: offset row | A stop row. The test accepts any of its three outcomes. Any other outcome stops the implementation and is reported to the user. |
+| Gate: record | Append "measured on the test Exasol" with the observed request to the reason of each query-shape scenario in `vs-adapter/pushdown-limit/spec.md`, in the form `vs-adapter/pushdown-dialect` uses, and make its Background's offset bullet state the measured outcome. If Exasol accepted `LIMIT 3 OFFSET 1` with no `ORDER BY`, also correct the `LIMIT ... OFFSET` reason in `architecture.md` § Constraints and in intent.md, so that both state the measured behavior. |
+| Limit parsing | `numElements` is a required non-negative integer. A `limit` with an `offset`, whatever its value, fails naming `limit` and `LIMIT_WITH_OFFSET`. Offset 0 is refused too: Exasol sends the key only when `LIMIT_WITH_OFFSET` is advertised, so its presence means that the advertised set and the parser drifted apart. `orderBy` stays refused before any element is read, also beside a `limit`. |
 | Limit rendering | One shared function in `dialect_common.rs` appends ` LIMIT n` after the `HAVING` clause, called from `render_select` and `MySqlDialect::render`. No dialect overrides it. |
 | Mission | `specs/mission.md` capability 3: add "a `LIMIT` that no `ORDER BY` precedes" to the delegated fragments, and end with "`ORDER BY`, and every `LIMIT` or `OFFSET` that follows one, stay in Exasol." |
-| User docs | `docs/pushdown.md`: a "`LIMIT` without `ORDER BY`" row with a check for all three databases under "What runs at the source"; under "What runs in Exasol", "every `OFFSET`, and a `LIMIT` after an `ORDER BY`" (`ORDER BY "price" LIMIT 10 OFFSET 5`) and a `LIMIT` above a part Exasol runs (`WHERE "price" + 0 > 10 LIMIT 5`); a section stating that an unordered `LIMIT` returns any n rows, which can change between runs, and that an `ORDER BY` makes them stable. Every row matches the measured shapes. |
+| User docs | `docs/pushdown.md`: a "`LIMIT` without `ORDER BY`" row with a check for all three databases under "What runs at the source"; under "What runs in Exasol", "every `OFFSET`, and a `LIMIT` after an `ORDER BY`" (`ORDER BY "price" LIMIT 10 OFFSET 5`) and a `LIMIT` above a part Exasol runs (`WHERE "price" + 0 > 10 LIMIT 5`); a section stating that an unordered `LIMIT` returns any n rows, which can change between runs, and that an `ORDER BY` makes them stable; a sentence telling operators to run `ALTER VIRTUAL SCHEMA <name> REFRESH` after an upgrade or a rollback. Every row matches the measured shapes. |
 
 | Shape over probe table `t` | Required outcome | On failure |
 |----------------------------|------------------|------------|
 | `SELECT "d" FROM t LIMIT 3` | request carries `limit` with `numElements` 3 and no `offset` | stop: the plan delivers nothing |
 | `... WHERE "d" > 1 LIMIT 3` | request carries `filter` and `limit` | adjust |
 | `... GROUP BY "g" HAVING COUNT(*) > 0 LIMIT 3` | request carries `aggregationType`, `having`, and `limit` | adjust |
-| self-join of `t` on `"d"` with `LIMIT 3` | request carries the join and `limit` | adjust |
+| join of `t` and `u` on `"d"` with `LIMIT 3` | request carries the join and `limit` | adjust |
 | `... ORDER BY "d" LIMIT 3`, and with `OFFSET 1` | request carries no `limit` | stop |
 | `... WHERE "d" + 0 > 1 LIMIT 3` | request carries no `limit` | stop |
 | join of `t` with a local Exasol table, `LIMIT 3` | no request carries `limit` | stop |
@@ -66,7 +66,7 @@ Delegates a `LIMIT` to MySQL, PostgreSQL, and Trino whenever no `ORDER BY` prece
 | `SELECT "d", COUNT(*) OVER () FROM t LIMIT 3` | request carries no `limit` | stop |
 | `SELECT COUNT(*) FROM (SELECT "d" FROM t LIMIT 3)` | no request carries both an aggregate and `limit` | stop |
 | `SELECT DISTINCT "g" FROM t LIMIT 3` | a request carrying `limit` also carries the grouping | stop |
-| `SELECT "d" FROM t LIMIT 3 OFFSET 1` | Exasol rejects the statement and sends no request | observe only: report a request that carries an `offset` to the user |
+| `SELECT "d" FROM t LIMIT 3 OFFSET 1` | Exasol rejects the statement, or the request carries no `limit`, or it carries `limit` with `numElements` 4 or more and no `offset` | stop: report the measured request to the user |
 
 ## Dead Code Removal
 
