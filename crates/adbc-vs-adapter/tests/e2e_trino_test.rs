@@ -1478,3 +1478,80 @@ fn declared_columns(schema: &str, table: &str) -> Vec<(String, String)> {
         .filter_map(|row| Some((cell(row, "COLUMN_NAME")?, cell(row, "COLUMN_TYPE")?)))
         .collect()
 }
+
+// --- scalar functions -------------------------------------------------------
+
+fn scalars() -> common::scalars::Scenario<'static> {
+    common::scalars::Scenario {
+        exasol: &stack::shared().exasol,
+        source: common::scalars::Source::Trino,
+        virtual_schema: VIRTUAL_SCHEMA,
+        mirror_schema: trino_mirror::SCHEMA,
+    }
+}
+
+#[test]
+fn date_parts_reach_trino_and_match_the_mirror() {
+    scalars().date_parts();
+}
+
+#[test]
+fn exact_arithmetic_reaches_trino_and_matches_the_mirror() {
+    scalars().exact_arithmetic();
+}
+
+#[test]
+fn double_and_character_arithmetic_matches_the_mirror() {
+    scalars().double_and_character_arithmetic();
+}
+
+#[test]
+fn date_arithmetic_reaches_trino_and_matches_the_mirror() {
+    scalars().date_arithmetic();
+}
+
+#[test]
+fn timestamp_difference_matches_the_mirror() {
+    scalars().timestamp_difference();
+}
+
+#[test]
+fn string_functions_reach_trino_and_match_the_mirror() {
+    scalars().string_functions();
+}
+
+#[test]
+fn substr_positions_match_the_mirror() {
+    scalars().substr_positions();
+}
+
+#[test]
+fn empty_string_function_result_is_null_as_in_exasol() {
+    scalars().empty_string_results();
+}
+
+#[test]
+fn implicitly_converted_operands_match_the_mirror() {
+    scalars().implicit_conversions();
+}
+
+#[test]
+fn group_by_year_reaches_trino_and_matches_the_mirror() {
+    scalars().group_by_year();
+}
+
+/// The `scalars` mirror declares the columns and types the Trino virtual
+/// table declares.
+#[test]
+fn scalars_mirror_declares_the_virtual_tables_columns() {
+    assert_eq!(
+        declared_columns(trino_mirror::SCHEMA, common::scalars::TABLE),
+        declared_columns(VIRTUAL_SCHEMA, common::scalars::TABLE)
+    );
+}
+
+/// `UPPER` over `ß` returns the source's own case mapping.
+#[test]
+fn upper_over_a_non_ascii_letter_follows_the_source() {
+    scalars().upper_follows_the_source("ß");
+}

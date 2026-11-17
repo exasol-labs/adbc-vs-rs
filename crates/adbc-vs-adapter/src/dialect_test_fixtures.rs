@@ -54,6 +54,38 @@ pub(crate) fn orders_columns() -> Value {
     ])
 }
 
+/// The `orders` columns a scalar-function request reads: one per value class
+/// an operand can hold.
+pub(crate) fn scalar_columns() -> Value {
+    json!([
+        {"name": "i", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+        {"name": "d", "dataType": {"type": "DECIMAL", "precision": 18, "scale": 2}},
+        {"name": "f", "dataType": {"type": "DOUBLE"}},
+        {"name": "v", "dataType": {"type": "VARCHAR", "size": 20, "characterSet": "UTF8"}},
+        {"name": "b", "dataType": {"type": "BOOLEAN"}},
+        {"name": "dt", "dataType": {"type": "DATE"}},
+        {"name": "ts", "dataType": {"type": "TIMESTAMP", "fractionalSecondsPrecision": 6}},
+    ])
+}
+
+/// A `function_scalar` node.
+pub(crate) fn scalar(name: &str, arguments: Vec<Value>) -> Value {
+    json!({"type": "function_scalar", "name": name, "arguments": arguments})
+}
+
+/// A request over [`scalar_columns`] projecting `entry`, declared `data_type`.
+pub(crate) fn scalar_request(entry: Value, data_type: Value) -> Value {
+    let mut request = request(scalar_columns(), Some(json!([entry])));
+    request["pushdownRequest"]["selectListDataTypes"] = json!([data_type]);
+    request
+}
+
+/// The `DECIMAL` Exasol declares for most scalar entries; the dialects render
+/// the same SQL whatever exact type is declared.
+pub(crate) fn exact_type() -> Value {
+    json!({"type": "DECIMAL", "precision": 36, "scale": 0})
+}
+
 pub(crate) fn column(name: &str) -> Value {
     json!({"type": "column", "name": name})
 }
@@ -1026,6 +1058,23 @@ pub(crate) fn character_sum_avg_entries() -> Vec<(Value, Value)> {
 /// Each capability the dialect tests exercise, with the fragment the MySQL,
 /// PostgreSQL, and Trino dialects must each put in the statement for it, `""` where a
 /// dialect does not advertise it.
+/// The fragment each scalar-function capability puts in the statement, which
+/// every dialect spells alike.
+const SCALAR_FRAGMENTS: &[(&str, &str)] = &[
+    ("AGGREGATE_GROUP_BY_EXPRESSION", "GROUP BY "),
+    ("FN_YEAR", "YEAR"),
+    ("FN_MONTH", "MONTH"),
+    ("FN_DAY", "DAY"),
+    ("FN_UPPER", "UPPER("),
+    ("FN_LOWER", "LOWER("),
+    ("FN_TRIM", "TRIM("),
+    ("FN_LENGTH", "LENGTH("),
+    ("FN_SUBSTR", "SUBSTR("),
+    ("FN_ADD", "+ CAST(1 AS"),
+    ("FN_SUB", "- CAST(1 AS"),
+    ("FN_MULT", "* CAST(2 AS"),
+];
+
 const EXERCISED_FRAGMENTS: &[(&str, [&str; 3])] = &[
     (
         "SELECTLIST_PROJECTION",
@@ -1275,7 +1324,14 @@ pub(crate) fn query_exercising(
     let fragment = EXERCISED_FRAGMENTS
         .iter()
         .find(|(name, _)| *name == capability)
-        .map_or("", |(_, fragments)| fragments[column]);
+        .map(|(_, fragments)| fragments[column])
+        .or_else(|| {
+            SCALAR_FRAGMENTS
+                .iter()
+                .find(|(name, _)| *name == capability)
+                .map(|(_, fragment)| *fragment)
+        })
+        .unwrap_or("");
     if fragment.is_empty() {
         unexercised();
     }
@@ -1303,7 +1359,9 @@ pub(crate) fn query_exercising(
         "AGGREGATE_GROUP_BY_COLUMN" => Query {
             select_list: select_list(),
             filter: None,
-            aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![decimal_column()])),
+            aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![
+                Expression::Column(decimal_column()),
+            ])),
             having: None,
             from: from_clause(),
         },
@@ -1320,8 +1378,8 @@ pub(crate) fn query_exercising(
             ],
             filter: None,
             aggregation: Some(pushdown_query::Aggregation::GroupBy(vec![
-                decimal_column(),
-                varchar_column(),
+                Expression::Column(decimal_column()),
+                Expression::Column(varchar_column()),
             ])),
             having: None,
             from: from_clause(),
@@ -1444,6 +1502,34 @@ pub(crate) fn query_exercising(
             pattern: Expression::Literal(Literal::String("Wid%".to_string())),
             escape_char: Some(Expression::Literal(Literal::String("\\".to_string()))),
         })),
+        "AGGREGATE_GROUP_BY_EXPRESSION" => {
+            let mut request = request(
+                scalar_columns(),
+                Some(json!([{"type": "function_aggregate", "name": "COUNT"}])),
+            );
+            request["pushdownRequest"]["selectListDataTypes"] = json!([exact_type()]);
+            request["pushdownRequest"]["aggregationType"] = json!("group_by");
+            request["pushdownRequest"]["groupBy"] =
+                json!([scalar("UPPER", vec![self::column("v")])]);
+            pushdown_query::parse(&request, namespace).expect("the request must parse")
+        }
+        _ if capability.starts_with("FN_") && !capability.starts_with("FN_AGG_") => {
+            let entry = match capability {
+                "FN_YEAR" | "FN_MONTH" | "FN_DAY" => {
+                    scalar(&capability["FN_".len()..], vec![self::column("dt")])
+                }
+                "FN_UPPER" | "FN_LOWER" | "FN_TRIM" | "FN_LENGTH" => {
+                    scalar(&capability["FN_".len()..], vec![self::column("v")])
+                }
+                "FN_SUBSTR" => scalar("SUBSTR", vec![self::column("v"), numeric_literal("2")]),
+                "FN_ADD" => scalar("ADD", vec![self::column("i"), numeric_literal("1")]),
+                "FN_SUB" => scalar("SUB", vec![self::column("i"), numeric_literal("1")]),
+                "FN_MULT" => scalar("MULT", vec![self::column("i"), numeric_literal("2")]),
+                _ => unexercised(),
+            };
+            pushdown_query::parse(&scalar_request(entry, exact_type()), namespace)
+                .expect("the request must parse")
+        }
         _ => unexercised(),
     };
     (fragment, query)

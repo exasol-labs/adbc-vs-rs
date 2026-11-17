@@ -245,3 +245,57 @@ fn json_with_an_unsupported_type_names_it() {
         "the error must name the unsupported type it received: {error}"
     );
 }
+
+#[test]
+fn day_to_second_interval_select_list_entry_reads_as_an_interval() {
+    let data_type = serde_json::json!(
+        {"type": "INTERVAL", "fromTo": "DAY TO SECONDS", "precision": 9, "fraction": 9}
+    );
+
+    assert_eq!(
+        select_list_type_from_json(&data_type),
+        Ok(SelectListType::DayToSecond(DayToSecond {
+            precision: 9,
+            fraction: 9
+        }))
+    );
+    assert!(
+        from_json(&data_type).is_err(),
+        "a column never declares an interval, so the column type reader still refuses it"
+    );
+}
+
+#[test]
+fn day_to_second_interval_emits_as_a_decimal_holding_every_value() {
+    let interval = DayToSecond {
+        precision: 2,
+        fraction: 3,
+    };
+
+    assert_eq!(
+        interval.seconds_type(),
+        ExasolType::Decimal {
+            precision: 10,
+            scale: 3
+        }
+    );
+    assert_eq!(interval.to_ddl(), "INTERVAL DAY(2) TO SECOND(3)");
+}
+
+#[test]
+fn year_to_month_interval_select_list_entry_fails_naming_it() {
+    let data_type =
+        serde_json::json!({"type": "INTERVAL", "fromTo": "YEAR TO MONTH", "precision": 2});
+
+    let error = select_list_type_from_json(&data_type).unwrap_err();
+
+    assert!(error.contains("YEAR TO MONTH"), "{error}");
+}
+
+#[test]
+fn declarable_select_list_entry_reads_as_its_type() {
+    assert_eq!(
+        select_list_type_from_json(&serde_json::json!({"type": "DATE"})),
+        Ok(SelectListType::Declarable(ExasolType::Date))
+    );
+}

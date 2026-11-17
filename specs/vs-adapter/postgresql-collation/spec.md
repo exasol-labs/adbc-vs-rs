@@ -57,7 +57,7 @@ States that the PostgreSQL dialect renders no collation, what PostgreSQL's colum
 
 * *GIVEN* a virtual table over a PostgreSQL `character varying` column under the database default collation `en_US.utf8`, holding the values `B`, `a`, and `C`, and a local Exasol table holding the same values
 * *WHEN* the same comparison selecting the values ordered before `B`, and the same `MIN` and `MAX`, each with the column wrapped as `"<column>" || ''`, are run over each
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement that carries neither the comparison nor either aggregate, because the PostgreSQL dialect advertises no scalar-function capability
+* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement that carries neither the comparison nor either aggregate, because the PostgreSQL dialect does not advertise `FN_CONCAT`
 * *AND* each virtual query MUST return exactly what the local query returns: no row holding `a` for the comparison, `B` for `MIN`, and `a` for `MAX`, because Exasol evaluates the wrapped operand itself over the rows PostgreSQL returns
 
 ### Scenario: A column under a nondeterministic collation is mapped and compares as PostgreSQL compares

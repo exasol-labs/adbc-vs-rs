@@ -1282,3 +1282,155 @@ fn predicate_operand_of_a_comparison_renders_parenthesized() {
         ["(`active` = (5 < `id`))", "(`active` = (NOT `active`))"]
     );
 }
+
+// --- scalar functions -------------------------------------------------------
+
+fn scalar_sql(entry: Value) -> String {
+    render_statement(&fixtures::scalar_request(entry, fixtures::exact_type()))
+}
+
+fn assert_renders(entry: Value, fragment: &str) {
+    let sql = scalar_sql(entry.clone());
+    assert!(
+        sql.contains(fragment),
+        "{entry} must render {fragment}: {sql}"
+    );
+}
+
+/// `mysql-pushdown`: `LENGTH` counts characters, an empty result is null, a
+/// number or a date converts to Exasol's text, a literal stays hex, and `TRIM`
+/// fails naming the capability MySQL withholds.
+#[test]
+fn string_functions_render_with_mysql_semantics() {
+    let v = || column_operand("v");
+    for (entry, fragment) in [
+        (
+            fixtures::scalar("LENGTH", vec![v()]),
+            "NULLIF(CHAR_LENGTH(`v`), 0)",
+        ),
+        (
+            fixtures::scalar("UPPER", vec![v()]),
+            "CASE WHEN CHAR_LENGTH(UPPER(`v`)) = 0 THEN NULL ELSE UPPER(`v`) END",
+        ),
+        (
+            fixtures::scalar("LOWER", vec![v()]),
+            "CASE WHEN CHAR_LENGTH(LOWER(`v`)) = 0 THEN NULL ELSE LOWER(`v`) END",
+        ),
+        (
+            fixtures::scalar(
+                "SUBSTR",
+                vec![v(), numeric_literal("2"), numeric_literal("3")],
+            ),
+            "CASE WHEN CHAR_LENGTH(SUBSTR(`v`, CAST(2 AS SIGNED), CAST(3 AS SIGNED))) = 0 THEN NULL",
+        ),
+        (
+            fixtures::scalar("SUBSTR", vec![v(), numeric_literal("-2")]),
+            "CASE WHEN -2 = 0 THEN 1 WHEN -2 < 0 THEN CHAR_LENGTH(`v`) + -2 + 1 ELSE -2 END",
+        ),
+        (
+            fixtures::scalar("UPPER", vec![column_operand("d")]),
+            "TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM CAST(`d` AS CHAR)))",
+        ),
+        (
+            fixtures::scalar("LENGTH", vec![column_operand("dt")]),
+            "DATE_FORMAT(`dt`, '%Y-%m-%d')",
+        ),
+        (
+            fixtures::scalar("UPPER", vec![string_literal("x")]),
+            "UPPER(_utf8mb4 X'78')",
+        ),
+        (
+            fixtures::scalar("YEAR", vec![v()]),
+            "YEAR(CAST(CASE WHEN CHAR_LENGTH(`v`) = 0 THEN NULL ELSE `v` END AS DATETIME(6)))",
+        ),
+    ] {
+        assert_renders(entry, fragment);
+    }
+
+    let error = render_error(&fixtures::scalar_request(
+        fixtures::scalar("TRIM", vec![v()]),
+        json!({"type": "VARCHAR", "size": 20}),
+    ));
+    assert!(error.contains("FN_TRIM"), "{error}");
+}
+
+/// `mysql-pushdown`: days shift through `DATE_ADD`, never `+`, exact numbers
+/// widen to `DECIMAL(65,s)`, and a timestamp difference is a microsecond count.
+#[test]
+fn arithmetic_renders_with_mysql_semantics() {
+    let col = column_operand;
+    for (entry, fragment) in [
+        (
+            fixtures::scalar("ADD", vec![col("i"), numeric_literal("1")]),
+            "(CAST(`i` AS DECIMAL(65,0)) + CAST(1 AS DECIMAL(65,0)))",
+        ),
+        (
+            fixtures::scalar(
+                "MULT",
+                vec![fixtures::scalar("MULT", vec![col("i"), col("d")]), col("d")],
+            ),
+            "(CAST((CAST(`i` AS DECIMAL(65,0)) * CAST(`d` AS DECIMAL(65,2))) AS DECIMAL(65,2)) \
+             * CAST(`d` AS DECIMAL(65,2)))",
+        ),
+        (
+            fixtures::scalar("ADD", vec![col("v"), numeric_literal("1")]),
+            "(CAST(NULLIF(`v`, '') AS DOUBLE) + CAST(1 AS DOUBLE))",
+        ),
+        (
+            fixtures::scalar("ADD", vec![col("dt"), numeric_literal("1")]),
+            "DATE_ADD(`dt`, INTERVAL CAST(1 AS SIGNED) DAY)",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("ts"), numeric_literal("1.5")]),
+            "DATE_SUB(`ts`, INTERVAL CAST(ROUND(1.5) AS SIGNED) DAY)",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("dt"), col("dt")]),
+            "DATEDIFF(`dt`, `dt`)",
+        ),
+        (
+            fixtures::scalar(
+                "ADD",
+                vec![
+                    col("ts"),
+                    fixtures::scalar("SUB", vec![col("ts"), col("dt")]),
+                ],
+            ),
+            "DATE_ADD(`ts`, INTERVAL TRUNCATE(TIMESTAMPDIFF(MICROSECOND, CAST(`dt` AS DATETIME(6)), `ts`), -3) \
+             MICROSECOND)",
+        ),
+    ] {
+        assert_renders(entry, fragment);
+    }
+
+    let interval = render_statement(&fixtures::scalar_request(
+        fixtures::scalar("SUB", vec![col("ts"), col("dt")]),
+        json!({"type": "INTERVAL", "fromTo": "DAY TO SECONDS", "precision": 9, "fraction": 9}),
+    ));
+    assert!(
+        interval.contains(
+            "(CAST(TRUNCATE(TIMESTAMPDIFF(MICROSECOND, CAST(`dt` AS DATETIME(6)), `ts`), -3) AS DECIMAL(65,6)) / \
+             1000000)"
+        ),
+        "{interval}"
+    );
+}
+
+/// `pushdown-aggregation-delegation`: MySQL's `ONLY_FULL_GROUP_BY` refuses an
+/// expression over a grouped expression, so it reads through `ANY_VALUE`.
+#[test]
+fn an_expression_over_a_grouped_expression_reads_through_any_value() {
+    let year = fixtures::scalar("YEAR", vec![column_operand("dt")]);
+    let mut request = fixtures::scalar_request(
+        fixtures::scalar("ADD", vec![year.clone(), numeric_literal("1")]),
+        fixtures::exact_type(),
+    );
+    request["pushdownRequest"]["aggregationType"] = json!("group_by");
+    request["pushdownRequest"]["groupBy"] = json!([year]);
+
+    assert_eq!(
+        render_statement(&request),
+        "SELECT (CAST(ANY_VALUE(YEAR(`dt`)) AS DECIMAL(65,0)) + CAST(1 AS DECIMAL(65,0))) FROM \
+         `shop`.`orders` GROUP BY YEAR(`dt`)"
+    );
+}

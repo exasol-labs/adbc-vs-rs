@@ -1136,7 +1136,13 @@ fn mirror_holds_every_join_partner_row_including_the_unmatched_ones() {
 /// column included.
 #[test]
 fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
-    for table in [ITEMS, "item_notes", mysql::CODE_POINT_ITEMS, TYPE_COVERAGE] {
+    for table in [
+        ITEMS,
+        "item_notes",
+        mysql::CODE_POINT_ITEMS,
+        TYPE_COVERAGE,
+        common::scalars::TABLE,
+    ] {
         let mirrored = declared_columns(mirror::SCHEMA, table);
         let virtual_table = declared_columns(VIRTUAL_SCHEMA, table);
 
@@ -2180,9 +2186,11 @@ fn float_column_holds_the_widened_single_precision_value() {
 fn char_column_emits_padded_and_compares_like_the_source() {
     assert_declares(TYPE_COVERAGE, "fixed", "CHAR(10) UTF8");
 
+    // The `|| ''` keeps `LENGTH` in Exasol, which measures the emitted value;
+    // a delegated `LENGTH` counts the characters MySQL keeps.
     let length = |schema: &str, table: &str| {
         format!(
-            "SELECT \"id\", LENGTH(\"fixed\") AS LEN FROM {schema}.\"{table}\" \
+            "SELECT \"id\", LENGTH(\"fixed\" || '') AS LEN FROM {schema}.\"{table}\" \
              WHERE \"fixed\" IS NOT NULL ORDER BY \"id\""
         )
     };
@@ -2264,9 +2272,11 @@ fn enum_and_set_columns_emit_padded_and_compare_like_the_source() {
     assert_declares(TYPE_COVERAGE, "kind", "CHAR(5) UTF8");
     assert_declares(TYPE_COVERAGE, "tags", "CHAR(4) UTF8");
 
+    // The `|| ''` keeps `LENGTH` in Exasol, which measures the emitted value;
+    // a delegated `LENGTH` counts the characters MySQL keeps.
     let length = |schema: &str, table: &str| {
         format!(
-            "SELECT \"id\", LENGTH(\"kind\") AS LEN, \"tags\" FROM {schema}.\"{table}\" \
+            "SELECT \"id\", LENGTH(\"kind\" || '') AS LEN, \"tags\" FROM {schema}.\"{table}\" \
              WHERE \"kind\" IS NOT NULL ORDER BY \"id\""
         )
     };
@@ -2785,8 +2795,8 @@ fn timestamp_column_compares_groups_and_joins_like_the_mirror_under_a_utc_sessio
 fn aggregation_not_delegable_whole_is_withdrawn_and_matches_local_exasol_result() {
     for (label, query_text) in [
         (
-            "an expression over an aggregate",
-            "SELECT COUNT(\"quantity\") + 1 AS VAL FROM {schema}.\"items\"",
+            "a scalar function no dialect advertises over an aggregate",
+            "SELECT ROUND(AVG(\"quantity\")) AS VAL FROM {schema}.\"items\"",
         ),
         (
             "an aggregate no dialect advertises beside a delegable one",
@@ -2796,7 +2806,7 @@ fn aggregation_not_delegable_whole_is_withdrawn_and_matches_local_exasol_result(
         let query = |schema: &str, _items: &str| query_text.replace("{schema}", schema);
 
         let statement = pushdown_statement(&query(VIRTUAL_SCHEMA, ITEMS));
-        for forbidden in ["COUNT", "STDDEV"] {
+        for forbidden in ["COUNT", "SUM", "STDDEV"] {
             assert!(
                 !statement.contains(forbidden),
                 "{label} must be withdrawn whole, so the statement carries no {forbidden}: \
@@ -3123,4 +3133,77 @@ fn the_scan_script_is_registered_under_the_name_pushdown_calls() {
         "schema {schema} holds scripts {names:?}, which does not include {script}, the script \
          every pushed-down statement calls"
     );
+}
+
+// --- scalar functions -------------------------------------------------------
+
+fn scalars() -> common::scalars::Scenario<'static> {
+    common::scalars::Scenario {
+        exasol: &stack::shared().exasol,
+        source: common::scalars::Source::MySql,
+        virtual_schema: VIRTUAL_SCHEMA,
+        mirror_schema: mirror::SCHEMA,
+    }
+}
+
+#[test]
+fn date_parts_reach_mysql_and_match_the_mirror() {
+    scalars().date_parts();
+}
+
+#[test]
+fn exact_arithmetic_reaches_mysql_and_matches_the_mirror() {
+    scalars().exact_arithmetic();
+}
+
+#[test]
+fn double_and_character_arithmetic_matches_the_mirror() {
+    scalars().double_and_character_arithmetic();
+}
+
+#[test]
+fn date_arithmetic_reaches_mysql_and_matches_the_mirror() {
+    scalars().date_arithmetic();
+}
+
+#[test]
+fn timestamp_difference_matches_the_mirror() {
+    scalars().timestamp_difference();
+}
+
+#[test]
+fn string_functions_reach_mysql_and_match_the_mirror() {
+    scalars().string_functions();
+}
+
+#[test]
+fn substr_positions_match_the_mirror() {
+    scalars().substr_positions();
+}
+
+#[test]
+fn empty_string_function_result_is_null_as_in_exasol() {
+    scalars().empty_string_results();
+}
+
+#[test]
+fn implicitly_converted_operands_match_the_mirror() {
+    scalars().implicit_conversions();
+}
+
+#[test]
+fn group_by_year_reaches_mysql_and_matches_the_mirror() {
+    scalars().group_by_year();
+}
+
+/// `LENGTH` over the `CHAR(5)` value `ab` counts what MySql keeps.
+#[test]
+fn string_function_results_follow_the_source() {
+    scalars().string_function_results_follow_the_source("2");
+}
+
+/// `UPPER` over `ß` returns the source's own case mapping.
+#[test]
+fn upper_over_a_non_ascii_letter_follows_the_source() {
+    scalars().upper_follows_the_source("ß");
 }

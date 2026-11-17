@@ -97,8 +97,10 @@ use crate::dialect_common::{
     counted, is_numeric_constant, plain_dialect, render_select, render_temporal_literal,
     StatementRenderer, Tables,
 };
-use crate::exa_type::ExasolType;
-use crate::pushdown_query::{ColumnRef, Expression, LikePredicate, Literal, OperandConversion};
+use crate::pushdown_query::{
+    ColumnRef, Direction, Expression, LikePredicate, Literal, OperandConversion, Operator,
+    ValueClass,
+};
 use crate::sql_dialect::RenderError;
 
 use crate::trino_type_mapping;
@@ -122,6 +124,58 @@ const JOIN_KEYWORDS: &[(&str, &str)] = &[
 pub struct TrinoDialect;
 
 plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
+    const TEXT_TYPE: &'static str = "VARCHAR"; // NOSONAR: an associated const cannot elide its lifetime
+    const LENGTH_FUNCTION: &'static str = "LENGTH"; // NOSONAR: an associated const cannot elide its lifetime
+    const TIMESTAMP_TYPE: &'static str = "TIMESTAMP(3)"; // NOSONAR: an associated const cannot elide its lifetime
+    const INTEGER_TYPE: &'static str = "BIGINT"; // NOSONAR: an associated const cannot elide its lifetime
+
+    fn number_text(&self, operand: &str, _scale: u32) -> String {
+        format!("regexp_replace(CAST({operand} AS VARCHAR), '\\.?0+$', '')")
+    }
+
+    fn temporal_text(&self, operand: &str, class: ValueClass) -> String {
+        match class {
+            ValueClass::Date => format!("CAST({operand} AS VARCHAR)"),
+            _ => format!("date_format({operand}, '%Y-%m-%d %H:%i:%s.%f')"),
+        }
+    }
+
+    /// A sum or difference widens to `DECIMAL(38,s)`. A product keeps each
+    /// factor's own precision, because Trino types `DECIMAL(38,4) *
+    /// DECIMAL(38,4)` as `DECIMAL(38,6)` and drops the scale Exasol keeps.
+    fn exact(&self, operand: &str, class: ValueClass, operator: Operator) -> String {
+        let ValueClass::Exact { precision, scale } = class else {
+            return operand.to_string();
+        };
+        let precision = match operator {
+            Operator::Multiply => precision,
+            Operator::Add | Operator::Subtract => MAX_DECIMAL_PRECISION,
+        };
+        format!("CAST({operand} AS DECIMAL({precision},{scale}))")
+    }
+
+    fn shift_days(
+        &self,
+        temporal: &str,
+        _class: ValueClass,
+        days: &str,
+        direction: Direction,
+    ) -> String {
+        let sign = match direction {
+            Direction::Forward => "",
+            Direction::Backward => "-",
+        };
+        format!("date_add('day', {sign}{days}, {temporal})")
+    }
+
+    fn days_between(&self, left: &str, right: &str) -> String {
+        format!("date_diff('day', {right}, {left})")
+    }
+
+    fn interval_seconds(&self, interval: &str) -> String {
+        format!("(CAST(to_milliseconds({interval}) AS DECIMAL({MAX_DECIMAL_PRECISION},3)) / 1000)")
+    }
+
     /// Adds the operand as Exasol converts it. Trino defines no `sum` over a
     /// boolean or a character type, so a boolean, which for Trino is a
     /// predicate, sums as an `INTEGER` and a character operand as a `DOUBLE`
@@ -181,11 +235,8 @@ plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
 });
 
 fn decimal_scale(operand: &Expression) -> Option<u32> {
-    match operand {
-        Expression::Column(column) => match column.declared_type {
-            ExasolType::Decimal { scale, .. } => Some(scale),
-            _ => None,
-        },
+    match operand.value_class() {
+        ValueClass::Exact { scale, .. } => Some(scale),
         _ => None,
     }
 }

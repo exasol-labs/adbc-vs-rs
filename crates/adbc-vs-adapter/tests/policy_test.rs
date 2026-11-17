@@ -1,8 +1,8 @@
-//! Licensing-policy checks (CLAUDE.md, "Licensing & dependency policy").
+//! Licensing-policy checks over `deny.toml` (AGENTS.md, "Security and policy").
 //!
-//! Scope: this policy governs the Rust crate dependency tree only. The
-//! `adbc-drivers/mysql` driver fetched at run time is Apache-2.0 and is
-//! never bundled, so it falls outside these checks (decision-log [15]).
+//! Scope: this policy governs the Rust crate dependency tree only. The ADBC
+//! drivers fetched at run time are never bundled, so they fall outside these
+//! checks (specs/_recorded/001-add-mysql-vs-mvp/decision-log.md [15]).
 
 use std::fs;
 use std::path::{Path, PathBuf};

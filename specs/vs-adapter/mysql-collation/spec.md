@@ -50,5 +50,5 @@ States that the MySQL dialect renders no collation, what MySQL's default collati
 
 * *GIVEN* a virtual table over a MySQL `VARCHAR` column under the server default collation `utf8mb4_0900_ai_ci`, holding two values that differ only by case, and a local Exasol table holding the same values
 * *WHEN* the same equality comparison against one value of the pair, with the column wrapped as `"<column>" || ''`, is run over each
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement that carries no comparison over that column, because the MySQL dialect advertises no scalar-function capability
+* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement that carries no comparison over that column, because the MySQL dialect does not advertise `FN_CONCAT`
 * *AND* the virtual query MUST return exactly the rows the local query returns, which hold one value of the pair rather than both

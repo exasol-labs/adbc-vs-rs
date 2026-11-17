@@ -46,6 +46,7 @@
 
 use super::exasol::Exasol;
 use super::mirror_table::{self, column, Column};
+use super::scalars;
 
 /// The schema holding the Trino mirror tables, distinct from
 /// [`super::mirror::SCHEMA`] and [`super::postgres_mirror::SCHEMA`] so no two
@@ -122,6 +123,11 @@ pub fn install(exasol: &Exasol) {
     seed("items", &ITEM_COLUMNS, ITEM_VALUES);
     seed("item_notes", &mirror_table::NOTE_COLUMNS, NOTE_VALUES);
     seed("measures", &MEASURES_COLUMNS, MEASURES_VALUES);
+    seed(
+        scalars::TABLE,
+        &scalars::trino_columns(),
+        &scalars::trino_values(),
+    );
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {

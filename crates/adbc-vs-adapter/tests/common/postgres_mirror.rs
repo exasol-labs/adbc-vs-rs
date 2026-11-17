@@ -49,6 +49,7 @@
 
 use super::exasol::Exasol;
 use super::mirror_table::{self, column, Column};
+use super::scalars;
 
 /// The schema holding the PostgreSQL mirror tables, distinct from
 /// [`super::mirror::SCHEMA`] so the two sources' `items` tables never
@@ -233,6 +234,7 @@ pub fn install(exasol: &Exasol) {
         &type_coverage_values(),
     );
     seed("measures", &mirror_table::MEASURES_COLUMNS, MEASURES_VALUES);
+    seed(scalars::TABLE, &scalars::COLUMNS, &scalars::values());
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {

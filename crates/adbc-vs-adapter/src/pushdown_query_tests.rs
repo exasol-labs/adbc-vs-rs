@@ -445,8 +445,11 @@ fn column_reference_carries_the_recorded_source_type() {
     let Some(Aggregation::GroupBy(grouped)) = &query.aggregation else {
         panic!("the query groups by the column: {query:?}");
     };
+    let Expression::Column(grouped) = &grouped[0] else {
+        panic!("the query groups by the column: {query:?}");
+    };
 
-    for reference in [projected, aggregated, filtered, &grouped[0]] {
+    for reference in [projected, aggregated, filtered, grouped] {
         assert_eq!(
             reference.source_type.as_deref(),
             Some("uuid"),
@@ -929,13 +932,13 @@ fn a_filter_predicate_of_an_unrenderable_type_names_it_in_the_error() {
 fn a_filter_expression_of_an_unrenderable_type_names_it_in_the_error() {
     let filter = json!({
         "type": "predicate_is_null",
-        "expression": {"type": "function_scalar", "name": "UPPER"},
+        "expression": {"type": "literal_interval", "value": "1"},
     });
 
     let message = parse_failure(&request_with_filter(filter));
 
     assert!(
-        message.contains("function_scalar"),
+        message.contains("literal_interval"),
         "the error must name the expression type it cannot render: {message}"
     );
 }
@@ -1009,25 +1012,7 @@ fn aggregation_type_group_by_parses_its_columns_in_request_order() {
 
     assert_eq!(
         query.aggregation,
-        Some(Aggregation::GroupBy(vec![
-            ColumnRef {
-                name: "note".to_string(),
-                declared_type: ExasolType::Varchar { size: 100 },
-                source_type: None,
-                table_name: None,
-                table_alias: None,
-            },
-            ColumnRef {
-                name: "id".to_string(),
-                declared_type: ExasolType::Decimal {
-                    precision: 19,
-                    scale: 0,
-                },
-                source_type: None,
-                table_name: None,
-                table_alias: None,
-            },
-        ]))
+        Some(Aggregation::GroupBy(vec![column("note"), column("id")]))
     );
 }
 
@@ -1052,16 +1037,20 @@ fn a_group_by_aggregation_type_with_no_group_by_field_is_reported() {
 }
 
 #[test]
-fn a_group_by_entry_of_an_unsupported_type_is_reported() {
+fn a_group_by_entry_calling_an_unrendered_function_is_reported_by_name() {
     let mut request = request(None);
     request["pushdownRequest"]["aggregationType"] = json!("group_by");
-    request["pushdownRequest"]["groupBy"] = json!([{"type": "function_scalar", "name": "UPPER"}]);
+    request["pushdownRequest"]["groupBy"] = json!([{
+        "type": "function_scalar",
+        "name": "ROUND",
+        "arguments": [{"type": "column", "name": "total"}],
+    }]);
 
     let message = parse_failure(&request);
 
     assert!(
-        message.contains("function_scalar"),
-        "the error must name the unsupported groupBy entry type: {message}"
+        message.contains("ROUND"),
+        "the error must name the function it cannot render: {message}"
     );
 }
 
@@ -1689,4 +1678,453 @@ fn aggregate_operand_conversion_follows_the_exasol_type() {
             None,
         ]
     );
+}
+
+// --- scalar functions -------------------------------------------------------
+
+/// A single-table request over `t`, whose columns cover every value class a
+/// scalar function's operand can hold.
+fn scalar_request(select_list: Value, data_types: Value) -> Value {
+    json!({
+        "type": "pushdown",
+        "pushdownRequest": {
+            "type": "select",
+            "from": {"type": "table", "name": "t"},
+            "selectList": select_list,
+            "selectListDataTypes": data_types,
+        },
+        "involvedTables": [{
+            "name": "t",
+            "columns": [
+                {"name": "i", "dataType": {"type": "DECIMAL", "precision": 19, "scale": 0}},
+                {"name": "d", "dataType": {"type": "DECIMAL", "precision": 18, "scale": 2}},
+                {"name": "f", "dataType": {"type": "DOUBLE"}},
+                {"name": "v", "dataType": {"type": "VARCHAR", "size": 20}},
+                {"name": "b", "dataType": {"type": "BOOLEAN"}},
+                {"name": "dt", "dataType": {"type": "DATE"}},
+                {"name": "ts", "dataType": {"type": "TIMESTAMP", "fractionalSecondsPrecision": 6}},
+            ],
+        }],
+    })
+}
+
+fn col(name: &str) -> Value {
+    json!({"type": "column", "name": name})
+}
+
+fn number(value: &str) -> Value {
+    json!({"type": "literal_exactnumeric", "value": value})
+}
+
+fn call(name: &str, arguments: Vec<Value>) -> Value {
+    json!({"type": "function_scalar", "name": name, "arguments": arguments})
+}
+
+/// Parses `entry` as the only select-list entry, declared `data_type`.
+fn scalar_entry(entry: Value, data_type: Value) -> Result<SelectItem, String> {
+    parse(
+        &scalar_request(json!([entry]), json!([data_type])),
+        &namespace(),
+    )
+    .map(|query| query.select_list[0].clone())
+}
+
+fn scalar_expression(entry: Value) -> Expression {
+    scalar_entry(
+        entry,
+        json!({"type": "DECIMAL", "precision": 36, "scale": 0}),
+    )
+    .expect("parse must succeed")
+    .expression
+}
+
+fn arithmetic(entry: Value) -> Arithmetic {
+    match scalar_expression(entry) {
+        Expression::Scalar(call) => match *call {
+            ScalarCall::Arithmetic(arithmetic) => arithmetic,
+            other => panic!("expected arithmetic, got {other:?}"),
+        },
+        other => panic!("expected a scalar call, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_date_part_parses_over_its_operand_and_yields_an_integer() {
+    let expression = scalar_expression(call("year", vec![col("dt")]));
+
+    let Expression::Scalar(scalar) = &expression else {
+        panic!("expected a scalar call, got {expression:?}");
+    };
+    let ScalarCall::DatePart { part, operand } = scalar.as_ref() else {
+        panic!("expected a date part, got {scalar:?}");
+    };
+    assert_eq!(*part, DatePart::Year);
+    assert_eq!(operand.class, ValueClass::Date);
+    assert_eq!(
+        expression.value_class(),
+        ValueClass::Exact {
+            precision: 4,
+            scale: 0
+        }
+    );
+}
+
+#[test]
+fn exact_arithmetic_takes_exasols_result_scale() {
+    for (name, precision, scale) in [("ADD", 19, 2), ("SUB", 19, 2), ("MULT", 36, 4)] {
+        let Arithmetic::Exact { operator, .. } = arithmetic(call(name, vec![col("d"), col("d")]))
+        else {
+            panic!("{name} over two decimals must be exact arithmetic");
+        };
+        assert_eq!(operator.name(), name);
+        assert_eq!(
+            scalar_expression(call(name, vec![col("d"), col("d")])).value_class(),
+            ValueClass::Exact { precision, scale }
+        );
+    }
+    assert_eq!(
+        scalar_expression(call("ADD", vec![col("i"), number("1.5")])).value_class(),
+        ValueClass::Exact {
+            precision: 21,
+            scale: 1
+        }
+    );
+}
+
+#[test]
+fn a_double_or_character_operand_makes_arithmetic_double() {
+    for (left, right) in [(col("f"), col("d")), (col("v"), number("1"))] {
+        assert!(matches!(
+            arithmetic(call("MULT", vec![left, right])),
+            Arithmetic::Double { .. }
+        ));
+    }
+}
+
+#[test]
+fn a_boolean_operand_is_exact_arithmetic() {
+    assert!(matches!(
+        arithmetic(call("ADD", vec![col("b"), number("1")])),
+        Arithmetic::Exact { .. }
+    ));
+}
+
+#[test]
+fn a_number_added_to_or_subtracted_from_a_date_shifts_it_by_days() {
+    for (entry, expected) in [
+        (
+            call("ADD", vec![col("dt"), number("1")]),
+            Direction::Forward,
+        ),
+        (
+            call("ADD", vec![number("1"), col("dt")]),
+            Direction::Forward,
+        ),
+        (call("SUB", vec![col("ts"), col("d")]), Direction::Backward),
+    ] {
+        let Arithmetic::ShiftDays {
+            temporal,
+            direction,
+            ..
+        } = arithmetic(entry.clone())
+        else {
+            panic!("{entry} must shift by days");
+        };
+        assert_eq!(direction, expected, "{entry}");
+        assert!(matches!(
+            temporal.class,
+            ValueClass::Date | ValueClass::Timestamp
+        ));
+        assert_eq!(scalar_expression(entry).value_class(), temporal.class);
+    }
+}
+
+#[test]
+fn date_minus_date_counts_days_and_a_timestamp_difference_is_an_interval() {
+    assert!(matches!(
+        arithmetic(call("SUB", vec![col("dt"), col("dt")])),
+        Arithmetic::DaysBetween { .. }
+    ));
+    for entry in [
+        call("SUB", vec![col("ts"), col("ts")]),
+        call("SUB", vec![col("ts"), col("dt")]),
+        call("SUB", vec![col("dt"), col("ts")]),
+    ] {
+        assert!(matches!(
+            arithmetic(entry.clone()),
+            Arithmetic::TimestampDifference { .. }
+        ));
+        assert_eq!(scalar_expression(entry).value_class(), ValueClass::Interval);
+    }
+}
+
+#[test]
+fn interval_operands_resolve_to_interval_arithmetic() {
+    let difference = call("SUB", vec![col("ts"), col("ts")]);
+
+    assert!(matches!(
+        arithmetic(call("ADD", vec![col("ts"), difference.clone()])),
+        Arithmetic::ShiftInterval {
+            direction: Direction::Forward,
+            ..
+        }
+    ));
+    assert!(matches!(
+        arithmetic(call("SUB", vec![difference.clone(), difference.clone()])),
+        Arithmetic::IntervalSum {
+            direction: Direction::Backward,
+            ..
+        }
+    ));
+    assert!(matches!(
+        arithmetic(call("MULT", vec![number("2"), difference])),
+        Arithmetic::IntervalScale { .. }
+    ));
+}
+
+#[test]
+fn an_operand_combination_exasol_does_not_admit_is_reported() {
+    let error = scalar_entry(
+        call("MULT", vec![col("dt"), number("2")]),
+        json!({"type": "DATE"}),
+    )
+    .expect_err("a date times a number has no meaning");
+
+    assert!(error.contains("MULT"), "{error}");
+}
+
+#[test]
+fn string_functions_parse_with_their_optional_arguments() {
+    let trim = scalar_expression(call(
+        "TRIM",
+        vec![col("v"), json!({"type": "literal_string", "value": "x"})],
+    ));
+    assert!(matches!(
+        &trim,
+        Expression::Scalar(call) if matches!(call.as_ref(), ScalarCall::Trim { characters: Some(_), .. })
+    ));
+    assert_eq!(trim.value_class(), ValueClass::Character);
+
+    let substr = scalar_expression(call("SUBSTR", vec![col("d"), number("2")]));
+    let Expression::Scalar(substr) = substr else {
+        panic!("expected a scalar call");
+    };
+    let ScalarCall::Substr {
+        operand, length, ..
+    } = substr.as_ref()
+    else {
+        panic!("expected SUBSTR");
+    };
+    assert_eq!(
+        operand.class,
+        ValueClass::Exact {
+            precision: 18,
+            scale: 2
+        }
+    );
+    assert!(length.is_none());
+
+    assert_eq!(
+        scalar_expression(call("LENGTH", vec![col("v")])).value_class(),
+        ValueClass::Exact {
+            precision: 9,
+            scale: 0
+        }
+    );
+}
+
+#[test]
+fn a_scalar_function_with_the_wrong_argument_count_is_reported() {
+    let error = scalar_entry(call("UPPER", vec![]), json!({"type": "VARCHAR", "size": 1}))
+        .expect_err("UPPER takes one argument");
+
+    assert!(error.contains("UPPER"), "{error}");
+}
+
+#[test]
+fn an_unrendered_scalar_function_is_reported_by_name() {
+    let error = scalar_entry(call("CAST", vec![col("v")]), json!({"type": "DATE"}))
+        .expect_err("CAST is not delegated");
+
+    assert!(error.contains("CAST"), "{error}");
+}
+
+#[test]
+fn a_scalar_function_parses_in_a_filter_and_as_a_group_by_key() {
+    let mut request = scalar_request(
+        json!([call("YEAR", vec![col("dt")])]),
+        json!([{"type": "DECIMAL", "precision": 4, "scale": 0}]),
+    );
+    request["pushdownRequest"]["aggregationType"] = json!("group_by");
+    request["pushdownRequest"]["groupBy"] = json!([call("YEAR", vec![col("dt")])]);
+    request["pushdownRequest"]["filter"] = json!({
+        "type": "predicate_less",
+        "left": number("5"),
+        "right": call("ADD", vec![col("i"), number("1")]),
+    });
+
+    let query = parse(&request, &namespace()).expect("parse must succeed");
+
+    let Some(Aggregation::GroupBy(keys)) = &query.aggregation else {
+        panic!("expected a grouping");
+    };
+    assert_eq!(keys[0], query.select_list[0].expression);
+    assert!(matches!(
+        &query.filter,
+        Some(Predicate::Less(Comparison {
+            right: Expression::Scalar(_),
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn an_interval_select_list_entry_is_emitted_as_its_seconds() {
+    let item = scalar_entry(
+        call("SUB", vec![col("ts"), col("dt")]),
+        json!({"type": "INTERVAL", "fromTo": "DAY TO SECONDS", "precision": 9, "fraction": 9}),
+    )
+    .expect("parse must succeed");
+
+    assert_eq!(
+        item.declared_type,
+        ExasolType::Decimal {
+            precision: 23,
+            scale: 9
+        }
+    );
+    let Expression::IntervalSeconds { interval, declared } = item.expression else {
+        panic!("an interval entry must be emitted as its seconds");
+    };
+    assert_eq!(
+        declared,
+        DayToSecond {
+            precision: 9,
+            fraction: 9
+        }
+    );
+    assert_eq!(interval.value_class(), ValueClass::Interval);
+}
+
+/// `pushdown-scalar-function`: `YEAR` renders through the one select-list
+/// renderer in every position Exasol delegates it to, and nests in order.
+#[test]
+fn scalar_function_renders_in_every_position_per_dialect() {
+    use crate::dialect_test_fixtures as fixtures;
+    use adbc_vs_scan::driver::Driver;
+
+    let year = || fixtures::scalar("YEAR", vec![fixtures::column("dt")]);
+    let aggregate = |name: &str, distinct: bool| json!({"type": "function_aggregate", "name": name, "distinct": distinct, "arguments": [year()]});
+    let positions = || {
+        let mut select = fixtures::scalar_request(year(), fixtures::exact_type());
+        select["pushdownRequest"]["filter"] =
+            fixtures::less(fixtures::numeric_literal("2000"), year());
+        let mut grouped = fixtures::request(
+            fixtures::scalar_columns(),
+            Some(json!([aggregate("COUNT", true), aggregate("SUM", false)])),
+        );
+        grouped["pushdownRequest"]["selectListDataTypes"] =
+            json!([fixtures::exact_type(), fixtures::exact_type()]);
+        grouped["pushdownRequest"]["aggregationType"] = json!("group_by");
+        grouped["pushdownRequest"]["groupBy"] = json!([year()]);
+        grouped["pushdownRequest"]["having"] =
+            fixtures::less(fixtures::numeric_literal("2000"), year());
+        [select, grouped]
+    };
+
+    for &driver in Driver::ALL {
+        let dialect = crate::sql_dialect::dialect_for(driver);
+        let namespace = SourceQualifier::of(
+            (0..driver.qualifier_segment_count())
+                .map(|_| DATABASE.to_string())
+                .collect(),
+        )
+        .expect("a qualifier");
+        let projected = fixtures::render_statement(
+            dialect,
+            &namespace,
+            &fixtures::scalar_request(year(), fixtures::exact_type()),
+        );
+        let rendered = projected
+            .strip_prefix("SELECT ")
+            .and_then(|rest| rest.split(" FROM ").next())
+            .expect("a select list")
+            .to_string();
+
+        let [select, grouped] = positions();
+        let select = fixtures::render_statement(dialect, &namespace, &select);
+        assert_eq!(
+            select.matches(&rendered).count(),
+            2,
+            "{driver:?}: select list and WHERE must render {rendered}: {select}"
+        );
+        let grouped = fixtures::render_statement(dialect, &namespace, &grouped);
+        assert!(
+            grouped.matches(&rendered).count() >= 4,
+            "{driver:?}: COUNT(DISTINCT), SUM, GROUP BY, and HAVING must render {rendered}: \
+             {grouped}"
+        );
+
+        let nested = fixtures::render_statement(
+            dialect,
+            &namespace,
+            &fixtures::scalar_request(
+                fixtures::scalar(
+                    "UPPER",
+                    vec![fixtures::scalar(
+                        "SUBSTR",
+                        vec![fixtures::column("v"), fixtures::numeric_literal("2")],
+                    )],
+                ),
+                json!({"type": "VARCHAR", "size": 20}),
+            ),
+        );
+        let upper = nested.find("UPPER(").expect("UPPER renders");
+        let substr = nested.find("SUBSTR(").expect("SUBSTR renders");
+        assert!(
+            upper < substr,
+            "{driver:?}: UPPER must wrap SUBSTR: {nested}"
+        );
+    }
+}
+
+/// A product's scale beyond Exasol's 36 digits caps rather than exceeding
+/// the precision, so a later sum over it neither underflows nor renders a
+/// scale above its precision.
+#[test]
+fn an_exact_class_never_carries_a_scale_above_its_precision() {
+    let wide = |name: &str| json!({"name": name, "dataType": {"type": "DECIMAL", "precision": 36, "scale": 20}});
+    let mut request = scalar_request(
+        json!([call(
+            "ADD",
+            vec![call("MULT", vec![col("w1"), col("w2")]), number("1")]
+        )]),
+        json!([{"type": "DECIMAL", "precision": 36, "scale": 36}]),
+    );
+    request["involvedTables"][0]["columns"]
+        .as_array_mut()
+        .expect("columns")
+        .extend([wide("w1"), wide("w2")]);
+
+    let query = parse(&request, &namespace()).expect("parse must succeed");
+
+    let ValueClass::Exact { precision, scale } = query.select_list[0].expression.value_class()
+    else {
+        panic!("an exact sum: {:?}", query.select_list[0]);
+    };
+    assert!(
+        scale <= precision && precision <= 36,
+        "{precision},{scale} {:?}",
+        query.select_list[0]
+    );
+}
+
+/// Exasol reads text beside a date as a number of days, measured: `DATE
+/// '2024-02-01' - '2024-01-01'` fails converting the text to a number.
+#[test]
+fn text_beside_a_date_reads_as_a_number_of_days() {
+    assert!(matches!(
+        arithmetic(call("SUB", vec![col("dt"), col("v")])),
+        Arithmetic::ShiftDays { .. }
+    ));
 }

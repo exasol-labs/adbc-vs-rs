@@ -601,11 +601,11 @@ fn unrenderable_fragment_named_in_error() {
         (
             json!({
                 "type": "function_scalar",
-                "name": "UPPER",
+                "name": "ROUND",
                 "arguments": [{"type": "column", "name": "id"}],
             }),
-            json!({"type": "VARCHAR", "size": 100}),
-            "function_scalar",
+            json!({"type": "DECIMAL", "precision": 19, "scale": 0}),
+            "ROUND",
         ),
         (
             json!({

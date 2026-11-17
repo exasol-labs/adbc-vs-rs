@@ -16,10 +16,10 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 
 * *GIVEN* a virtual schema whose driver is `mysql`
 * *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_HAVING`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, and `JOIN_CONDITION_EQUI`
-* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, `JOIN_TYPE_FULL_OUTER`, or `JOIN_CONDITION_ALL`
+* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_HAVING`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, and `JOIN_CONDITION_EQUI`
+* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_TUPLE`, `JOIN_TYPE_FULL_OUTER`, or `JOIN_CONDITION_ALL`
 * *AND* the array MUST NOT contain `ORDER_BY_COLUMN`, `ORDER_BY_EXPRESSION`, `LIMIT`, or `LIMIT_WITH_OFFSET`
-* *AND* every entry MUST be a `MainCapability` constant, or carry the prefix `FN_PRED_`, `FN_AGG_`, or `LITERAL_`
+* *AND* every entry MUST be a `MainCapability` constant, or carry the prefix `FN_PRED_`, `FN_AGG_`, `LITERAL_`, or `FN_`, the last for exactly the scalar functions `vs-adapter/pushdown-scalar-function` names for MySQL, which leave out `FN_TRIM`
 
 ### Scenario: Filter capabilities cover the predicates and literals this release renders
 
@@ -33,9 +33,9 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 
 * *GIVEN* a virtual schema whose driver is `mysql`
 * *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, and `SELECTLIST_EXPRESSIONS`, without which Exasol delegates no aggregate at all, and `AGGREGATE_HAVING`
+* *THEN* the `capabilities` array MUST contain `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_GROUP_BY_EXPRESSION`, and `SELECTLIST_EXPRESSIONS`, without which Exasol delegates no aggregate at all, and `AGGREGATE_HAVING`
 * *AND* it MUST contain `FN_AGG_COUNT`, `FN_AGG_COUNT_STAR`, `FN_AGG_COUNT_DISTINCT`, `FN_AGG_MIN`, `FN_AGG_MAX`, `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, and `FN_AGG_AVG_DISTINCT`, which are the aggregates this release delegates
-* *AND* it MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION` or `AGGREGATE_GROUP_BY_TUPLE`
+* *AND* it MUST NOT contain `AGGREGATE_GROUP_BY_TUPLE`
 * *AND* it MUST NOT contain any other `FN_AGG_` capability, because the dialect renders no other aggregate function
 
 ### Scenario: Join capabilities cover inner and one-sided outer joins only
@@ -104,3 +104,21 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 * *THEN* the `GROUP BY` clause MUST name the column's read expression
 * *AND* the `HAVING` clause MUST read the column inside `ANY_VALUE(<read expression>)`, as a select-list use of the grouped column does, because MySQL evaluates `HAVING` over grouped rows and rejects an expression over a grouped column that does not match a `GROUP BY` expression as a whole
 * *AND* a grouped column without a read expression MUST render bare in the `HAVING` clause, as it does in the select list
+
+### Scenario: String functions render with MySQL's character semantics
+
+* *GIVEN* `pushdown` requests carrying `UPPER`, `LOWER`, `LENGTH`, and `SUBSTR` over operands of each declared type Exasol admits for them
+* *WHEN* the MySQL dialect renders each request
+* *THEN* `LENGTH` MUST render as `CHAR_LENGTH`, because MySQL's `LENGTH` counts bytes
+* *AND* every rendered string literal MUST keep the `_utf8mb4 X'<hex>'` form
+* *AND* a `function_scalar` node named `TRIM` MUST fail with an error naming `FN_TRIM` as a capability this dialect does not advertise
+* *AND* an empty result of `UPPER`, `LOWER`, `SUBSTR`, or an empty character operand of `YEAR`, `MONTH`, or `DAY` MUST read as null through `CASE WHEN CHAR_LENGTH(<value>) = 0 THEN NULL ELSE <value> END`, because a `PAD SPACE` collation such as `utf8mb4_general_ci` compares a value of only blanks equal to `''`, so `NULLIF(<value>, '')` would turn it into null
+
+### Scenario: Arithmetic renders with MySQL's day and decimal semantics
+
+* *GIVEN* `pushdown` requests carrying `ADD`, `SUB`, and `MULT` over operands of each declared type Exasol admits for them
+* *WHEN* the MySQL dialect renders each request
+* *THEN* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render through `DATE_ADD` or `DATE_SUB` with a `DAY` interval of the number rounded half away from zero, as Exasol rounds it, and `DATE` minus `DATE` MUST render through `DATEDIFF`, because MySQL's `+` reads a date as the number `YYYYMMDD`
+* *AND* a `TIMESTAMP` difference MUST render through `TIMESTAMPDIFF(MICROSECOND, ...)` truncated to milliseconds, as many as an Exasol interval holds, a timestamp plus or minus such a difference through a `MICROSECOND` interval of it, and a select-list entry declared `INTERVAL DAY TO SECOND` as that microsecond count divided by 1000000
+* *AND* an exact-numeric operand of `+`, `-`, or `*` MUST render cast to `DECIMAL(65,s)`, so a `BIGINT` result beyond its range is returned rather than refused with MySQL's out-of-range error
+* *AND* a product whose operand scales add up to more than 30 MUST keep MySQL's result, which MySQL rounds to 30 fractional digits, and `docs/pushdown.md` MUST state this difference from Exasol, which keeps up to 36

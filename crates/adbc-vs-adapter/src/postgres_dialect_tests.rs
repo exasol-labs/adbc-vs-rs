@@ -1385,3 +1385,98 @@ fn converted_join_keys_render_through_their_read_expressions_in_a_full_outer_joi
         r#"SELECT "t1"."id" FROM ("public"."flags" AS "t1" FULL OUTER JOIN "public"."other_flags" AS "t2" ON (CAST("t1"."uid" AS TEXT) = CAST("t2"."uid" AS TEXT)))"#
     );
 }
+
+// --- scalar functions -------------------------------------------------------
+
+/// `postgresql-pushdown`: each scalar function renders in its PostgreSQL form.
+#[test]
+fn scalar_functions_render_in_postgresql_forms() {
+    let col = fixtures::column;
+    let number = fixtures::numeric_literal;
+    for (entry, fragment) in [
+        (
+            fixtures::scalar("YEAR", vec![col("dt")]),
+            "EXTRACT(YEAR FROM \"dt\")",
+        ),
+        (
+            fixtures::scalar("DAY", vec![col("v")]),
+            "EXTRACT(DAY FROM CAST(NULLIF(\"v\", '') AS timestamp))",
+        ),
+        (
+            fixtures::scalar("LENGTH", vec![col("v")]),
+            "NULLIF(CHAR_LENGTH(\"v\"), 0)",
+        ),
+        (
+            fixtures::scalar("TRIM", vec![col("v")]),
+            "NULLIF(TRIM(\"v\"), '')",
+        ),
+        (
+            fixtures::scalar("TRIM", vec![col("v"), fixtures::string_literal("x")]),
+            "NULLIF(btrim(\"v\", E'x'), '')",
+        ),
+        (
+            fixtures::scalar("LENGTH", vec![col("d")]),
+            "CAST(trim_scale(CAST(\"d\" AS numeric)) AS text)",
+        ),
+        (
+            fixtures::scalar("LENGTH", vec![col("ts")]),
+            "to_char(\"ts\", 'YYYY-MM-DD HH24:MI:SS.US')",
+        ),
+        (
+            fixtures::scalar("SUBSTR", vec![col("v"), number("2"), number("3")]),
+            "SUBSTR(\"v\", CAST(2 AS integer), CAST(3 AS integer))",
+        ),
+        (
+            fixtures::scalar("MULT", vec![col("i"), number("2")]),
+            "(CAST(\"i\" AS numeric) * CAST(2 AS numeric))",
+        ),
+        (
+            fixtures::scalar("ADD", vec![col("b"), number("1")]),
+            "CAST(CASE WHEN \"b\" THEN 1 WHEN NOT \"b\" THEN 0 END AS numeric)",
+        ),
+        (
+            fixtures::scalar("MULT", vec![col("f"), col("d")]),
+            "(CAST(\"f\" AS DOUBLE PRECISION) * CAST(\"d\" AS DOUBLE PRECISION))",
+        ),
+        (
+            fixtures::scalar("ADD", vec![col("dt"), number("1")]),
+            "(\"dt\" + CAST(1 AS integer))",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("ts"), number("1.5")]),
+            "(\"ts\" - CAST(ROUND(1.5) AS integer) * INTERVAL '1 day')",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("dt"), col("dt")]),
+            "(\"dt\" - \"dt\")",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("ts"), col("dt")]),
+            "date_trunc('milliseconds', \"ts\" - CAST(\"dt\" AS timestamp))",
+        ),
+    ] {
+        let sql = fixtures::render_statement(
+            &PostgresDialect,
+            &namespace(),
+            &fixtures::scalar_request(entry.clone(), fixtures::exact_type()),
+        );
+        assert!(
+            sql.contains(fragment),
+            "{entry} must render {fragment}: {sql}"
+        );
+    }
+
+    let interval = fixtures::render_statement(
+        &PostgresDialect,
+        &namespace(),
+        &fixtures::scalar_request(
+            fixtures::scalar("SUB", vec![col("ts"), col("ts")]),
+            json!({"type": "INTERVAL", "fromTo": "DAY TO SECONDS", "precision": 9, "fraction": 9}),
+        ),
+    );
+    assert_eq!(
+        interval,
+        "SELECT EXTRACT(EPOCH FROM date_trunc('milliseconds', \"ts\" - \"ts\")) FROM \
+         \"public\".\"orders\""
+    );
+}

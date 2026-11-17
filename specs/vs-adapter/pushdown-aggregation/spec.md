@@ -7,7 +7,7 @@ Delegates a single-group or `GROUP BY` aggregation and its `HAVING` clause to th
 - This feature owns the aggregation fragment for every dialect: how a single-group and a grouped aggregation render, how a `having` element renders, and how each aggregate function renders.
 - Each `<technology>-collation` feature states what its source's default collation does to a grouping key, a `DISTINCT` operand, and a `MIN` or `MAX` operand.
 - `vs-adapter/result-ordering` owns the rejection of `orderBy` and `limit`.
-- An aggregation request carries an `aggregationType` of `single_group` or `group_by`, a `groupBy` list of columns, `function_aggregate` select-list entries, one `selectListDataTypes` entry per select-list entry, and an optional `having` predicate.
+- An aggregation request carries an `aggregationType` of `single_group` or `group_by`, a `groupBy` list of columns and scalar expressions, `function_aggregate` select-list entries, one `selectListDataTypes` entry per select-list entry, and an optional `having` predicate.
 - `vs-adapter/pushdown-aggregation-types` owns where each aggregate's declared `EMITS` type comes from, and `vs-adapter/pushdown-aggregation-delegation` owns which aggregates, grouping shapes, and `HAVING` clauses a dialect delegates.
 
 ## Scenarios

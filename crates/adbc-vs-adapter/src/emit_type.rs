@@ -14,7 +14,7 @@
 
 use serde_json::Value;
 
-use crate::exa_type::{self, ExasolType};
+use crate::exa_type::{self, SelectListType};
 
 /// The Exasol version `pushdownRequest.selectListDataTypes` requires, named
 /// in every error that traces back to its absence.
@@ -31,7 +31,7 @@ pub const MIN_EXASOL_VERSION: &str = "Exasol 8.6.0, or 7.1.14 on the 7.x line";
 pub fn read_select_list_data_types(
     pushdown_request: &Value,
     select_list_len: usize,
-) -> Result<Option<Vec<ExasolType>>, String> {
+) -> Result<Option<Vec<SelectListType>>, String> {
     let Some(types) = pushdown_request.get("selectListDataTypes") else {
         return Ok(None);
     };
@@ -49,7 +49,7 @@ pub fn read_select_list_data_types(
 
     types
         .iter()
-        .map(exa_type::from_json)
+        .map(exa_type::select_list_type_from_json)
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
 }

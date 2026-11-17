@@ -1,11 +1,10 @@
-# adbc-vs dependency policy. See the "Licensing & dependency policy" section
-# of CLAUDE.md for the rules this file is checked against (`policy_test.rs`).
+# adbc-vs dependency policy, checked by
+# crates/adbc-vs-adapter/tests/policy_test.rs (AGENTS.md, "Security and policy").
 #
-# Scope: this policy governs the Rust crate dependency tree only. The
-# `adbc-drivers/mysql` and `adbc-drivers/postgresql` drivers fetched at run
-# time from the Columnar registry are Apache-2.0 and are never bundled into an
-# adbc-vs release artifact, so they fall outside this policy (decision-log
-# [15]).
+# Scope: this policy governs the Rust crate dependency tree only. The MySQL,
+# PostgreSQL, and Trino ADBC drivers fetched at run time from the dbc registry
+# are never bundled into an adbc-vs release artifact, so they fall outside this
+# policy (specs/_recorded/001-add-mysql-vs-mvp/decision-log.md [15]).
 
 [licenses]
 # Permissive-only allow list. No copyleft (GPL/LGPL/AGPL/MPL) and no
@@ -51,12 +50,17 @@ allow-workspace = true
 # the exception was granted and the condition under which it is re-evaluated
 # (see policy_test.rs::advisory_ignores_are_dated). The `serde_yaml`
 # RUSTSEC-2024-0370 advisory was avoided outright by depending on
-# `serde_yaml_ng` instead (decision-log [11]).
+# `serde_yaml_ng` instead (001-add-mysql-vs-mvp decision-log [11]).
 ignore = [
     # unsafe-libyaml is unmaintained with no safe upgrade. Only serde_yaml_ng
     # reaches it, to parse the registry index fetched over verified TLS.
     # 2026-10-22 re-evaluate when serde_yaml_ng drops unsafe-libyaml.
     "RUSTSEC-2024-0449",
+    # chrono is unmaintained with no safe upgrade. Only arrow reaches it, for the
+    # temporal arrays and casts the scan coerces timestamps through; no adbc-vs
+    # code names chrono, and arrow-array 60.1.0 still requires it.
+    # 2026-11-17 re-evaluate when arrow drops chrono or adopts jiff or time.
+    "RUSTSEC-2026-0543",
 ]
 
 [sources]

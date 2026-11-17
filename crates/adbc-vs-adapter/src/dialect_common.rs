@@ -9,9 +9,9 @@
 //! name beyond the [`StatementRenderer::TARGET`] its error messages quote.
 
 use crate::pushdown_query::{
-    AggregateCall, Aggregation, BetweenPredicate, ColumnRef, Comparison, Expression, FromClause,
-    InConstListPredicate, LikePredicate, Literal, OperandConversion, Predicate, Query, SelectItem,
-    SourceTable,
+    AggregateCall, Aggregation, Arithmetic, BetweenPredicate, ColumnRef, Comparison, DatePart,
+    Direction, Expression, FromClause, InConstListPredicate, LikePredicate, Literal, Operand,
+    OperandConversion, Operator, Predicate, Query, ScalarCall, SelectItem, SourceTable, ValueClass,
 };
 use crate::sql_dialect::RenderError;
 
@@ -161,6 +161,16 @@ pub trait StatementRenderer {
     const JOIN_NOTE: &'static str = ""; // NOSONAR: an associated const cannot elide its lifetime
     /// The target's double-precision type, which an `AVG` quotient casts to.
     const DOUBLE_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The target's character type, which a number or a date casts to as text.
+    const TEXT_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The function that counts a string's characters rather than its bytes.
+    const LENGTH_FUNCTION: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The timestamp type a date or a date's text casts to.
+    const TIMESTAMP_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The integer type a day count and a `SUBSTR` position cast to.
+    const INTEGER_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The function that removes a set of characters from both ends.
+    const TRIM_SET_FUNCTION: &'static str = "TRIM"; // NOSONAR: an associated const cannot elide its lifetime
 
     fn tables(&self) -> &Tables<'_>;
 
@@ -187,6 +197,335 @@ pub trait StatementRenderer {
         operand: &str,
     ) -> String {
         format!("{function}({distinct}{operand})")
+    }
+
+    /// A rendered scalar expression in the position this statement renders,
+    /// which a dialect that must mark a grouped expression wraps.
+    fn grouped(&self, rendered: String) -> String {
+        rendered
+    }
+
+    /// `YEAR`, `MONTH`, or `DAY` of a date or timestamp.
+    fn date_part(&self, part: DatePart, operand: &str) -> String {
+        format!("{}({operand})", part.name())
+    }
+
+    /// Text in Exasol's default timestamp format read as a timestamp.
+    fn text_to_timestamp(&self, operand: &str) -> String {
+        format!("CAST({operand} AS {})", Self::TIMESTAMP_TYPE)
+    }
+
+    /// An exact number with `scale` fractional digits as Exasol's text, which
+    /// drops trailing fractional zeros.
+    fn number_text(&self, operand: &str, scale: u32) -> String;
+
+    /// A date as `YYYY-MM-DD`, or a timestamp as `YYYY-MM-DD HH24:MI:SS.FF6`,
+    /// Exasol's default formats.
+    fn temporal_text(&self, operand: &str, class: ValueClass) -> String;
+
+    /// `TRIM` over text, removing blanks or every character of `characters`.
+    fn render_trim(&self, operand: &str, characters: Option<&str>) -> Result<String, RenderError> {
+        Ok(match characters {
+            Some(characters) => format!("{}({operand}, {characters})", Self::TRIM_SET_FUNCTION),
+            None => format!("TRIM({operand})"),
+        })
+    }
+
+    /// An exact operand of `operator`, widened so the operation cannot
+    /// overflow before Exasol's would. `class` carries the precision and
+    /// scale Exasol types the operand with.
+    fn exact(&self, operand: &str, class: ValueClass, operator: Operator) -> String;
+
+    /// A whole number as the integer type a target's day and position
+    /// arguments take.
+    fn integer(&self, operand: &str) -> String {
+        format!("CAST({operand} AS {})", Self::INTEGER_TYPE)
+    }
+
+    /// A character result read as null when empty, as Exasol reads it.
+    fn empty_as_null(&self, rendered: &str) -> String {
+        format!("NULLIF({rendered}, '')")
+    }
+
+    /// A date or a timestamp, a date reading as midnight.
+    fn timestamp(&self, operand: &str, class: ValueClass) -> String {
+        match class {
+            ValueClass::Date => self.text_to_timestamp(operand),
+            _ => operand.to_string(),
+        }
+    }
+
+    /// A date or timestamp shifted by `days`, an integer.
+    fn shift_days(
+        &self,
+        temporal: &str,
+        class: ValueClass,
+        days: &str,
+        direction: Direction,
+    ) -> String;
+
+    /// The whole days from `right` to `left`, two dates.
+    fn days_between(&self, left: &str, right: &str) -> String;
+
+    /// The interval from `right` to `left`, two timestamps, truncated to the
+    /// milliseconds an Exasol interval holds.
+    fn timestamp_difference(&self, left: &str, right: &str) -> String {
+        format!("({left} - {right})")
+    }
+
+    /// A date or timestamp shifted by an interval; a date stays a date.
+    fn shift_interval(
+        &self,
+        temporal: &str,
+        class: ValueClass,
+        interval: &str,
+        direction: Direction,
+    ) -> String {
+        let sign = direction.sign();
+        match class {
+            ValueClass::Date => format!(
+                "CAST({} {sign} {interval} AS DATE)",
+                self.timestamp(temporal, class)
+            ),
+            _ => format!("({temporal} {sign} {interval})"),
+        }
+    }
+
+    /// An interval times a double, truncated to milliseconds.
+    fn interval_scale(&self, interval: &str, factor: &str) -> String {
+        format!("({interval} * {factor})")
+    }
+
+    /// An interval as its count of seconds.
+    fn interval_seconds(&self, interval: &str) -> String;
+
+    /// Renders a scalar function over its converted operands.
+    ///
+    /// A character result that is empty renders as null, because Exasol reads
+    /// an empty string as null and a source keeps them apart.
+    fn render_scalar(&self, call: &ScalarCall) -> Result<String, RenderError> {
+        Ok(match call {
+            ScalarCall::DatePart { part, operand } => {
+                let rendered = self.render_expression(&operand.expression)?;
+                let temporal = match operand.class {
+                    ValueClass::Date | ValueClass::Timestamp => rendered,
+                    ValueClass::Character => self.text_to_timestamp(&self.empty_as_null(&rendered)),
+                    other => return Err(unconvertible("a date part", other)),
+                };
+                self.date_part(*part, &temporal)
+            }
+            ScalarCall::Upper(operand) => {
+                self.empty_as_null(&format!("UPPER({})", self.text(operand)?))
+            }
+            ScalarCall::Lower(operand) => {
+                self.empty_as_null(&format!("LOWER({})", self.text(operand)?))
+            }
+            ScalarCall::Trim {
+                operand,
+                characters,
+            } => {
+                let characters = characters
+                    .as_ref()
+                    .map(|characters| self.text(characters))
+                    .transpose()?;
+                self.empty_as_null(&self.render_trim(&self.text(operand)?, characters.as_deref())?)
+            }
+            // A zero count, not a comparison with '', which a PAD SPACE collation
+            // would also match for a value of only blanks.
+            ScalarCall::Length(operand) => format!(
+                "NULLIF({}({}), 0)",
+                Self::LENGTH_FUNCTION,
+                self.text(operand)?
+            ),
+            ScalarCall::Substr {
+                operand,
+                start,
+                length,
+            } => self.render_substr(operand, start, length.as_ref())?,
+            ScalarCall::Arithmetic(arithmetic) => self.render_arithmetic(arithmetic)?,
+        })
+    }
+
+    /// Renders `SUBSTR` on Exasol's position rule: a position of 0 reads as 1,
+    /// a negative one counts from the end, and a start left of the first
+    /// character or a length below 1 yields null. A positive literal position
+    /// or length needs no rule, which keeps the common statement short.
+    fn render_substr(
+        &self,
+        operand: &Operand,
+        start: &Operand,
+        length: Option<&Operand>,
+    ) -> Result<String, RenderError> {
+        let text = self.text(operand)?;
+        let mut null_when = Vec::new();
+
+        let position = self.whole(start)?;
+        let start = if is_positive_integer_literal(start) {
+            position
+        } else {
+            let start = format!(
+                "CASE WHEN {position} = 0 THEN 1 WHEN {position} < 0 THEN {}({text}) + {position} \
+                 + 1 ELSE {position} END",
+                Self::LENGTH_FUNCTION
+            );
+            null_when.push(format!("{start} < 1"));
+            start
+        };
+        let mut arguments = vec![text, self.integer(&start)];
+        if let Some(length) = length {
+            let count = self.whole(length)?;
+            if !is_positive_integer_literal(length) {
+                null_when.push(format!("{count} < 1"));
+            }
+            arguments.push(self.integer(&count));
+        }
+
+        let substring = format!("SUBSTR({})", arguments.join(", "));
+        Ok(self.empty_as_null(&if null_when.is_empty() {
+            substring
+        } else {
+            format!(
+                "CASE WHEN {} THEN NULL ELSE {substring} END",
+                null_when.join(" OR ")
+            )
+        }))
+    }
+
+    /// Renders `ADD`, `SUB`, or `MULT` as the operation its operands resolved
+    /// to.
+    fn render_arithmetic(&self, arithmetic: &Arithmetic) -> Result<String, RenderError> {
+        Ok(match arithmetic {
+            Arithmetic::Exact {
+                operator,
+                left,
+                right,
+            } => format!(
+                "({} {} {})",
+                self.exact(&self.number(left)?, exact_class(left.class), *operator),
+                operator.symbol(),
+                self.exact(&self.number(right)?, exact_class(right.class), *operator)
+            ),
+            Arithmetic::Double {
+                operator,
+                left,
+                right,
+            } => format!(
+                "({} {} {})",
+                self.double(left)?,
+                operator.symbol(),
+                self.double(right)?
+            ),
+            Arithmetic::ShiftDays {
+                temporal,
+                days,
+                direction,
+            } => self.shift_days(
+                &self.render_expression(&temporal.expression)?,
+                temporal.class,
+                &self.integer(&self.whole(days)?),
+                *direction,
+            ),
+            Arithmetic::DaysBetween { left, right } => self.days_between(
+                &self.render_expression(&left.expression)?,
+                &self.render_expression(&right.expression)?,
+            ),
+            Arithmetic::TimestampDifference { left, right } => self.timestamp_difference(
+                &self.timestamp(&self.render_expression(&left.expression)?, left.class),
+                &self.timestamp(&self.render_expression(&right.expression)?, right.class),
+            ),
+            Arithmetic::ShiftInterval {
+                temporal,
+                interval,
+                direction,
+            } => self.shift_interval(
+                &self.render_expression(&temporal.expression)?,
+                temporal.class,
+                &self.render_expression(&interval.expression)?,
+                *direction,
+            ),
+            Arithmetic::IntervalSum {
+                left,
+                right,
+                direction,
+            } => format!(
+                "({} {} {})",
+                self.render_expression(&left.expression)?,
+                direction.sign(),
+                self.render_expression(&right.expression)?
+            ),
+            Arithmetic::IntervalScale { interval, factor } => self.interval_scale(
+                &self.render_expression(&interval.expression)?,
+                &self.double(factor)?,
+            ),
+        })
+    }
+
+    /// An operand as Exasol reads it in exact arithmetic: a boolean as 1 or
+    /// 0, every other number as itself.
+    fn number(&self, operand: &Operand) -> Result<String, RenderError> {
+        let rendered = self.render_expression(&operand.expression)?;
+        Ok(match operand.class {
+            ValueClass::Boolean => boolean_number(&rendered),
+            _ => rendered,
+        })
+    }
+
+    /// An operand as a double, text read as a number with an empty value as
+    /// null, as the `SUM` operand conversion reads it.
+    fn double(&self, operand: &Operand) -> Result<String, RenderError> {
+        let rendered = self.render_expression(&operand.expression)?;
+        Ok(match operand.class {
+            ValueClass::Character => self.text_double(&rendered),
+            ValueClass::Boolean => format!(
+                "CAST({} AS {})",
+                boolean_number(&rendered),
+                Self::DOUBLE_TYPE
+            ),
+            _ => format!("CAST({rendered} AS {})", Self::DOUBLE_TYPE),
+        })
+    }
+
+    fn text_double(&self, rendered: &str) -> String {
+        format!(
+            "CAST({} AS {})",
+            counted(Some(OperandConversion::Character), rendered),
+            Self::DOUBLE_TYPE
+        )
+    }
+
+    /// An operand rounded to a whole number half away from zero, as Exasol
+    /// rounds a day count or a position.
+    fn whole(&self, operand: &Operand) -> Result<String, RenderError> {
+        Ok(match operand.class {
+            ValueClass::Exact { scale: 0, .. } => self.render_expression(&operand.expression)?,
+            ValueClass::Boolean => boolean_number(&self.render_expression(&operand.expression)?),
+            ValueClass::Exact { .. } => {
+                format!("ROUND({})", self.render_expression(&operand.expression)?)
+            }
+            _ => {
+                let double = self.double(operand)?;
+                format!("(SIGN({double}) * FLOOR(ABS({double}) + 0.5))")
+            }
+        })
+    }
+
+    /// An operand as the text Exasol converts it to under its default formats.
+    fn text(&self, operand: &Operand) -> Result<String, RenderError> {
+        let rendered = self.render_expression(&operand.expression)?;
+        Ok(match operand.class {
+            ValueClass::Character => rendered,
+            ValueClass::Exact { scale: 0, .. } | ValueClass::Double => {
+                format!("CAST({rendered} AS {})", Self::TEXT_TYPE)
+            }
+            ValueClass::Exact { scale, .. } => self.number_text(&rendered, scale),
+            ValueClass::Date | ValueClass::Timestamp => {
+                self.temporal_text(&rendered, operand.class)
+            }
+            ValueClass::Boolean => {
+                format!("CASE WHEN {rendered} THEN 'TRUE' WHEN NOT {rendered} THEN 'FALSE' END")
+            }
+            ValueClass::Interval => return Err(unconvertible("a string function", operand.class)),
+        })
     }
 
     /// Renders the `FROM` clause: one qualified table name, or the whole join
@@ -247,20 +586,17 @@ pub trait StatementRenderer {
     }
 
     /// Renders the `GROUP BY` keys a `group_by` aggregation names.
-    fn render_group_by_keys(&self, columns: &[ColumnRef]) -> Result<Vec<String>, RenderError> {
-        if columns.is_empty() {
+    fn render_group_by_keys(&self, keys: &[Expression]) -> Result<Vec<String>, RenderError> {
+        if keys.is_empty() {
             return Err(RenderError::new(format!(
-                "a `group_by` aggregation names no grouping column, and {} writes no empty \
+                "a `group_by` aggregation names no grouping key, and {} writes no empty \
                  `GROUP BY` clause to render in its place; a `single_group` aggregation is the \
                  one that groups by nothing",
                 Self::TARGET
             )));
         }
 
-        columns
-            .iter()
-            .map(|column| self.render_column(column))
-            .collect()
+        keys.iter().map(|key| self.render_expression(key)).collect()
     }
 
     fn render_predicate(&self, predicate: &Predicate) -> Result<String, RenderError> {
@@ -414,6 +750,10 @@ pub trait StatementRenderer {
             Expression::Literal(literal) => self.render_literal(literal),
             Expression::Aggregate(call) => self.render_aggregate(call),
             Expression::Predicate(predicate) => self.render_predicate(predicate),
+            Expression::Scalar(call) => Ok(self.grouped(self.render_scalar(call)?)),
+            Expression::IntervalSeconds { interval, .. } => {
+                Ok(self.interval_seconds(&self.render_expression(interval)?))
+            }
         }
     }
 
@@ -434,7 +774,7 @@ pub trait StatementRenderer {
 }
 
 /// Renders a whole query for a dialect whose `GROUP BY` keys are the plain
-/// rendering of the grouping columns.
+/// rendering of the grouping keys.
 pub fn render_select<S: StatementRenderer>(
     statement: &S,
     query: &Query,
@@ -445,10 +785,10 @@ pub fn render_select<S: StatementRenderer>(
         statement.render_predicate(predicate)
     })?;
     let grouping = match &query.aggregation {
-        Some(Aggregation::GroupBy(columns)) => {
+        Some(Aggregation::GroupBy(keys)) => {
             format!(
                 " GROUP BY {}",
-                statement.render_group_by_keys(columns)?.join(", ")
+                statement.render_group_by_keys(keys)?.join(", ")
             )
         }
         _ => String::new(),
@@ -477,6 +817,33 @@ pub fn render_literal_with(
         Literal::Date(value) => render_temporal_literal(target, "DATE", value),
         Literal::Timestamp(value) => render_temporal_literal(target, "TIMESTAMP", value),
     }
+}
+
+/// A boolean as the 1 or 0 Exasol reads it as in arithmetic.
+fn boolean_number(rendered: &str) -> String {
+    format!("CASE WHEN {rendered} THEN 1 WHEN NOT {rendered} THEN 0 END")
+}
+
+/// The exact class of an arithmetic operand, a boolean reading as one digit.
+fn exact_class(class: ValueClass) -> ValueClass {
+    match class {
+        ValueClass::Exact { .. } => class,
+        _ => ValueClass::integer(1),
+    }
+}
+
+fn is_positive_integer_literal(operand: &Operand) -> bool {
+    matches!(
+        &operand.expression,
+        Expression::Literal(Literal::ExactNumeric(value))
+            if value.parse::<u64>().is_ok_and(|number| number > 0)
+    )
+}
+
+fn unconvertible(position: &str, class: ValueClass) -> RenderError {
+    RenderError::new(format!(
+        "{position} over a {class:?} operand has no rendering path in this release"
+    ))
 }
 
 /// Renders an optional clause as its keyword and rendered body, or nothing.

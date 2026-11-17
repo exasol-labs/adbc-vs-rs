@@ -40,6 +40,7 @@ use super::exasol::Exasol;
 use super::items;
 use super::mirror_table::{self, column, Column};
 use super::mysql;
+use super::scalars;
 
 /// The schema holding the mirror tables. A differential test substitutes this
 /// for the virtual schema's name in one query template.
@@ -175,6 +176,7 @@ pub fn install(exasol: &Exasol) {
         TYPE_COVERAGE_VALUES,
     );
     seed("measures", &mirror_table::MEASURES_COLUMNS, MEASURES_VALUES);
+    seed(scalars::TABLE, &scalars::COLUMNS, &scalars::values());
 }
 
 fn create_statement(table: &str, columns: &[Column]) -> String {

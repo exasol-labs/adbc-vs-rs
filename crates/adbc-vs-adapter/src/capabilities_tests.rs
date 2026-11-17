@@ -147,6 +147,7 @@ const MAIN_CAPABILITY_CONSTANTS: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "AGGREGATE_GROUP_BY_TUPLE",
     "AGGREGATE_HAVING",
     "JOIN",
@@ -175,6 +176,7 @@ const SHARED_MAIN_CAPABILITIES: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "JOIN",
     "JOIN_TYPE_INNER",
     "JOIN_TYPE_LEFT_OUTER",
@@ -186,6 +188,22 @@ const SHARED_MAIN_CAPABILITIES: &[&str] = &[
 /// one per question Exasol asks the set: which predicates, which aggregate
 /// functions, and which literal kinds a delegated fragment may contain.
 const FUNCTION_CAPABILITY_PREFIXES: &[&str] = &["FN_PRED_", "FN_AGG_", "LITERAL_"];
+
+/// The scalar-function capabilities `vs-adapter/pushdown-scalar-function`
+/// names, the only `FN_` entries without a further prefix a dialect may carry.
+const SCALAR_FUNCTION_CAPABILITIES: &[&str] = &[
+    "FN_YEAR",
+    "FN_MONTH",
+    "FN_DAY",
+    "FN_UPPER",
+    "FN_LOWER",
+    "FN_TRIM",
+    "FN_LENGTH",
+    "FN_SUBSTR",
+    "FN_ADD",
+    "FN_SUB",
+    "FN_MULT",
+];
 
 fn assert_advertises(capabilities: &[String], required: &str) {
     assert!(
@@ -216,6 +234,7 @@ fn advertised_set_matches_the_rendered_fragments() {
         for capability in &capabilities {
             assert!(
                 MAIN_CAPABILITY_CONSTANTS.contains(&capability.as_str())
+                    || SCALAR_FUNCTION_CAPABILITIES.contains(&capability.as_str())
                     || FUNCTION_CAPABILITY_PREFIXES
                         .iter()
                         .any(|prefix| capability.starts_with(prefix)),
@@ -242,6 +261,7 @@ const MYSQL_CAPABILITIES: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
@@ -254,7 +274,7 @@ const MYSQL_CAPABILITIES: &[&str] = &[
     "FN_AGG_SUM_DISTINCT",
     "FN_AGG_AVG",
     "FN_AGG_AVG_DISTINCT",
-    // AGGREGATE_GROUP_BY_EXPRESSION and AGGREGATE_GROUP_BY_TUPLE are withheld: MySQL groups by one column.
+    // AGGREGATE_GROUP_BY_TUPLE is withheld: MySQL groups by one key.
     "FN_PRED_AND",
     "FN_PRED_OR",
     "FN_PRED_NOT",
@@ -271,6 +291,17 @@ const MYSQL_CAPABILITIES: &[&str] = &[
     // `FN_PRED_REGEXP_LIKE`, `FN_PRED_IS_JSON`, `FN_PRED_IS_NOT_JSON`, `LITERAL_BOOL`,
     // `LITERAL_INTERVAL`, and `LITERAL_TIMESTAMP_UTC` are withheld: no dialect's
     // `render_predicate` or `render_literal` has a rendering path for them.
+    "FN_YEAR",
+    "FN_MONTH",
+    "FN_DAY",
+    "FN_UPPER",
+    "FN_LOWER",
+    // FN_TRIM is withheld: MySQL's TRIM removes a substring rather than a set of characters.
+    "FN_LENGTH",
+    "FN_SUBSTR",
+    "FN_ADD",
+    "FN_SUB",
+    "FN_MULT",
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
     "LITERAL_DOUBLE",
@@ -290,7 +321,7 @@ const MYSQL_CAPABILITIES: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// `vs-adapter/mysql-pushdown`: MySQL advertises exactly the 39 entries of
+/// `vs-adapter/mysql-pushdown`: MySQL advertises exactly the 50 entries of
 /// [`MYSQL_CAPABILITIES`], element for element.
 ///
 /// The values themselves are declared data now — they live in
@@ -318,6 +349,7 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
@@ -343,6 +375,17 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "FN_PRED_LIKE_ESCAPE",
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
+    "FN_YEAR",
+    "FN_MONTH",
+    "FN_DAY",
+    "FN_UPPER",
+    "FN_LOWER",
+    "FN_TRIM",
+    "FN_LENGTH",
+    "FN_SUBSTR",
+    "FN_ADD",
+    "FN_SUB",
+    "FN_MULT",
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
     "LITERAL_DOUBLE",
@@ -353,8 +396,8 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "JOIN_TYPE_INNER",
     "JOIN_TYPE_LEFT_OUTER",
     "JOIN_TYPE_RIGHT_OUTER",
-    // `JOIN_TYPE_FULL_OUTER` is the whole of the difference between this set and
-    // `MYSQL_CAPABILITIES`: PostgreSQL implements the keyword directly,
+    // `JOIN_TYPE_FULL_OUTER` and `FN_TRIM` are the whole of the difference between this set
+    // and `MYSQL_CAPABILITIES`: PostgreSQL implements the keyword directly,
     // where MySQL implements none and emulating one needs the union rewrite mission.md
     // places out of scope. It withholds `JOIN_CONDITION_ALL` for the same reason MySQL
     // does, which is what keeps the full join safe as well: PostgreSQL refuses a full
@@ -364,7 +407,7 @@ const POSTGRES_CAPABILITIES: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// `vs-adapter/postgresql-pushdown`: PostgreSQL advertises exactly the 40
+/// `vs-adapter/postgresql-pushdown`: PostgreSQL advertises exactly the 52
 /// entries of [`POSTGRES_CAPABILITIES`], element for element.
 #[test]
 fn postgres_capability_set_is_exact() {
@@ -377,7 +420,7 @@ fn postgres_capability_set_is_exact() {
 /// deriving this one from PostgreSQL's would be the second capability list
 /// `vs-adapter/pushdown-dialect` forbids.
 ///
-/// `drivers/trino.toml` states the set as PostgreSQL's 40 entries, minus
+/// `drivers/trino.toml` states the set as PostgreSQL's 52 entries, minus
 /// `FN_PRED_LIKE_ESCAPE`, plus `AGGREGATE_GROUP_BY_TUPLE`, and that is exactly
 /// what this list spells out. `FN_PRED_LIKE_ESCAPE` is withheld because Trino
 /// defines no default escape character and rejects an escape character
@@ -391,6 +434,7 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "AGGREGATE_GROUP_BY_TUPLE",
     "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
@@ -416,6 +460,17 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "FN_PRED_LIKE",
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
+    "FN_YEAR",
+    "FN_MONTH",
+    "FN_DAY",
+    "FN_UPPER",
+    "FN_LOWER",
+    "FN_TRIM",
+    "FN_LENGTH",
+    "FN_SUBSTR",
+    "FN_ADD",
+    "FN_SUB",
+    "FN_MULT",
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
     "LITERAL_DOUBLE",
@@ -430,7 +485,7 @@ const TRINO_CAPABILITIES: &[&str] = &[
     "JOIN_CONDITION_EQUI",
 ];
 
-/// `vs-adapter/trino-pushdown`: Trino advertises exactly the 40 entries of
+/// `vs-adapter/trino-pushdown`: Trino advertises exactly the 52 entries of
 /// [`TRINO_CAPABILITIES`], element for element.
 #[test]
 fn trino_capability_set_is_exact() {
@@ -439,7 +494,7 @@ fn trino_capability_set_is_exact() {
 
 /// `vs-adapter/trino-pushdown`: the Trino and PostgreSQL sets differ by exactly
 /// two named entries, one in each direction. Each set is stated by its own
-/// declaration, so the 39 entries they share are an outcome of two decisions,
+/// declaration, so the 51 entries they share are an outcome of two decisions,
 /// and a change to either set fails here rather than being absorbed.
 #[test]
 fn trino_and_postgresql_sets_differ_by_two_named_entries() {
@@ -481,4 +536,128 @@ fn assert_set_is(driver: Driver, expected: &[&str]) {
          changes which fragments Exasol delegates to an existing virtual schema",
         driver.as_str()
     );
+}
+
+/// `vs-adapter/pushdown-scalar-function`: every dialect advertises the scalar
+/// functions it renders, `FN_TRIM` everywhere but MySQL, and no other.
+#[test]
+fn each_dialect_advertises_the_scalar_functions_it_renders() {
+    for driver in Driver::ALL {
+        let advertised: Vec<String> = advertised_by(*driver)
+            .into_iter()
+            .filter(|capability| {
+                capability.starts_with("FN_")
+                    && !FUNCTION_CAPABILITY_PREFIXES
+                        .iter()
+                        .any(|prefix| capability.starts_with(prefix))
+            })
+            .collect();
+        let expected: Vec<&str> = SCALAR_FUNCTION_CAPABILITIES
+            .iter()
+            .copied()
+            .filter(|capability| *driver != Driver::MySql || *capability != "FN_TRIM")
+            .collect();
+
+        assert_eq!(advertised, expected, "{}", driver.as_str());
+        assert!(!advertised.iter().any(|capability| capability == "FN_CAST"));
+    }
+}
+
+/// `vs-adapter/pushdown-dialect`: each advertised scalar function renders
+/// over one operand of every class Exasol admits for it, because a
+/// capability is negotiated once and admits every operand type.
+#[test]
+fn every_scalar_function_renders_over_each_admitted_operand_class() {
+    use crate::dialect_test_fixtures::{column, numeric_literal, scalar, scalar_request};
+    use serde_json::json;
+
+    let interval = || scalar("SUB", vec![column("ts"), column("ts")]);
+    let texts = ["v", "i", "d", "f", "dt", "ts", "b"];
+    let one = |name: &str| -> Vec<serde_json::Value> {
+        texts
+            .iter()
+            .map(|operand| scalar(name, vec![column(operand)]))
+            .collect()
+    };
+    let arms =
+        |capability: &str| -> Vec<serde_json::Value> {
+            match capability {
+                "FN_YEAR" | "FN_MONTH" | "FN_DAY" => ["dt", "ts", "v"]
+                    .iter()
+                    .map(|operand| scalar(&capability[3..], vec![column(operand)]))
+                    .collect(),
+                "FN_UPPER" | "FN_LOWER" | "FN_LENGTH" => one(&capability[3..]),
+                "FN_TRIM" => {
+                    let mut arms = one("TRIM");
+                    arms.push(scalar("TRIM", vec![column("v"), column("d")]));
+                    arms
+                }
+                "FN_SUBSTR" => texts
+                    .iter()
+                    .map(|operand| scalar("SUBSTR", vec![column(operand), column("d")]))
+                    .chain(["i", "f", "v"].iter().map(|start| {
+                        scalar("SUBSTR", vec![column("v"), column(start), column(start)])
+                    }))
+                    .collect(),
+                "FN_ADD" | "FN_SUB" | "FN_MULT" => {
+                    let name = &capability[3..];
+                    let mut pairs = vec![
+                        (column("i"), column("d")),
+                        (column("f"), column("d")),
+                        (column("v"), numeric_literal("1")),
+                        (column("b"), numeric_literal("1")),
+                    ];
+                    match name {
+                        "ADD" => pairs.extend([
+                            (column("dt"), column("f")),
+                            (numeric_literal("1"), column("ts")),
+                            (column("ts"), interval()),
+                            (interval(), column("dt")),
+                            (interval(), interval()),
+                        ]),
+                        "SUB" => pairs.extend([
+                            (column("dt"), column("d")),
+                            (column("dt"), column("dt")),
+                            (column("ts"), column("dt")),
+                            (column("dt"), column("ts")),
+                            (column("ts"), interval()),
+                            (interval(), interval()),
+                        ]),
+                        _ => pairs.extend([(interval(), column("d")), (column("f"), interval())]),
+                    }
+                    pairs
+                        .into_iter()
+                        .map(|(left, right)| scalar(name, vec![left, right]))
+                        .collect()
+                }
+                other => panic!("no operand arms for `{other}`"),
+            }
+        };
+
+    for driver in Driver::ALL {
+        let dialect = dialect_for(*driver);
+        let namespace = crate::adapter_notes::SourceQualifier::of(
+            (0..driver.qualifier_segment_count())
+                .map(|segment| format!("s{segment}"))
+                .collect(),
+        )
+        .expect("a qualifier");
+        for capability in dialect
+            .capabilities()
+            .iter()
+            .filter(|capability| SCALAR_FUNCTION_CAPABILITIES.contains(capability))
+        {
+            for entry in arms(capability) {
+                let request = scalar_request(entry.clone(), json!({"type": "DOUBLE"}));
+                let query = crate::pushdown_query::parse(&request, &namespace)
+                    .unwrap_or_else(|error| panic!("{entry} must parse: {error}"));
+                dialect.render(&query).unwrap_or_else(|error| {
+                    panic!(
+                        "`{}` advertises `{capability}` but cannot render {entry}: {error}",
+                        driver.as_str()
+                    )
+                });
+            }
+        }
+    }
 }

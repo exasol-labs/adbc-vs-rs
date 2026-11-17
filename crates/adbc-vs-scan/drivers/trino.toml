@@ -49,9 +49,9 @@ segment_count = 2
 # error: the two are one decision, and the capability invariant test renders
 # every entry below to hold them together.
 #
-# The set is the 40 entries `postgresql.toml` states, minus `FN_PRED_LIKE_ESCAPE`,
+# The set is the 52 entries `postgresql.toml` states, minus `FN_PRED_LIKE_ESCAPE`,
 # plus one Trino advertises and no other dialect does:
-# `AGGREGATE_GROUP_BY_TUPLE`. That makes 40 entries. Trino executes a
+# `AGGREGATE_GROUP_BY_TUPLE`. That makes 52 entries. Trino executes a
 # multi-column `GROUP BY`, and the capability needs no rendering change in any
 # dialect — `vs-adapter/pushdown-dialect` already records that each dialect
 # renders every grouping column a request carries, so this widening costs no
@@ -76,17 +76,14 @@ segment_count = 2
 #     joins. Trino would execute a non-equi condition, including under a full
 #     outer join; the boundary is this project's, not Trino's
 #     (mission.md, `vs-adapter/pushdown-join`).
-#   - `AGGREGATE_GROUP_BY_EXPRESSION` — this release groups by columns rather
-#     than expressions, for every dialect (`vs-adapter/pushdown-aggregation`).
 #   - `ORDER_BY_COLUMN`, `ORDER_BY_EXPRESSION`, `LIMIT`, `LIMIT_WITH_OFFSET`
 #     — the emitting-UDF transport carries no ordering guarantee, whatever
 #     the source (`vs-adapter/result-ordering`).
 #   - `LITERAL_BOOL` — no mapped column produces Exasol `BOOLEAN`, and the
 #     declarable-set closure rests on that
 #     (`vs-adapter/type-mapping`, `vs-adapter/pushdown-dialect`).
-#   - Every `FN_<scalar>` — no dialect advertises a scalar function, which is
-#     what keeps the declarable type set closed
-#     (`vs-adapter/pushdown-dialect`).
+#   - `FN_CAST` and every `FN_<scalar>` outside the eleven listed — no dialect
+#     renders another scalar function (`vs-adapter/pushdown-scalar-function`).
 #
 # The names are `virtual-schema-common-java`'s protocol vocabulary. Nothing
 # validates them at build time — this list is the adapter's only list of
@@ -101,6 +98,7 @@ advertised = [
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "AGGREGATE_GROUP_BY_TUPLE",
     "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
@@ -124,6 +122,17 @@ advertised = [
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
     "FN_PRED_LIKE",
+    "FN_YEAR",
+    "FN_MONTH",
+    "FN_DAY",
+    "FN_UPPER",
+    "FN_LOWER",
+    "FN_TRIM",
+    "FN_LENGTH",
+    "FN_SUBSTR",
+    "FN_ADD",
+    "FN_SUB",
+    "FN_MULT",
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
     "LITERAL_DOUBLE",

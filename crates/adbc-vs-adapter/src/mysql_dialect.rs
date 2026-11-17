@@ -65,7 +65,8 @@ use crate::dialect_common::{
 };
 use crate::mysql_type_mapping;
 use crate::pushdown_query::{
-    Aggregation, ColumnRef, Expression, Literal, OperandConversion, Query,
+    Aggregation, ColumnRef, Direction, Expression, Literal, OperandConversion, Operator, Query,
+    ValueClass,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
 
@@ -89,6 +90,10 @@ const JOIN_KEYWORDS: &[(&str, &str)] = &[
 /// a statement fragment or begin a comment: MySQL's `--` comment needs a
 /// following space, which is not in this set.
 const NUMERIC_LITERAL_CHARACTERS: &str = "0123456789+-.eE";
+
+/// MySQL's widest exact decimal, and the largest scale it holds.
+const MAX_DECIMAL_PRECISION: u32 = 65;
+const MAX_DECIMAL_SCALE: u32 = 30;
 
 /// The character set a string literal's hex introducer names: the literal
 /// carries UTF-8 bytes whatever the column's character set.
@@ -179,11 +184,11 @@ impl Statement<'_> {
         &self,
         aggregation: Option<&Aggregation>,
     ) -> Result<Vec<String>, RenderError> {
-        let Some(Aggregation::GroupBy(columns)) = aggregation else {
+        let Some(Aggregation::GroupBy(keys)) = aggregation else {
             return Ok(Vec::new());
         };
 
-        self.per_row().render_group_by_keys(columns)
+        self.per_row().render_group_by_keys(keys)
     }
 }
 
@@ -194,6 +199,11 @@ impl StatementRenderer for Statement<'_> {
     const JOIN_KEYWORDS: &'static [(&'static str, &'static str)] = JOIN_KEYWORDS; // NOSONAR: an associated const cannot elide its lifetime
     const JOIN_NOTE: &'static str = "MySQL implements no `FULL OUTER JOIN`, and "; // NOSONAR: an associated const cannot elide its lifetime
     const DOUBLE_TYPE: &'static str = "DOUBLE"; // NOSONAR: an associated const cannot elide its lifetime
+    const TEXT_TYPE: &'static str = "CHAR"; // NOSONAR: an associated const cannot elide its lifetime
+    /// MySQL's `LENGTH` counts bytes.
+    const LENGTH_FUNCTION: &'static str = "CHAR_LENGTH"; // NOSONAR: an associated const cannot elide its lifetime
+    const TIMESTAMP_TYPE: &'static str = "DATETIME(6)"; // NOSONAR: an associated const cannot elide its lifetime
+    const INTEGER_TYPE: &'static str = "SIGNED"; // NOSONAR: an associated const cannot elide its lifetime
 
     fn tables(&self) -> &Tables<'_> {
         self.tables
@@ -219,6 +229,110 @@ impl StatementRenderer for Statement<'_> {
             ),
             Some(OperandConversion::Boolean) | None => operand.to_string(),
         }
+    }
+
+    /// A grouped expression outside an aggregate reads through `ANY_VALUE`,
+    /// because `ONLY_FULL_GROUP_BY` refuses an expression over a grouped
+    /// expression, measured on MySQL 8.4 for `YEAR(d) + 1 ... GROUP BY YEAR(d)`.
+    fn grouped(&self, rendered: String) -> String {
+        if self.any_value_keys.contains(&rendered) {
+            return format!("ANY_VALUE({rendered})");
+        }
+        rendered
+    }
+
+    fn number_text(&self, operand: &str, _scale: u32) -> String {
+        format!("TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM CAST({operand} AS CHAR)))")
+    }
+
+    fn temporal_text(&self, operand: &str, class: ValueClass) -> String {
+        match class {
+            ValueClass::Date => format!("DATE_FORMAT({operand}, '%Y-%m-%d')"),
+            _ => format!("DATE_FORMAT({operand}, '%Y-%m-%d %H:%i:%s.%f')"),
+        }
+    }
+
+    /// MySQL's `TRIM` removes a substring rather than a set of characters, so
+    /// `FN_TRIM` is not advertised and Exasol evaluates `TRIM` itself.
+    fn render_trim(
+        &self,
+        _operand: &str,
+        _characters: Option<&str>,
+    ) -> Result<String, RenderError> {
+        Err(RenderError::new(
+            "a `function_scalar` node named `TRIM` reached the MySQL dialect, which does not \
+             advertise `FN_TRIM`: MySQL's `TRIM` removes a substring rather than a set of \
+             characters",
+        ))
+    }
+
+    /// Tests the length, because a PAD SPACE collation compares a value of only
+    /// blanks equal to ''. ponytail: repeats `rendered`, so nesting doubles the text.
+    fn empty_as_null(&self, rendered: &str) -> String {
+        format!("CASE WHEN CHAR_LENGTH({rendered}) = 0 THEN NULL ELSE {rendered} END")
+    }
+
+    /// `DECIMAL(65,s)` is MySQL's widest; a scale beyond MySQL's 30 renders
+    /// uncast.
+    fn exact(&self, operand: &str, class: ValueClass, _operator: Operator) -> String {
+        let ValueClass::Exact { scale, .. } = class else {
+            return operand.to_string();
+        };
+        if scale > MAX_DECIMAL_SCALE {
+            return operand.to_string();
+        }
+        format!("CAST({operand} AS DECIMAL({MAX_DECIMAL_PRECISION},{scale}))")
+    }
+
+    /// MySQL's `+` reads a date as the number `YYYYMMDD`, so days shift
+    /// through `DATE_ADD`.
+    fn shift_days(
+        &self,
+        temporal: &str,
+        _class: ValueClass,
+        days: &str,
+        direction: Direction,
+    ) -> String {
+        let function = match direction {
+            Direction::Forward => "DATE_ADD",
+            Direction::Backward => "DATE_SUB",
+        };
+        format!("{function}({temporal}, INTERVAL {days} DAY)")
+    }
+
+    fn days_between(&self, left: &str, right: &str) -> String {
+        format!("DATEDIFF({left}, {right})")
+    }
+
+    /// MySQL holds no interval value: an interval is its microsecond count.
+    fn timestamp_difference(&self, left: &str, right: &str) -> String {
+        format!("TRUNCATE(TIMESTAMPDIFF(MICROSECOND, {right}, {left}), -3)")
+    }
+
+    fn shift_interval(
+        &self,
+        temporal: &str,
+        class: ValueClass,
+        interval: &str,
+        direction: Direction,
+    ) -> String {
+        let function = match direction {
+            Direction::Forward => "DATE_ADD",
+            Direction::Backward => "DATE_SUB",
+        };
+        let shifted = format!("{function}({temporal}, INTERVAL {interval} MICROSECOND)");
+        match class {
+            ValueClass::Date => format!("CAST({shifted} AS DATE)"),
+            _ => shifted,
+        }
+    }
+
+    fn interval_scale(&self, interval: &str, factor: &str) -> String {
+        format!("TRUNCATE({interval} * {factor}, -3)")
+    }
+
+    fn interval_seconds(&self, interval: &str) -> String {
+        format!("(CAST({interval} AS DECIMAL({MAX_DECIMAL_PRECISION},6)) / 1000000)")
     }
 
     /// Renders one column reference through the read expression MySQL's type

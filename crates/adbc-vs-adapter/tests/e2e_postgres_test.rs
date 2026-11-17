@@ -114,7 +114,13 @@ fn mirror_answers_under_exasols_own_comparison_and_ordering_rules() {
 /// a pushdown defect.
 #[test]
 fn mirror_declares_the_same_columns_and_types_as_the_virtual_table() {
-    for table in ["items", "items_c", "item_notes", TYPE_COVERAGE] {
+    for table in [
+        "items",
+        "items_c",
+        "item_notes",
+        TYPE_COVERAGE,
+        common::scalars::TABLE,
+    ] {
         let mirrored = declared_columns(postgres_mirror::SCHEMA, table);
         let virtual_table = declared_columns(VIRTUAL_SCHEMA, table);
 
@@ -2867,4 +2873,114 @@ fn exasol_sends_the_measured_boolean_and_timestamp_filter_shapes() {
         }),
         "a TIMESTAMP literal must carry all six fractional digits"
     );
+}
+
+// --- scalar functions -------------------------------------------------------
+
+fn scalars() -> common::scalars::Scenario<'static> {
+    common::scalars::Scenario {
+        exasol: &stack::shared().exasol,
+        source: common::scalars::Source::Postgres,
+        virtual_schema: VIRTUAL_SCHEMA,
+        mirror_schema: postgres_mirror::SCHEMA,
+    }
+}
+
+#[test]
+fn date_parts_reach_postgresql_and_match_the_mirror() {
+    scalars().date_parts();
+}
+
+#[test]
+fn exact_arithmetic_reaches_postgresql_and_matches_the_mirror() {
+    scalars().exact_arithmetic();
+}
+
+#[test]
+fn double_and_character_arithmetic_matches_the_mirror() {
+    scalars().double_and_character_arithmetic();
+}
+
+#[test]
+fn date_arithmetic_reaches_postgresql_and_matches_the_mirror() {
+    scalars().date_arithmetic();
+}
+
+#[test]
+fn timestamp_difference_matches_the_mirror() {
+    scalars().timestamp_difference();
+}
+
+#[test]
+fn string_functions_reach_postgresql_and_match_the_mirror() {
+    scalars().string_functions();
+}
+
+#[test]
+fn substr_positions_match_the_mirror() {
+    scalars().substr_positions();
+}
+
+#[test]
+fn empty_string_function_result_is_null_as_in_exasol() {
+    scalars().empty_string_results();
+}
+
+#[test]
+fn implicitly_converted_operands_match_the_mirror() {
+    scalars().implicit_conversions();
+}
+
+#[test]
+fn group_by_year_reaches_postgresql_and_matches_the_mirror() {
+    scalars().group_by_year();
+}
+
+/// `LENGTH` over the `CHAR(5)` value `ab` counts what Postgres keeps.
+#[test]
+fn string_function_results_follow_the_source() {
+    scalars().string_function_results_follow_the_source("2");
+}
+
+/// `pushdown-dialect`: every type Exasol declares for a delegated scalar
+/// function is in the declarable set, or is the interval the scan emits as a
+/// `DECIMAL` and Exasol converts.
+#[test]
+fn scalar_function_declared_types_stay_in_the_declarable_set() {
+    let scenario = scalars();
+    for select in [
+        "YEAR(\"dt\"), LENGTH(\"s\"), UPPER(\"s\"), TRIM(\"s\"), SUBSTR(\"s\", 2)",
+        "\"i\" + 1, \"f\" * \"d\", \"num\" + 1, \"flag\" + 1",
+        "\"dt\" + 1, \"ts\" - 1, \"dt\" - \"dt\", \"ts\" - \"ts2\", \"ts\" + (\"ts\" - \"ts2\")",
+    ] {
+        let call = scenario.pushdown_call(select);
+        let emits = &call[call.rfind("EMITS (").expect("an EMITS clause")..];
+        for declared in emits["EMITS (".len()..].split(", \"").map(|entry| {
+            entry
+                .split_once(' ')
+                .map(|(_, declared)| declared.to_string())
+                .unwrap_or_default()
+        }) {
+            assert!(
+                [
+                    "DECIMAL",
+                    "VARCHAR",
+                    "CHAR",
+                    "DATE",
+                    "TIMESTAMP",
+                    "DOUBLE",
+                    "BOOLEAN"
+                ]
+                .iter()
+                .any(|name| declared.starts_with(name)),
+                "`{select}` declares `{declared}` outside the declarable set: {call}"
+            );
+        }
+    }
+}
+
+/// `UPPER` over `ß` returns the source's own case mapping.
+#[test]
+fn upper_over_a_non_ascii_letter_follows_the_source() {
+    scalars().upper_follows_the_source("ß");
 }
