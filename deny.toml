@@ -57,6 +57,11 @@ ignore = [
     # reaches it, to parse the registry index fetched over verified TLS.
     # 2026-10-22 re-evaluate when serde_yaml_ng drops unsafe-libyaml.
     "RUSTSEC-2024-0449",
+    # chrono is unmaintained with no safe upgrade. Only arrow reaches it, for the
+    # temporal arrays and casts the scan coerces timestamps through; no adbc-vs
+    # code names chrono, and arrow-array 60.1.0 still requires it.
+    # 2026-11-17 re-evaluate when arrow drops chrono or adopts jiff or time.
+    "RUSTSEC-2026-0543",
 ]
 
 [sources]
