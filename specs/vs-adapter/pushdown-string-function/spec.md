@@ -32,6 +32,7 @@ States the result each delegated string function returns, `UPPER`, `LOWER`, `TRI
 * *WHEN* Exasol runs `TRIM` over the column as a `GROUP BY` key, as a `COUNT(DISTINCT)` operand, and in an `IS NULL` filter, and `SUBSTR("c", 10) IS NULL`, under each dialect that advertises the function
 * *THEN* each dialect MUST render an empty result of `TRIM`, `SUBSTR`, `UPPER`, and `LOWER` as null at the source, because the source keeps the empty string apart from null while Exasol reads it as null
 * *AND* each query MUST return exactly the rows the mirror returns, so the blank row and the null row form one group and match `IS NULL`
+* *AND* `LENGTH` MUST render as `NULLIF(<length function>(<operand>), 0)`, so an empty value counts as null without a comparison with `''`, which a `PAD SPACE` collation also matches for a value of only blanks
 
 ### Scenario: String function results follow the source for padding and case mapping
 
@@ -46,3 +47,4 @@ States the result each delegated string function returns, `UPPER`, `LOWER`, `TRI
 * *WHEN* Exasol runs `LENGTH` and `SUBSTR` over the `DECIMAL` and the `DATE` column, `YEAR` over the `VARCHAR` column, and `+ 1` over the `BOOLEAN` column, each where Exasol accepts the query
 * *THEN* each query Exasol delegates MUST return exactly the rows the mirror returns, because the dialect renders the conversion Exasol applies under its default `NLS_DATE_FORMAT` and `NLS_TIMESTAMP_FORMAT`
 * *AND* `docs/pushdown.md` MUST state that a session that changes either format is not followed
+* *AND* an empty `VARCHAR` value under `YEAR`, `MONTH`, or `DAY` MUST read as null before its conversion to a timestamp, as Exasol reads it, because PostgreSQL and Trino refuse to cast an empty string to a timestamp

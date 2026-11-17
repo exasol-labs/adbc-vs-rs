@@ -1306,22 +1306,22 @@ fn string_functions_render_with_mysql_semantics() {
     for (entry, fragment) in [
         (
             fixtures::scalar("LENGTH", vec![v()]),
-            "CHAR_LENGTH(NULLIF(`v`, ''))",
+            "NULLIF(CHAR_LENGTH(`v`), 0)",
         ),
         (
             fixtures::scalar("UPPER", vec![v()]),
-            "NULLIF(UPPER(`v`), '')",
+            "CASE WHEN CHAR_LENGTH(UPPER(`v`)) = 0 THEN NULL ELSE UPPER(`v`) END",
         ),
         (
             fixtures::scalar("LOWER", vec![v()]),
-            "NULLIF(LOWER(`v`), '')",
+            "CASE WHEN CHAR_LENGTH(LOWER(`v`)) = 0 THEN NULL ELSE LOWER(`v`) END",
         ),
         (
             fixtures::scalar(
                 "SUBSTR",
                 vec![v(), numeric_literal("2"), numeric_literal("3")],
             ),
-            "NULLIF(SUBSTR(`v`, CAST(2 AS SIGNED), CAST(3 AS SIGNED)), '')",
+            "CASE WHEN CHAR_LENGTH(SUBSTR(`v`, CAST(2 AS SIGNED), CAST(3 AS SIGNED))) = 0 THEN NULL",
         ),
         (
             fixtures::scalar("SUBSTR", vec![v(), numeric_literal("-2")]),
@@ -1341,7 +1341,7 @@ fn string_functions_render_with_mysql_semantics() {
         ),
         (
             fixtures::scalar("YEAR", vec![v()]),
-            "YEAR(CAST(`v` AS DATETIME(6)))",
+            "YEAR(CAST(CASE WHEN CHAR_LENGTH(`v`) = 0 THEN NULL ELSE `v` END AS DATETIME(6)))",
         ),
     ] {
         assert_renders(entry, fragment);

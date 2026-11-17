@@ -266,6 +266,12 @@ impl StatementRenderer for Statement<'_> {
         ))
     }
 
+    /// Tests the length, because a PAD SPACE collation compares a value of only
+    /// blanks equal to ''. ponytail: repeats `rendered`, so nesting doubles the text.
+    fn empty_as_null(&self, rendered: &str) -> String {
+        format!("CASE WHEN CHAR_LENGTH({rendered}) = 0 THEN NULL ELSE {rendered} END")
+    }
+
     /// `DECIMAL(65,s)` is MySQL's widest; a scale beyond MySQL's 30 renders
     /// uncast.
     fn exact(&self, operand: &str, class: ValueClass, _operator: Operator) -> String {

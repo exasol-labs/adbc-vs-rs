@@ -76,6 +76,7 @@ Some results follow the source instead:
 - `YEAR`, `MONTH`, and `DAY` over text that is not a timestamp return null. Exasol fails the query for such a value.
 - An expression over a grouped expression, such as `YEAR("d") + 1` with `GROUP BY YEAR("d")`, reads the grouped value through `ANY_VALUE`, because MySQL's `ONLY_FULL_GROUP_BY` mode refuses the expression otherwise.
 - A `SUM` or `AVG` over a character column reads a value that is not a number as its numeric prefix, or as 0. Exasol fails the query for such a value.
+- A product of two exact numbers whose scales add up to more than 30, such as two `DECIMAL(18,18)` values, keeps 30 fractional digits, because MySQL limits a decimal's scale to 30. Exasol keeps up to 36, so a small product can return 0 where Exasol returns a nonzero value.
 
 ### PostgreSQL
 

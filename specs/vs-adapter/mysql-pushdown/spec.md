@@ -112,6 +112,7 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 * *THEN* `LENGTH` MUST render as `CHAR_LENGTH`, because MySQL's `LENGTH` counts bytes
 * *AND* every rendered string literal MUST keep the `_utf8mb4 X'<hex>'` form
 * *AND* a `function_scalar` node named `TRIM` MUST fail with an error naming `FN_TRIM` as a capability this dialect does not advertise
+* *AND* an empty result of `UPPER`, `LOWER`, `SUBSTR`, or an empty character operand of `YEAR`, `MONTH`, or `DAY` MUST read as null through `CASE WHEN CHAR_LENGTH(<value>) = 0 THEN NULL ELSE <value> END`, because a `PAD SPACE` collation such as `utf8mb4_general_ci` compares a value of only blanks equal to `''`, so `NULLIF(<value>, '')` would turn it into null
 
 ### Scenario: Arithmetic renders with MySQL's day and decimal semantics
 
@@ -120,3 +121,4 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 * *THEN* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render through `DATE_ADD` or `DATE_SUB` with a `DAY` interval of the number rounded half away from zero, as Exasol rounds it, and `DATE` minus `DATE` MUST render through `DATEDIFF`, because MySQL's `+` reads a date as the number `YYYYMMDD`
 * *AND* a `TIMESTAMP` difference MUST render through `TIMESTAMPDIFF(MICROSECOND, ...)` truncated to milliseconds, as many as an Exasol interval holds, a timestamp plus or minus such a difference through a `MICROSECOND` interval of it, and a select-list entry declared `INTERVAL DAY TO SECOND` as that microsecond count divided by 1000000
 * *AND* an exact-numeric operand of `+`, `-`, or `*` MUST render cast to `DECIMAL(65,s)`, so a `BIGINT` result beyond its range is returned rather than refused with MySQL's out-of-range error
+* *AND* a product whose operand scales add up to more than 30 MUST keep MySQL's result, which MySQL rounds to 30 fractional digits, and `docs/pushdown.md` MUST state this difference from Exasol, which keeps up to 36

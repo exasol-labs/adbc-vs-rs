@@ -42,7 +42,8 @@ const NOT_AT_TRINO: [usize; 4] = [9, 11, 12, 13];
 /// The rows, one value per column of [`COLUMNS`], separated by `, `, which
 /// no value contains. `i` reaches the `BIGINT`
 /// maximum, `d` carries fractional days, `num` holds numbers as text, `s`
-/// holds blanks, multi-byte characters, and a value only blanks, `ts` and
+/// holds blanks, multi-byte characters, and a value only blanks (a PAD SPACE
+/// collation at MySQL), `dtext` holds an empty string, `ts` and
 /// `ts2` lie a millisecond, days, and more than a year apart, and `us1` and
 /// `us2` lie a millisecond and a half apart in both directions.
 const ROWS: [&str; 7] = [
@@ -51,7 +52,7 @@ const ROWS: [&str; 7] = [
     "3, 0, 1000, -3.5, '10', 'xxaxx', DATE '2024-01-01', TIMESTAMP '2025-03-01 12:00:00.250', TIMESTAMP '2024-02-29 06:00:00.000', 'a', '2024-02-29 10:11:12', TRUE, TIMESTAMP '2024-01-02 00:00:00.123456', TIMESTAMP '2024-01-01 00:00:00.000001'",
     "4, 7, 0.0001, 2.0, '0.5', '   ', DATE '2024-03-01', TIMESTAMP '2024-03-01 00:00:00.001', TIMESTAMP '2024-03-01 00:00:00.000', 'xy', '2024-03-01', FALSE, TIMESTAMP '2024-01-01 00:00:00.000999', TIMESTAMP '2024-01-01 00:00:00.000000'",
     "5, 2, 3.75, 0.5, '3', 'é', DATE '2020-06-15', TIMESTAMP '2020-06-15 08:30:00.000', TIMESTAMP '2020-06-14 20:30:00.000', 'é', '2020-06-15', TRUE, TIMESTAMP '2020-06-15 08:30:00.250000', TIMESTAMP '2020-06-15 08:30:00.250000'",
-    "6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL",
+    "6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '', NULL, NULL, NULL",
     "7, 1, 1, 1.0, '1', 'ß', DATE '2021-01-01', TIMESTAMP '2021-01-01 00:00:00.000', TIMESTAMP '2021-01-01 00:00:00.000', 'ß', '2021-01-01', TRUE, TIMESTAMP '2021-01-01 00:00:00.000000', TIMESTAMP '2021-01-01 00:00:00.000000'",
 ];
 
@@ -95,7 +96,8 @@ pub fn mysql_script() -> String {
     format!(
         "DROP TABLE IF EXISTS {TABLE}; \
          CREATE TABLE {TABLE} (id INT NOT NULL, i BIGINT NULL, d DECIMAL(18,4) NULL, \
-             f DOUBLE NULL, num VARCHAR(20) NULL, s VARCHAR(20) NULL, dt DATE NULL, \
+             f DOUBLE NULL, num VARCHAR(20) NULL, \
+             s VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL, dt DATE NULL, \
              ts DATETIME(3) NULL, ts2 DATETIME(3) NULL, ch CHAR(5) NULL, \
              dtext VARCHAR(30) NULL, flag BIT(1) NULL, us1 DATETIME(6) NULL, \
              us2 DATETIME(6) NULL, PRIMARY KEY (id)); \
@@ -497,9 +499,9 @@ impl Scenario<'_> {
                 "YEAR(\"dtext\") AS A",
                 "",
                 [
-                    "YEAR(CAST(`dtext`",
-                    "EXTRACT(YEAR FROM CAST(\"dtext\"",
-                    "YEAR(CAST(\"dtext\"",
+                    "YEAR(CAST(CASE WHEN CHAR_LENGTH(`dtext`) = 0",
+                    "EXTRACT(YEAR FROM CAST(NULLIF(\"dtext\", '')",
+                    "YEAR(CAST(NULLIF(\"dtext\", '')",
                 ],
             ),
         ]);

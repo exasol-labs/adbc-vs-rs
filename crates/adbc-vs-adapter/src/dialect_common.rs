@@ -242,6 +242,11 @@ pub trait StatementRenderer {
         format!("CAST({operand} AS {})", Self::INTEGER_TYPE)
     }
 
+    /// A character result read as null when empty, as Exasol reads it.
+    fn empty_as_null(&self, rendered: &str) -> String {
+        format!("NULLIF({rendered}, '')")
+    }
+
     /// A date or a timestamp, a date reading as midnight.
     fn timestamp(&self, operand: &str, class: ValueClass) -> String {
         match class {
@@ -304,13 +309,17 @@ pub trait StatementRenderer {
                 let rendered = self.render_expression(&operand.expression)?;
                 let temporal = match operand.class {
                     ValueClass::Date | ValueClass::Timestamp => rendered,
-                    ValueClass::Character => self.text_to_timestamp(&rendered),
+                    ValueClass::Character => self.text_to_timestamp(&self.empty_as_null(&rendered)),
                     other => return Err(unconvertible("a date part", other)),
                 };
                 self.date_part(*part, &temporal)
             }
-            ScalarCall::Upper(operand) => empty_as_null(&format!("UPPER({})", self.text(operand)?)),
-            ScalarCall::Lower(operand) => empty_as_null(&format!("LOWER({})", self.text(operand)?)),
+            ScalarCall::Upper(operand) => {
+                self.empty_as_null(&format!("UPPER({})", self.text(operand)?))
+            }
+            ScalarCall::Lower(operand) => {
+                self.empty_as_null(&format!("LOWER({})", self.text(operand)?))
+            }
             ScalarCall::Trim {
                 operand,
                 characters,
@@ -319,12 +328,14 @@ pub trait StatementRenderer {
                     .as_ref()
                     .map(|characters| self.text(characters))
                     .transpose()?;
-                empty_as_null(&self.render_trim(&self.text(operand)?, characters.as_deref())?)
+                self.empty_as_null(&self.render_trim(&self.text(operand)?, characters.as_deref())?)
             }
+            // A zero count, not a comparison with '', which a PAD SPACE collation
+            // would also match for a value of only blanks.
             ScalarCall::Length(operand) => format!(
-                "{}({})",
+                "NULLIF({}({}), 0)",
                 Self::LENGTH_FUNCTION,
-                empty_as_null(&self.text(operand)?)
+                self.text(operand)?
             ),
             ScalarCall::Substr {
                 operand,
@@ -370,7 +381,7 @@ pub trait StatementRenderer {
         }
 
         let substring = format!("SUBSTR({})", arguments.join(", "));
-        Ok(empty_as_null(&if null_when.is_empty() {
+        Ok(self.empty_as_null(&if null_when.is_empty() {
             substring
         } else {
             format!(
@@ -806,11 +817,6 @@ pub fn render_literal_with(
         Literal::Date(value) => render_temporal_literal(target, "DATE", value),
         Literal::Timestamp(value) => render_temporal_literal(target, "TIMESTAMP", value),
     }
-}
-
-/// A character result read as null when empty, as Exasol reads it.
-fn empty_as_null(rendered: &str) -> String {
-    format!("NULLIF({rendered}, '')")
 }
 
 /// A boolean as the 1 or 0 Exasol reads it as in arithmetic.

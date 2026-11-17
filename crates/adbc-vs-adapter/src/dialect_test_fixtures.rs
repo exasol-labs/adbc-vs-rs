@@ -1061,7 +1061,7 @@ pub(crate) fn character_sum_avg_entries() -> Vec<(Value, Value)> {
 /// The fragment each scalar-function capability puts in the statement, which
 /// every dialect spells alike.
 const SCALAR_FRAGMENTS: &[(&str, &str)] = &[
-    ("AGGREGATE_GROUP_BY_EXPRESSION", "GROUP BY NULLIF(UPPER("),
+    ("AGGREGATE_GROUP_BY_EXPRESSION", "GROUP BY "),
     ("FN_YEAR", "YEAR"),
     ("FN_MONTH", "MONTH"),
     ("FN_DAY", "DAY"),

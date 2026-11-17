@@ -1400,11 +1400,11 @@ fn scalar_functions_render_in_postgresql_forms() {
         ),
         (
             fixtures::scalar("DAY", vec![col("v")]),
-            "EXTRACT(DAY FROM CAST(\"v\" AS timestamp))",
+            "EXTRACT(DAY FROM CAST(NULLIF(\"v\", '') AS timestamp))",
         ),
         (
             fixtures::scalar("LENGTH", vec![col("v")]),
-            "CHAR_LENGTH(NULLIF(\"v\", ''))",
+            "NULLIF(CHAR_LENGTH(\"v\"), 0)",
         ),
         (
             fixtures::scalar("TRIM", vec![col("v")]),

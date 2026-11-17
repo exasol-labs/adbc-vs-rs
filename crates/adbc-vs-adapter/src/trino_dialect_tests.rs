@@ -711,7 +711,7 @@ fn scalar_functions_render_in_trino_forms() {
         (fixtures::scalar("MONTH", vec![col("dt")]), "MONTH(\"dt\")"),
         (
             fixtures::scalar("LENGTH", vec![col("v")]),
-            "LENGTH(NULLIF(\"v\", ''))",
+            "NULLIF(LENGTH(\"v\"), 0)",
         ),
         (
             fixtures::scalar("TRIM", vec![col("v"), fixtures::string_literal("x")]),
