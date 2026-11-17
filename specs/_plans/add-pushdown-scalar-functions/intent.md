@@ -14,6 +14,7 @@
 - Q: Two-key GROUP BY on MySQL and PostgreSQL, which withhold AGGREGATE_GROUP_BY_TUPLE? → A: Follow-up plan
 - Q: Empty string from a delegated string function, which Exasol reads as NULL? → A: Map it to NULL at the source
 - Q: MySQL two-argument TRIM? → A: Mirror the MySQL JDBC VS, withhold FN_TRIM on MySQL
+- Q: Revisit the select-list TIMESTAMP difference error? → A: Compute it in Exasol around the scan, no breaking change, no ADR
 
 ## Directions
 
@@ -23,5 +24,6 @@
 - [D4] `SUBSTR` position and length are normalized to Exasol's rule in every dialect (position 0, negative, beyond the end); "follow the source" covers padding and locale, not position arithmetic.
 - [D5] A `TIMESTAMP` difference renders as each target's own interval (MySQL a microsecond count through `TIMESTAMPDIFF`), a `DATE` operand of a mixed subtraction reads as midnight of that day, and an interval operand of `ADD` or `SUB` adds that interval; Exasol delegates each once `FN_ADD` and `FN_SUB` are advertised.
 - [D6] The two-key `GROUP BY YEAR(), MONTH()` of issue #21 stays undelegated for MySQL and PostgreSQL in this plan, because both keep withholding `AGGREGATE_GROUP_BY_TUPLE`; the follow-up plan `change-pushdown-group-by-tuple` widens it.
-- [D7] A delegated `TIMESTAMP` difference in the select list fails with a named error, the one render-time refusal of an operand-type combination an advertised capability admits; every other rule of the superseded ADRs, including every dialect advertising `FN_AGG_SUM`, `FN_AGG_SUM_DISTINCT`, `FN_AGG_AVG`, and `FN_AGG_AVG_DISTINCT`, carries forward. ADR: yes, criterion 4, the digest holds `capability-negotiation-all-or-nothing` and `delegate-sum-avg-and-let-floating-point-sum-follow-source-order`, which forbid such a refusal, supersedes capability-negotiation-all-or-nothing and delegate-sum-avg-and-let-floating-point-sum-follow-source-order, § Constraints
+- [D7] A select-list entry declared `INTERVAL DAY TO SECOND` is emitted by the scan as a `DECIMAL` count of seconds and converted in an outer Exasol `SELECT` through `NUMTODSINTERVAL`, cast to the declared type; one rule covers a bare, nested, aggregated, or grouped interval, where an outer subtraction of emitted timestamps covers only the bare one.
 - [D8] `docs/pushdown.md` names `SUM("price" / 1)` as the way to make Exasol compute a floating-point sum, replacing `+ 0`, because no dialect advertises `FN_DIV` or `FN_FLOAT_DIV`; the implementation confirms on the test Exasol that the division is not delegated.
+- [D9] The pushdown component owns the interval transport: a select-list entry declared `INTERVAL DAY(p) TO SECOND(f)` renders, outermost, as the source's seconds count of the interval expression, declared `DECIMAL(p + 5 + f, f)` in the `EMITS` clause, which holds every value of the declared interval, and the outer `SELECT` applies the inverse; each dialect supplies only its seconds syntax, because the Arrow coercion of the scan has no interval-to-decimal cast.

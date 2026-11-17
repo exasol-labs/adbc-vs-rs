@@ -11,7 +11,7 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 - Exasol does not re-apply a delegated fragment, so each advertised function must render for every operand type Exasol admits for it: `DATE + 1` is day arithmetic in Exasol and the number `YYYYMMDD + 1` in MySQL.
 - The PostgreSQL JDBC VS delegates these functions as plain PostgreSQL functions. The MySQL JDBC VS withholds every string function, `ADD`, `SUB`, `MULT`, and `DAY`.
 - `docs/pushdown.md` tells users to write `SUM("price" + 0)` to make Exasol compute a floating-point sum. Delegating `+` removes that route.
-- Exasol types `TIMESTAMP - TIMESTAMP` as `INTERVAL DAY TO SECOND`, which the UDF SDK cannot emit, so that select-list entry fails once `FN_SUB` is advertised.
+- Exasol types `TIMESTAMP - TIMESTAMP` as `INTERVAL DAY TO SECOND`, which the UDF SDK cannot emit. Once `FN_SUB` is advertised, Exasol delegates that select-list entry, so the scan emits it as a number of seconds and Exasol converts it back.
 - Structural changes: see `architecture.md` in this plan directory.
 - The MySQL JDBC VS withholds `TRIM`, because MySQL's `TRIM` removes a substring rather than a set of characters. This plan does the same.
 - Follow-up plans:
@@ -29,17 +29,18 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 | mysql-pushdown | CHANGED | `vs-adapter/mysql-pushdown/spec.md` |
 | postgresql-pushdown | CHANGED | `vs-adapter/postgresql-pushdown/spec.md` |
 | trino-pushdown | CHANGED | `vs-adapter/trino-pushdown/spec.md` |
+| pushdown-declared-types | CHANGED | `vs-adapter/pushdown-declared-types/spec.md` |
+| pushdown-projection | CHANGED | `vs-adapter/pushdown-projection/spec.md` |
 | mysql-collation | CHANGED | `vs-adapter/mysql-collation/spec.md` |
 | postgresql-collation | CHANGED | `vs-adapter/postgresql-collation/spec.md` |
 
 ## Impact
 
 - Queries using the eleven scalar functions or grouping by an expression run at the source. They read fewer rows, and their results now come from the source.
-- BREAKING CHANGE: `SELECT "t1" - "t2"` over two `TIMESTAMP` columns of a virtual table fails with a named error that names `SECONDS_BETWEEN` and `DAYS_BETWEEN` as the remedy. Before, Exasol computed it.
+- A select-list `TIMESTAMP` difference keeps working: the source computes the seconds between the two values, and Exasol converts them to the `INTERVAL DAY TO SECOND` it declared.
 - `SUM("price" + 0)` no longer makes Exasol compute a floating-point sum. `docs/pushdown.md` names `SUM("price" / 1)` instead.
 - `LENGTH` over a `CHAR` column and `UPPER` and `LOWER` over non-ASCII text return the source's result, which can differ from Exasol's. An implicit conversion follows Exasol's default date and timestamp formats, not a changed session format. `docs/pushdown.md` lists each difference per database.
 - The two-key `GROUP BY YEAR(), MONTH()` of issue #21 stays undelegated for MySQL and PostgreSQL until `change-pushdown-group-by-tuple`.
-- New ADR superseding `capability-negotiation-all-or-nothing` and `delegate-sum-avg-and-let-floating-point-sum-follow-source-order` (direction D7).
 
 ## Dependencies
 
@@ -68,7 +69,8 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 | pushdown-scalar-function / Exact-numeric arithmetic is exact and does not overflow before Exasol does | E2E | `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `exact_arithmetic_reaches_<source>_and_matches_the_mirror` |
 | pushdown-scalar-function / Floating-point and character arithmetic converts as Exasol converts | E2E | `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `double_and_character_arithmetic_matches_the_mirror` |
 | pushdown-scalar-function / Date and timestamp arithmetic follows Exasol's day arithmetic | E2E | `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `date_arithmetic_reaches_<source>_and_matches_the_mirror` |
-| pushdown-scalar-function / A select-list TIMESTAMP difference fails with a named error | Unit + E2E | `crates/adbc-vs-adapter/src/pushdown_tests.rs`, `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `select_list_timestamp_difference_fails_naming_interval`, `timestamp_difference_comparison_matches_the_mirror` |
+| pushdown-scalar-function / A select-list TIMESTAMP difference is converted to an interval in Exasol | Unit + E2E | `crates/adbc-vs-adapter/src/pushdown_tests.rs`, `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `interval_entry_is_converted_in_an_outer_select` (asserts each dialect's seconds form and the declared `DECIMAL(p + 5 + f, f)`), `timestamp_difference_matches_the_mirror` |
+| pushdown-declared-types / Declared type outside the declarable set fails with a named error | Unit | `crates/adbc-vs-adapter/src/exa_type_tests.rs` | existing test, plus an `INTERVAL DAY TO SECOND` arm that does not fail and an `INTERVAL YEAR TO MONTH` arm that does |
 | pushdown-scalar-function / String functions match Exasol over VARCHAR text | E2E | `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `string_functions_reach_<source>_and_match_the_mirror` |
 | pushdown-scalar-function / SUBSTR positions follow Exasol's rule | E2E | `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `substr_positions_match_the_mirror` |
 | pushdown-scalar-function / An empty string function result is null, as in Exasol | E2E | `crates/adbc-vs-adapter/tests/e2e_{mysql,postgres,trino}_test.rs` | `empty_string_function_result_is_null_as_in_exasol` |
@@ -99,7 +101,7 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 | postgresql-pushdown | `SELECT TRIM('xxaxx', 'x') FROM vs_pg."orders"` | `a` |
 | mysql-pushdown (TRIM) | `EXPLAIN VIRTUAL SELECT TRIM("name") FROM vs_mysql."orders"` | Generated statement carries no `TRIM` |
 | trino-pushdown | `SELECT "ts" + 1.5 FROM vs_trino."orders"` against `2024-01-01 00:00:00` | `2024-01-02 12:00:00` |
-| pushdown-dialect | `SELECT "t1" - "t2" FROM vs_pg."events"` | Error naming `INTERVAL DAY TO SECOND` and `SECONDS_BETWEEN` |
+| pushdown-dialect | `SELECT "t1" - "t2" FROM vs_pg."events"` and the same over the mirror | Equal intervals; `EXPLAIN VIRTUAL` shows `NUMTODSINTERVAL` around the scan |
 
 ### Checklist
 

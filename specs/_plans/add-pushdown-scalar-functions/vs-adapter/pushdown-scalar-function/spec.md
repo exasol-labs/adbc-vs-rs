@@ -62,13 +62,14 @@ Delegates the date-part, string, and arithmetic scalar functions Exasol applies 
 * *AND* each query MUST return exactly the values the mirror returns, a null for a null operand included: a number added to or subtracted from a `DATE` or `TIMESTAMP` counts days, a fractional number keeps the fraction Exasol keeps, and `DATE` minus `DATE` is the number of days between them
 * *AND* the dialect MUST NOT render a source operator that reads a date as a number, as MySQL's `+` does
 
-### Scenario: A select-list TIMESTAMP difference fails with a named error
+### Scenario: A select-list TIMESTAMP difference is converted to an interval in Exasol
 
-* *GIVEN* a `pushdown` request whose select list carries `SUB` over two `TIMESTAMP` operands and whose `selectListDataTypes` declares that entry `INTERVAL DAY TO SECOND`
-* *WHEN* the adapter builds the response
-* *THEN* the adapter MUST return an error naming `INTERVAL DAY TO SECOND` as a type the `EMITS` clause cannot declare, and naming `SECONDS_BETWEEN` or `DAYS_BETWEEN` as the remedy that Exasol computes
-* *AND* a `WHERE` comparison between two such differences, a difference between a `DATE` and a `TIMESTAMP`, and a `TIMESTAMP` plus such a difference MUST render rather than fail, because no `EMITS` column declares an interval there, and MUST return the rows a local Exasol mirror returns, a `DATE` operand reading as midnight of its day
-* *AND* the same MUST hold for each dialect this release supports
+* *GIVEN* a virtual table for each driver this release supports, over two `TIMESTAMP` columns and a `DATE` column holding values a fraction of a second, several days, and more than a year apart, and a null, and a local Exasol mirror table holding the same rows
+* *WHEN* Exasol runs `SELECT "t1" - "t2"`, `SELECT "t1" - "d"`, `SELECT MIN("t1" - "t2")`, and `SELECT "t1" + ("t1" - "t2")`, and a `WHERE` comparison between two such differences
+* *THEN* the scan MUST emit each select-list entry declared `INTERVAL DAY(p) TO SECOND(f)` as the count of seconds the source computes for the whole entry, declared `DECIMAL(p + 5 + f, f)`, so every value of the declared interval fits with its fractional seconds, and the pushdown response MUST convert it in an outer Exasol `SELECT` through `NUMTODSINTERVAL`, cast to the declared type, because the scan cannot emit an `INTERVAL`
+* *AND* every other select-list entry MUST pass through the outer `SELECT` unchanged, and a response with no such entry MUST carry no outer `SELECT`
+* *AND* each query MUST return exactly the rows the mirror returns, a null for a null operand included, a `DATE` operand reading as midnight of its day
+* *AND* `EXPLAIN VIRTUAL` MUST report a generated statement carrying the subtraction, so the query fails in no dialect where Exasol computed it before
 
 ### Scenario: String functions match Exasol over VARCHAR text
 
