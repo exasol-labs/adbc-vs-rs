@@ -16,10 +16,10 @@ States the capability set the PostgreSQL dialect advertises and the PostgreSQL S
 
 * *GIVEN* a virtual schema whose driver is `postgresql`
 * *WHEN* Exasol sends a `getCapabilities` request
-* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_HAVING`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_TYPE_FULL_OUTER`, and `JOIN_CONDITION_EQUI`
-* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_GROUP_BY_TUPLE`, or `JOIN_CONDITION_ALL`
+* *THEN* the `capabilities` array MUST contain `SELECTLIST_PROJECTION`, `SELECTLIST_EXPRESSIONS`, `FILTER_EXPRESSIONS`, `AGGREGATE_SINGLE_GROUP`, `AGGREGATE_GROUP_BY_COLUMN`, `AGGREGATE_GROUP_BY_EXPRESSION`, `AGGREGATE_HAVING`, `JOIN`, `JOIN_TYPE_INNER`, `JOIN_TYPE_LEFT_OUTER`, `JOIN_TYPE_RIGHT_OUTER`, `JOIN_TYPE_FULL_OUTER`, and `JOIN_CONDITION_EQUI`
+* *AND* the array MUST NOT contain `AGGREGATE_GROUP_BY_TUPLE` or `JOIN_CONDITION_ALL`
 * *AND* the array MUST NOT contain `ORDER_BY_COLUMN`, `ORDER_BY_EXPRESSION`, `LIMIT`, or `LIMIT_WITH_OFFSET`, which `vs-adapter/result-ordering` withholds for every dialect because the emitting-UDF transport carries no ordering guarantee whatever the source is
-* *AND* every entry MUST be a `MainCapability` constant, or carry the prefix `FN_PRED_`, `FN_AGG_`, or `LITERAL_`
+* *AND* every entry MUST be a `MainCapability` constant, or carry the prefix `FN_PRED_`, `FN_AGG_`, `LITERAL_`, or `FN_`, the last for exactly the scalar functions `vs-adapter/pushdown-scalar-function` names for PostgreSQL
 
 ### Scenario: Join capabilities add the full outer join
 
@@ -105,3 +105,12 @@ States the capability set the PostgreSQL dialect advertises and the PostgreSQL S
 * *THEN* the generated statement MUST render the operand inside `SUM` cast to `DOUBLE PRECISION`, as it does for every `SUM` operand declared `DOUBLE`, because PostgreSQL's `sum` over `real` returns `real` and adds in single precision, where `16777216 + 1` rounds back to `16777216`
 * *AND* the query MUST return `16777217` for `SUM` and `8388608.5` for `AVG`, as the mirror does
 * *AND* a `SUM` operand declared `DECIMAL` MUST render without a cast, because PostgreSQL's `sum` over an integer or `numeric` operand is already exact
+
+### Scenario: Scalar functions render in PostgreSQL's forms
+
+* *GIVEN* `pushdown` requests carrying each scalar function `vs-adapter/pushdown-scalar-function` names, over operands of each declared type Exasol admits for it
+* *WHEN* the PostgreSQL dialect renders each request
+* *THEN* `YEAR`, `MONTH`, and `DAY` MUST render through `EXTRACT`, and `LENGTH` as `char_length`
+* *AND* a two-argument `TRIM` MUST render as `btrim`, which removes a set of characters as Exasol does
+* *AND* an exact-numeric operand of `+`, `-`, or `*` MUST render cast to `numeric`, so a `bigint` result beyond its range is returned rather than refused
+* *AND* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render as an addition of that many whole days, the number rounded half away from zero as Exasol rounds it, a `DATE` result MUST yield a `date`, and a `TIMESTAMP` difference MUST render as PostgreSQL's `interval` subtraction truncated to milliseconds, and as `EXTRACT(EPOCH FROM <interval>)` where a select-list entry declared `INTERVAL DAY TO SECOND` needs its seconds count

@@ -1,13 +1,13 @@
 # Feature: pushdown_scalar_function
 
-Delegates the date-part, string, and arithmetic scalar functions Exasol applies to a column, so a query that filters, projects, or groups by such an expression reads only the rows and groups it needs from the source.
+Delegates the date-part, string, and arithmetic scalar functions Exasol applies to a column, so a query that filters, projects, or groups by such an expression reads only the rows and groups it needs from the source, and states the result each date-part and arithmetic function returns.
 
 ## Background
 
 - This feature owns which scalar functions every dialect delegates, how a `function_scalar` node enters the query model, and the result each delegated function must return; each `<technology>-pushdown` feature owns its SQL for each function.
 - The delegated scalar functions are `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM`, `LENGTH`, `SUBSTR`, `ADD`, `SUB`, and `MULT`, except `TRIM` at MySQL; `CAST` and every other scalar function stay withheld.
 - Exasol sends a scalar function as a `function_scalar` node carrying its name and arguments, and an arithmetic operator as the infix `ADD`, `SUB`, or `MULT` node.
-- `vs-adapter/pushdown-dialect` owns the advertised-capability invariant and the declarable `EMITS` type set, and `vs-adapter/pushdown-aggregation-delegation` owns grouping by an expression.
+- `vs-adapter/pushdown-dialect` owns the advertised-capability invariant and the declarable `EMITS` type set, `vs-adapter/pushdown-aggregation-delegation` owns grouping by an expression, and `vs-adapter/pushdown-string-function` owns the result each string function returns and how an operand converts to text.
 
 ## Scenarios
 
@@ -70,40 +70,3 @@ Delegates the date-part, string, and arithmetic scalar functions Exasol applies 
 * *AND* every other select-list entry MUST pass through the outer `SELECT` unchanged, and a response with no such entry MUST carry no outer `SELECT`
 * *AND* each query MUST return exactly the rows the mirror returns, a null for a null operand included, a `DATE` operand reading as midnight of its day
 * *AND* `EXPLAIN VIRTUAL` MUST report a generated statement carrying the subtraction, so the query fails in no dialect where Exasol computed it before
-
-### Scenario: String functions match Exasol over VARCHAR text
-
-* *GIVEN* a virtual table for each driver this release supports, over a `VARCHAR` column holding ASCII text with leading and trailing blanks, a multi-byte character, and a null, and a local Exasol mirror table holding the same rows
-* *WHEN* Exasol runs `UPPER`, `LOWER`, `TRIM` with one and with two arguments where the dialect advertises it, `LENGTH`, and `SUBSTR` with two and with three arguments over the column, in the select list and in a `WHERE` comparison
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement carrying each function
-* *AND* each query MUST return exactly the rows the mirror returns, a null for a null operand included
-* *AND* `LENGTH` MUST count characters rather than bytes, so the multi-byte character counts once
-* *AND* two-argument `TRIM` MUST remove every leading and trailing character contained in its second argument, as Exasol does
-
-### Scenario: SUBSTR positions follow Exasol's rule
-
-* *GIVEN* a virtual table for each driver this release supports, over a `VARCHAR` column holding `abcdef` and a null, and a local Exasol mirror table holding the same rows
-* *WHEN* Exasol runs `SUBSTR` with position 0, 1, a negative position, a position beyond the end, and a length running past the end
-* *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement carrying each `SUBSTR`
-* *AND* each query MUST return the value the mirror returns, because each source counts a position of 0 or below differently from Exasol and the dialect renders Exasol's rule
-
-### Scenario: An empty string function result is null, as in Exasol
-
-* *GIVEN* a virtual table for each driver this release supports, over a `VARCHAR` column holding blanks only, `abc`, and a null, and a local Exasol mirror table holding the same rows
-* *WHEN* Exasol runs `TRIM` over the column as a `GROUP BY` key, as a `COUNT(DISTINCT)` operand, and in an `IS NULL` filter, and `SUBSTR("c", 10) IS NULL`, under each dialect that advertises the function
-* *THEN* each dialect MUST render an empty result of `TRIM`, `SUBSTR`, `UPPER`, and `LOWER` as null at the source, because the source keeps the empty string apart from null while Exasol reads it as null
-* *AND* each query MUST return exactly the rows the mirror returns, so the blank row and the null row form one group and match `IS NULL`
-
-### Scenario: String function results follow the source for padding and case mapping
-
-* *GIVEN* a virtual table for each driver this release supports, over a `CHAR(5)` column holding `ab` and a `VARCHAR` column holding a non-ASCII letter with a locale-dependent upper case
-* *WHEN* Exasol runs `LENGTH` over the `CHAR` column and `UPPER` over the non-ASCII column
-* *THEN* each result MUST be the source's own result rather than Exasol's, because the dialect renders the source function without padding the `CHAR` operand and without fixing a locale
-* *AND* `docs/pushdown.md` MUST state both differences per database
-
-### Scenario: An implicitly converted operand converts as Exasol converts it
-
-* *GIVEN* a virtual table for each driver this release supports, over a `DECIMAL(18,2)` column, a `DATE` column, a `VARCHAR` column holding a date in Exasol's default format, and a `BOOLEAN` column where the source maps one, and a local Exasol mirror table holding the same rows
-* *WHEN* Exasol runs `LENGTH` and `SUBSTR` over the `DECIMAL` and the `DATE` column, `YEAR` over the `VARCHAR` column, and `+ 1` over the `BOOLEAN` column, each where Exasol accepts the query
-* *THEN* each query Exasol delegates MUST return exactly the rows the mirror returns, because the dialect renders the conversion Exasol applies under its default `NLS_DATE_FORMAT` and `NLS_TIMESTAMP_FORMAT`
-* *AND* `docs/pushdown.md` MUST state that a session that changes either format is not followed
