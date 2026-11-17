@@ -38,7 +38,7 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 
 - Queries using the eleven scalar functions or grouping by an expression run at the source. They read fewer rows, and their results now come from the source.
 - A select-list `TIMESTAMP` difference keeps working: the source computes the seconds between the two values, and Exasol converts them to the `INTERVAL DAY TO SECOND` it declared.
-- `SUM("price" + 0)` no longer makes Exasol compute a floating-point sum. `docs/pushdown.md` names `SUM("price" / 1)` instead.
+- `SUM("price" + 0)` no longer makes Exasol compute a floating-point sum. `docs/pushdown.md` names `SUM(CAST("price" AS DOUBLE))` instead, because Exasol simplifies `"price" / 1` to `"price"` and delegates the sum.
 - `LENGTH` over a `CHAR` column and `UPPER` and `LOWER` over non-ASCII text return the source's result, which can differ from Exasol's. An implicit conversion follows Exasol's default date and timestamp formats, not a changed session format. `docs/pushdown.md` lists each difference per database.
 - The two-key `GROUP BY YEAR(), MONTH()` of issue #21 stays undelegated for MySQL and PostgreSQL until `change-pushdown-group-by-tuple`.
 
@@ -55,7 +55,7 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 | Comment | `crates/adbc-vs-adapter/src/pushdown_query.rs:64` and `:711` | State the withholding of `AGGREGATE_GROUP_BY_EXPRESSION`, which ends |
 | Logic | `crates/adbc-vs-adapter/src/mysql_dialect.rs` `any_value_keys` matching | Keyed on a column's read expression; a grouped expression key matches by rendered text |
 | Test assertion | `crates/adbc-vs-adapter/src/capabilities_tests.rs:257` and the exact-set tests | Assert `AGGREGATE_GROUP_BY_EXPRESSION` is withheld |
-| Docs | `docs/pushdown.md` `+ 0` advice in § Floating-point sums follow the source and § MySQL (replaced by `/ 1`), and the "What runs in Exasol" rows for scalar functions and `GROUP BY` over an expression | The `+ 0` route and the withholding end |
+| Docs | `docs/pushdown.md` `+ 0` advice in § Floating-point sums follow the source and § MySQL (replaced by `CAST(... AS DOUBLE)`), and the "What runs in Exasol" rows for scalar functions and `GROUP BY` over an expression | The `+ 0` route and the withholding end |
 
 ## Verification
 
@@ -100,7 +100,7 @@ Every dialect delegates `YEAR`, `MONTH`, `DAY`, `UPPER`, `LOWER`, `TRIM` (except
 | mysql-pushdown | `SELECT LENGTH('ä'), "d" + 1 FROM vs_mysql."orders"` against a row with `d = 2024-02-28` | `1` and `2024-02-29` |
 | postgresql-pushdown | `SELECT TRIM('xxaxx', 'x') FROM vs_pg."orders"` | `a` |
 | mysql-pushdown (TRIM) | `EXPLAIN VIRTUAL SELECT TRIM("name") FROM vs_mysql."orders"` | Generated statement carries no `TRIM` |
-| trino-pushdown | `SELECT "ts" + 1.5 FROM vs_trino."orders"` against `2024-01-01 00:00:00` | `2024-01-02 12:00:00` |
+| trino-pushdown | `SELECT "ts" + 1.5 FROM vs_trino."orders"` against `2024-01-01 00:00:00` | `2024-01-03 00:00:00`, as Exasol rounds 1.5 days to 2 |
 | pushdown-dialect | `SELECT "t1" - "t2" FROM vs_pg."events"` and the same over the mirror | Equal intervals; `EXPLAIN VIRTUAL` shows `NUMTODSINTERVAL` around the scan |
 
 ### Checklist

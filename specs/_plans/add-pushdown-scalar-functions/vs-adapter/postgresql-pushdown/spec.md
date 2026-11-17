@@ -31,5 +31,5 @@ States the capability set the PostgreSQL dialect advertises and the PostgreSQL S
 * *THEN* `YEAR`, `MONTH`, and `DAY` MUST render through `EXTRACT`, and `LENGTH` as `char_length`
 * *AND* a two-argument `TRIM` MUST render as `btrim`, which removes a set of characters as Exasol does
 * *AND* an exact-numeric operand of `+`, `-`, or `*` MUST render cast to `numeric`, so a `bigint` result beyond its range is returned rather than refused
-* *AND* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render as an addition of that many days as an `interval`, keeping a fractional day as Exasol does, a `DATE` result MUST yield a `date`, and a `TIMESTAMP` difference MUST render as PostgreSQL's `interval` subtraction, and as `EXTRACT(EPOCH FROM <interval>)` where a select-list entry declared `INTERVAL DAY TO SECOND` needs its seconds count
+* *AND* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render as an addition of that many whole days, the number rounded half away from zero as Exasol rounds it, a `DATE` result MUST yield a `date`, and a `TIMESTAMP` difference MUST render as PostgreSQL's `interval` subtraction truncated to milliseconds, and as `EXTRACT(EPOCH FROM <interval>)` where a select-list entry declared `INTERVAL DAY TO SECOND` needs its seconds count
 <!-- /DELTA:NEW -->

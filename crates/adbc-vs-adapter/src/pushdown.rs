@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::adapter_notes::AdapterNotes;
 use crate::exa_type;
-use crate::pushdown_query::{self, Query};
+use crate::pushdown_query::{self, Expression, Query};
 use crate::scan_spec::{ScanColumn, ScanSpec};
 use crate::sql_dialect::SqlDialect;
 
@@ -83,7 +83,42 @@ pub fn pushdown_response(
         emits_clause(&emitted_columns),
     );
 
-    Ok(serde_json::json!({"type": "pushdown", "sql": call}))
+    Ok(serde_json::json!({"type": "pushdown", "sql": converted(&query, call)}))
+}
+
+/// Wraps the scan call in an outer `SELECT` that converts each entry the scan
+/// emitted as an interval's seconds back to the interval Exasol declared,
+/// because no `EMITS` column declares an `INTERVAL`. A response with no such
+/// entry stays the bare call.
+///
+/// `NUMTODSINTERVAL` keeps milliseconds, as many as an Exasol interval holds:
+/// measured on Exasol 2025.2, a `TIMESTAMP(6)` difference holds 3 digits.
+fn converted(query: &Query, call: String) -> String {
+    if !query
+        .select_list
+        .iter()
+        .any(|item| matches!(item.expression, Expression::IntervalSeconds { .. }))
+    {
+        return call;
+    }
+
+    let entries = query
+        .select_list
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let name = quote_exasol_identifier(&positional_column_name(index));
+            match item.expression {
+                Expression::IntervalSeconds { declared, .. } => format!(
+                    "CAST(NUMTODSINTERVAL({name}, 'SECOND') AS {})",
+                    declared.to_ddl()
+                ),
+                _ => name,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT {entries} FROM ({call})")
 }
 
 fn read_adapter_notes(request: &Value) -> Result<AdapterNotes, PushdownError> {

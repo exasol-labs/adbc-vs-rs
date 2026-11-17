@@ -208,3 +208,21 @@ INSERT INTO memory.adbc_vs.measures (id, grp, big_value, decimal_value, double_v
     (5, 'b', 9223372036854775807, 0.25,  4.25, '7.5'),
     (6, 'b', NULL,                NULL,  NULL, NULL),
     (7, 'c', NULL,                NULL,  NULL, NULL);
+
+-- scalars feeds the scalar-function tests; tests/common/scalars.rs states the same rows, which a unit test checks.
+DROP TABLE IF EXISTS memory.adbc_vs.scalars;
+
+CREATE TABLE memory.adbc_vs.scalars (
+    id INTEGER,
+    i BIGINT,
+    d DECIMAL(18,4),
+    f DOUBLE,
+    num VARCHAR(20),
+    s VARCHAR(20),
+    dt DATE,
+    ts TIMESTAMP(3),
+    ts2 TIMESTAMP(3),
+    dtext VARCHAR(30)
+);
+
+INSERT INTO memory.adbc_vs.scalars VALUES (1, 9223372036854775807, 12.5, 1.5, '1.5', '  ab  ', DATE '2024-02-29', TIMESTAMP '2024-02-28 23:59:59.500', TIMESTAMP '2024-01-01 00:00:00.000', '2024-01-05'), (2, -5, -0.25, 0.25, '-2', 'abcdef', DATE '2023-12-31', TIMESTAMP '2024-01-01 00:00:00.000', TIMESTAMP '2023-12-31 23:59:59.999', '2023-12-31'), (3, 0, 1000, -3.5, '10', 'xxaxx', DATE '2024-01-01', TIMESTAMP '2025-03-01 12:00:00.250', TIMESTAMP '2024-02-29 06:00:00.000', '2024-02-29 10:11:12'), (4, 7, 0.0001, 2.0, '0.5', '   ', DATE '2024-03-01', TIMESTAMP '2024-03-01 00:00:00.001', TIMESTAMP '2024-03-01 00:00:00.000', '2024-03-01'), (5, 2, 3.75, 0.5, '3', 'é', DATE '2020-06-15', TIMESTAMP '2020-06-15 08:30:00.000', TIMESTAMP '2020-06-14 20:30:00.000', '2020-06-15'), (6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL), (7, 1, 1, 1.0, '1', 'ß', DATE '2021-01-01', TIMESTAMP '2021-01-01 00:00:00.000', TIMESTAMP '2021-01-01 00:00:00.000', '2021-01-01');

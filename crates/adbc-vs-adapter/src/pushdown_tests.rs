@@ -184,3 +184,58 @@ fn the_scan_call_selects_the_scan_script_over_one_row() {
         "the scan call needs exactly one input row to run once: {sql}"
     );
 }
+
+/// `pushdown-scalar-function`: an entry declared `INTERVAL DAY TO SECOND` is
+/// emitted as its seconds, declared `DECIMAL(p + 5 + f, f)`, and converted in
+/// an outer `SELECT`; every other entry passes through it unchanged.
+#[test]
+fn interval_entry_is_converted_in_an_outer_select() {
+    let mut request = request(None);
+    request["involvedTables"][0]["columns"]
+        .as_array_mut()
+        .expect("columns")
+        .push(json!({"name": "ts", "dataType": {"type": "TIMESTAMP", "fractionalSecondsPrecision": 6}}));
+    request["pushdownRequest"]["selectList"] = json!([
+        {"type": "column", "name": "id"},
+        {"type": "function_scalar", "name": "SUB", "arguments": [
+            {"type": "column", "name": "ts"}, {"type": "column", "name": "ts"},
+        ]},
+    ]);
+    request["pushdownRequest"]["selectListDataTypes"] = json!([
+        {"type": "DECIMAL", "precision": 19, "scale": 0},
+        {"type": "INTERVAL", "fromTo": "DAY TO SECONDS", "precision": 4, "fraction": 3},
+    ]);
+
+    let response = pushdown_response(&request, &MySqlDialect).expect("pushdown must succeed");
+    let sql = response["sql"].as_str().expect("sql must be a string");
+
+    assert!(
+        sql.starts_with(
+            "SELECT \"c1\", CAST(NUMTODSINTERVAL(\"c2\", 'SECOND') AS INTERVAL DAY(4) TO SECOND(3)) \
+             FROM (SELECT ADBC_VS.ADBC_SCAN("
+        ),
+        "{sql}"
+    );
+    assert!(
+        sql.ends_with("EMITS (\"c1\" DECIMAL(19,0), \"c2\" DECIMAL(12,3)) FROM DUAL)"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("/ 1000000)"),
+        "MySQL renders the interval as its seconds: {sql}"
+    );
+}
+
+#[test]
+fn a_response_with_no_interval_entry_carries_no_outer_select() {
+    let response = pushdown_response(
+        &request(Some(json!([{"type": "column", "name": "id"}]))),
+        &MySqlDialect,
+    )
+    .expect("pushdown must succeed");
+
+    assert!(response["sql"]
+        .as_str()
+        .expect("sql")
+        .starts_with("SELECT ADBC_VS.ADBC_SCAN("));
+}

@@ -126,6 +126,64 @@ pub fn from_json(value: &Value) -> Result<ExasolType, String> {
     }
 }
 
+/// The `fromTo` spelling Exasol sends for an `INTERVAL DAY TO SECOND`.
+const DAY_TO_SECOND: &str = "DAY TO SECONDS";
+
+/// The type `selectListDataTypes` declares for one select-list entry: a type
+/// an `EMITS` column declares, or the interval a `TIMESTAMP` difference yields,
+/// which no `EMITS` column declares and the scan emits as seconds instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectListType {
+    Declarable(ExasolType),
+    DayToSecond(DayToSecond),
+}
+
+/// An `INTERVAL DAY(precision) TO SECOND(fraction)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DayToSecond {
+    pub precision: u32,
+    pub fraction: u32,
+}
+
+impl DayToSecond {
+    /// The `DECIMAL` that holds every value of the interval as seconds: up to
+    /// `precision` digits of days, five digits of seconds per day, and the
+    /// fraction.
+    pub fn seconds_type(self) -> ExasolType {
+        ExasolType::Decimal {
+            precision: self.precision + 5 + self.fraction,
+            scale: self.fraction,
+        }
+    }
+
+    pub fn to_ddl(self) -> String {
+        format!(
+            "INTERVAL DAY({}) TO SECOND({})",
+            self.precision, self.fraction
+        )
+    }
+}
+
+/// Reads a `selectListDataTypes` entry, which is a declarable type or an
+/// `INTERVAL DAY TO SECOND`; every other interval fails naming its range.
+pub fn select_list_type_from_json(value: &Value) -> Result<SelectListType, String> {
+    if value.get("type").and_then(Value::as_str) != Some("INTERVAL") {
+        return from_json(value).map(SelectListType::Declarable);
+    }
+    match value.get("fromTo").and_then(Value::as_str) {
+        Some(DAY_TO_SECOND) => Ok(SelectListType::DayToSecond(DayToSecond {
+            precision: required_u32(value, "precision")?,
+            fraction: required_u32(value, "fraction")?,
+        })),
+        other => Err(format!(
+            "dataType `INTERVAL {}` ({value}) is not one of the Exasol types an EMITS column may \
+             declare, and only an `INTERVAL DAY TO SECOND` is emitted as seconds: {}",
+            other.unwrap_or("without a range"),
+            DECLARABLE_TYPE_NAMES.join(", ")
+        )),
+    }
+}
+
 fn has_local_time_zone(value: &Value) -> bool {
     value.get("withLocalTimeZone").and_then(Value::as_bool) == Some(true)
 }

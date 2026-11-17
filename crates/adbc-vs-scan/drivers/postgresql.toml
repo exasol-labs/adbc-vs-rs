@@ -38,11 +38,13 @@ segment_count = 1
 # error: the two are one decision, and the capability invariant test renders
 # every entry below to hold them together.
 #
-# The list is MySQL's set plus `JOIN_TYPE_FULL_OUTER`, and that one entry is
-# the whole of what the two targets genuinely disagree on: PostgreSQL
-# implements the keyword directly, and MySQL implements no `FULL OUTER JOIN`.
-# The two lists are stated independently rather than one derived from the
-# other, and `capabilities_tests` asserts the difference is exactly that entry.
+# The list is MySQL's set plus `JOIN_TYPE_FULL_OUTER` and `FN_TRIM`, and those
+# two entries are the whole of what the two targets genuinely disagree on:
+# PostgreSQL implements `FULL OUTER JOIN` directly and removes a set of
+# characters with `btrim`, while MySQL implements no `FULL OUTER JOIN` and its
+# `TRIM` removes a substring. The two lists are stated independently rather
+# than one derived from the other, and `capabilities_tests` asserts the
+# difference is exactly those entries.
 # Narrowing a set is always safe — Exasol applies whatever it did not delegate
 # itself — while advertising a fragment the renderer cannot express is the
 # silent wrong-rows failure the invariant exists to prevent.
@@ -68,6 +70,7 @@ advertised = [
     "FILTER_EXPRESSIONS",
     "AGGREGATE_SINGLE_GROUP",
     "AGGREGATE_GROUP_BY_COLUMN",
+    "AGGREGATE_GROUP_BY_EXPRESSION",
     "AGGREGATE_HAVING",
     "FN_AGG_COUNT",
     "FN_AGG_COUNT_STAR",
@@ -91,6 +94,17 @@ advertised = [
     "FN_PRED_LIKE_ESCAPE",
     "FN_PRED_BETWEEN",
     "FN_PRED_IN_CONSTLIST",
+    "FN_YEAR",
+    "FN_MONTH",
+    "FN_DAY",
+    "FN_UPPER",
+    "FN_LOWER",
+    "FN_TRIM",
+    "FN_LENGTH",
+    "FN_SUBSTR",
+    "FN_ADD",
+    "FN_SUB",
+    "FN_MULT",
     "LITERAL_NULL",
     "LITERAL_EXACTNUMERIC",
     "LITERAL_DOUBLE",

@@ -49,7 +49,7 @@ States the capability set the MySQL dialect advertises and the MySQL SQL it rend
 
 * *GIVEN* `pushdown` requests carrying `ADD`, `SUB`, and `MULT` over operands of each declared type Exasol admits for them
 * *WHEN* the MySQL dialect renders each request
-* *THEN* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render through `DATE_ADD` or `DATE_SUB` with a `MICROSECOND` interval of the number times 86400000000, so a fractional day keeps its fraction where a `DAY` interval rounds it, and `DATE` minus `DATE` MUST render through `DATEDIFF`, because MySQL's `+` reads a date as the number `YYYYMMDD`
-* *AND* a `TIMESTAMP` difference MUST render through `TIMESTAMPDIFF(MICROSECOND, ...)`, a timestamp plus or minus such a difference through a `MICROSECOND` interval of it, and a select-list entry declared `INTERVAL DAY TO SECOND` as that microsecond count divided by the decimal 1000000
+* *THEN* a number added to or subtracted from a `DATE` or `TIMESTAMP` operand MUST render through `DATE_ADD` or `DATE_SUB` with a `DAY` interval of the number rounded half away from zero, as Exasol rounds it, and `DATE` minus `DATE` MUST render through `DATEDIFF`, because MySQL's `+` reads a date as the number `YYYYMMDD`
+* *AND* a `TIMESTAMP` difference MUST render through `TIMESTAMPDIFF(MICROSECOND, ...)` truncated to milliseconds, as many as an Exasol interval holds, a timestamp plus or minus such a difference through a `MICROSECOND` interval of it, and a select-list entry declared `INTERVAL DAY TO SECOND` as that microsecond count divided by 1000000
 * *AND* an exact-numeric operand of `+`, `-`, or `*` MUST render cast to `DECIMAL(65,s)`, so a `BIGINT` result beyond its range is returned rather than refused with MySQL's out-of-range error
 <!-- /DELTA:NEW -->

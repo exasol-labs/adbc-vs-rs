@@ -699,3 +699,70 @@ fn predicate_operand_of_a_comparison_renders_parenthesized() {
         ]
     );
 }
+
+// --- scalar functions -------------------------------------------------------
+
+/// `trino-pushdown`: each scalar function renders in its Trino form.
+#[test]
+fn scalar_functions_render_in_trino_forms() {
+    let col = fixtures::column;
+    let number = fixtures::numeric_literal;
+    for (entry, fragment) in [
+        (fixtures::scalar("MONTH", vec![col("dt")]), "month(\"dt\")"),
+        (
+            fixtures::scalar("LENGTH", vec![col("v")]),
+            "length(NULLIF(\"v\", ''))",
+        ),
+        (
+            fixtures::scalar("TRIM", vec![col("v"), fixtures::string_literal("x")]),
+            "NULLIF(trim(\"v\", 'x'), '')",
+        ),
+        (
+            fixtures::scalar("LENGTH", vec![col("d")]),
+            "regexp_replace(CAST(\"d\" AS VARCHAR), '\\.?0+$', '')",
+        ),
+        (
+            fixtures::scalar("MULT", vec![col("i"), col("d")]),
+            "(CAST(\"i\" AS DECIMAL(19,0)) * CAST(\"d\" AS DECIMAL(18,2)))",
+        ),
+        (
+            fixtures::scalar("ADD", vec![col("dt"), number("1")]),
+            "date_add('day', CAST(1 AS BIGINT), \"dt\")",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("ts"), number("1.5")]),
+            "date_add('day', -CAST(ROUND(1.5) AS BIGINT), \"ts\")",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("dt"), col("dt")]),
+            "date_diff('day', \"dt\", \"dt\")",
+        ),
+        (
+            fixtures::scalar("SUB", vec![col("ts"), col("dt")]),
+            "(\"ts\" - CAST(\"dt\" AS TIMESTAMP(3)))",
+        ),
+    ] {
+        let sql = fixtures::render_statement(
+            &TrinoDialect,
+            &namespace(),
+            &fixtures::scalar_request(entry.clone(), fixtures::exact_type()),
+        );
+        assert!(
+            sql.contains(fragment),
+            "{entry} must render {fragment}: {sql}"
+        );
+    }
+
+    let interval = fixtures::render_statement(
+        &TrinoDialect,
+        &namespace(),
+        &fixtures::scalar_request(
+            fixtures::scalar("SUB", vec![col("ts"), col("ts")]),
+            json!({"type": "INTERVAL", "fromTo": "DAY TO SECONDS", "precision": 9, "fraction": 9}),
+        ),
+    );
+    assert!(
+        interval.contains("(CAST(to_milliseconds((\"ts\" - \"ts\")) AS DECIMAL(38,3)) / 1000)"),
+        "{interval}"
+    );
+}

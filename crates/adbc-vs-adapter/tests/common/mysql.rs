@@ -213,6 +213,7 @@ fn fixture_script() -> String {
     INSERT INTO refresh_target VALUES (1, 'before'); \
     {} \
     {MEASURES_SCRIPT} \
+    {scalars} \
     DROP TABLE IF EXISTS item_notes; \
     {} \
     DROP VIEW IF EXISTS {CONVERTED_REGION_VIEW}; \
@@ -229,7 +230,8 @@ fn fixture_script() -> String {
             Some(CODE_POINT_COLLATION),
             &items::code_point_source_values()
         ),
-        items::note_values()
+        items::note_values(),
+        scalars = super::scalars::mysql_script(),
     )
 }
 

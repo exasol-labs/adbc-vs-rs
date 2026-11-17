@@ -38,6 +38,7 @@ pub mod postgres_stack;
 pub mod probe;
 pub mod readiness;
 pub mod report;
+pub mod scalars;
 pub mod schema;
 pub mod script;
 pub mod slc;

@@ -59,7 +59,7 @@ Delegates the date-part, string, and arithmetic scalar functions Exasol applies 
 * *AND* a null in each column
 * *WHEN* Exasol runs `"dt" + 1`, `1 + "dt"`, `"dt" + 1.5`, `"dt" - 1`, `"dt" - "dt"`, `"ts" + 1.5`, and `"ts" - "n"` with a fractional `"n"`, in the select list and in a `WHERE` comparison
 * *THEN* `EXPLAIN VIRTUAL` MUST report a generated statement carrying each operation
-* *AND* each query MUST return exactly the values the mirror returns, a null for a null operand included: a number added to or subtracted from a `DATE` or `TIMESTAMP` counts days, a fractional number keeps the fraction Exasol keeps, and `DATE` minus `DATE` is the number of days between them
+* *AND* each query MUST return exactly the values the mirror returns, a null for a null operand included: a number added to or subtracted from a `DATE` or `TIMESTAMP` counts days, a fractional number rounds half away from zero to whole days as Exasol rounds it, and `DATE` minus `DATE` is the number of days between them
 * *AND* the dialect MUST NOT render a source operator that reads a date as a number, as MySQL's `+` does
 
 ### Scenario: A select-list TIMESTAMP difference is converted to an interval in Exasol

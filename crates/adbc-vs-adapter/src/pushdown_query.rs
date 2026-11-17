@@ -31,7 +31,11 @@ use serde_json::Value;
 
 use crate::adapter_notes::{ColumnNotes, SourceQualifier};
 use crate::emit_type;
-use crate::exa_type::{self, ExasolType};
+use crate::exa_type::{self, DayToSecond, ExasolType, SelectListType};
+
+#[path = "pushdown_query_scalar.rs"]
+mod scalar;
+pub use scalar::{Arithmetic, DatePart, Direction, Operand, Operator, ScalarCall, ValueClass};
 
 /// The query fragment Exasol delegated, in the adapter's own vocabulary.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,16 +65,10 @@ pub struct Query {
 /// The query's aggregation, from `pushdownRequest.aggregationType` and, for
 /// `group_by`, `pushdownRequest.groupBy`.
 ///
-/// This release groups by columns only: `AGGREGATE_GROUP_BY_EXPRESSION` and
-/// `AGGREGATE_GROUP_BY_TUPLE` are not advertised, so Exasol never sends a
-/// `groupBy` entry that is not a `column`. Withholding `AGGREGATE_GROUP_BY_TUPLE`
-/// caps a delegated `GROUP BY` at exactly one column rather than only barring a
-/// tuple-valued grouping expression, as its name suggests: measured on Exasol
-/// 2025.2.1, `AGGREGATE_GROUP_BY_COLUMN` advertised alone withdraws a
-/// two-column `GROUP BY` whole, degrading the select list to plain columns
-/// with no aggregation at all, rather than delegating it with one column
-/// missing. `GroupBy` therefore never carries more than one [`ColumnRef`] in
-/// this release, though nothing in this type enforces that — the cap is a
+/// A key is a column or a scalar expression. Withholding
+/// `AGGREGATE_GROUP_BY_TUPLE` caps a delegated `GROUP BY` at one key rather
+/// than only barring a tuple-valued grouping expression: measured on Exasol
+/// 2025.2.1, a two-key `GROUP BY` is withdrawn whole without it. The cap is a
 /// capability boundary the dialect's advertised set holds, not a limit this
 /// model's shape encodes.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,9 +76,9 @@ pub enum Aggregation {
     /// The query aggregates its whole result into one row; the generated
     /// statement carries no `GROUP BY` clause.
     SingleGroup,
-    /// The query groups by the carried columns, in the order `groupBy`
-    /// gave them.
-    GroupBy(Vec<ColumnRef>),
+    /// The query groups by the carried keys, in the order `groupBy` gave
+    /// them.
+    GroupBy(Vec<Expression>),
 }
 
 /// One emitted column: the expression that produces it and the Exasol type
@@ -112,6 +110,15 @@ pub enum Expression {
     /// list rather than only `WHERE`, or an operand, as `b = (d > 5)` arrives.
     /// Declared `BOOLEAN`.
     Predicate(Box<Predicate>),
+    /// A `function_scalar` node, resolved by its operands' classes.
+    Scalar(Box<ScalarCall>),
+    /// A select-list entry declared `INTERVAL DAY TO SECOND`, which no `EMITS`
+    /// column declares: the scan emits the interval's count of seconds, and
+    /// the pushdown response converts it back to `declared`.
+    IntervalSeconds {
+        interval: Box<Expression>,
+        declared: DayToSecond,
+    },
 }
 
 /// How Exasol converts a `SUM` or `AVG` operand before it aggregates.
@@ -132,17 +139,26 @@ impl Expression {
     /// expression: that one converts a source type for the scan, and this one
     /// follows the Exasol type the operand declares.
     pub fn aggregate_operand_conversion(&self) -> Option<OperandConversion> {
-        match self {
-            Expression::Column(column) => match column.declared_type {
-                ExasolType::Boolean => Some(OperandConversion::Boolean),
-                ExasolType::Varchar { .. } | ExasolType::Char { .. } => {
-                    Some(OperandConversion::Character)
-                }
-                _ => None,
-            },
-            Expression::Predicate(_) => Some(OperandConversion::Boolean),
-            Expression::Literal(Literal::String(_)) => Some(OperandConversion::Character),
+        match self.value_class() {
+            ValueClass::Boolean => Some(OperandConversion::Boolean),
+            ValueClass::Character => Some(OperandConversion::Character),
             _ => None,
+        }
+    }
+
+    /// The class of value this expression yields, derived from its declared
+    /// types, because the request declares no type for a nested node.
+    pub fn value_class(&self) -> ValueClass {
+        match self {
+            Expression::Column(column) => ValueClass::of_type(column.declared_type),
+            Expression::RowMarker => ValueClass::integer(1),
+            Expression::Literal(literal) => ValueClass::of_literal(literal),
+            Expression::Aggregate(call) => call.value_class(),
+            Expression::Predicate(_) => ValueClass::Boolean,
+            Expression::Scalar(call) => call.value_class(),
+            Expression::IntervalSeconds { declared, .. } => {
+                ValueClass::of_type(declared.seconds_type())
+            }
         }
     }
 }
@@ -209,6 +225,29 @@ pub struct AggregateCall {
     /// `true` when the `function_aggregate` node carries `"distinct": true`;
     /// `false` when the field is absent.
     pub distinct: bool,
+}
+
+impl AggregateCall {
+    /// The class of the aggregate's result, as Exasol types it: `COUNT` a
+    /// `DECIMAL(18,0)`, `AVG` a double, `SUM` a `DECIMAL(36,s)` over an exact
+    /// operand or a double, and `MIN` and `MAX` their operand's class.
+    pub fn value_class(&self) -> ValueClass {
+        let operand = self
+            .argument
+            .as_ref()
+            .map(|argument| argument.value_class());
+        match (self.function.as_str(), operand) {
+            ("AVG", _) => ValueClass::Double,
+            ("SUM", Some(ValueClass::Exact { scale, .. })) => ValueClass::Exact {
+                precision: 36,
+                scale,
+            },
+            ("SUM", Some(ValueClass::Boolean)) => ValueClass::integer(36),
+            ("SUM", _) => ValueClass::Double,
+            (_, Some(class)) if self.function != "COUNT" => class,
+            _ => ValueClass::integer(18),
+        }
+    }
 }
 
 /// A constant value a filter predicate compares against, carried as the raw
@@ -596,10 +635,21 @@ fn read_select_list(request: &Value, tables: &[InvolvedTable]) -> Result<Vec<Sel
     entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| {
-            let declared_type = declared_types.as_ref().map(|types| types[index]);
-            read_select_item(entry, tables, declared_type)
-        })
+        .map(
+            |(index, entry)| match declared_types.as_ref().map(|types| types[index]) {
+                Some(SelectListType::DayToSecond(declared)) => Ok(SelectItem {
+                    expression: Expression::IntervalSeconds {
+                        interval: Box::new(read_expression(entry, tables)?),
+                        declared,
+                    },
+                    declared_type: declared.seconds_type(),
+                }),
+                Some(SelectListType::Declarable(declared_type)) => {
+                    read_select_item(entry, tables, Some(declared_type))
+                }
+                None => read_select_item(entry, tables, None),
+            },
+        )
         .collect()
 }
 
@@ -626,10 +676,10 @@ fn read_select_item(
 
     match entry_type {
         "column" => read_column_select_item(entry, tables, declared_type),
-        "function_aggregate" => {
+        "function_aggregate" | "function_scalar" => {
             let declared_type = require_declared_type(entry_type, declared_type)?;
             Ok(SelectItem {
-                expression: Expression::Aggregate(read_aggregate_call(entry, tables)?),
+                expression: read_expression(entry, tables)?,
                 declared_type,
             })
         }
@@ -695,34 +745,16 @@ fn read_aggregation(
                      is absent or is not an array"
                         .to_string()
                 })?;
-            let columns = entries
+            let keys = entries
                 .iter()
-                .map(|entry| read_group_by_column(entry, tables))
+                .map(|entry| read_expression(entry, tables))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Some(Aggregation::GroupBy(columns)))
+            Ok(Some(Aggregation::GroupBy(keys)))
         }
         other => Err(format!(
             "pushdownRequest.aggregationType `{other}` is not recognized"
         )),
     }
-}
-
-/// Reads one `groupBy` entry. This release groups by columns only —
-/// `AGGREGATE_GROUP_BY_EXPRESSION` and `AGGREGATE_GROUP_BY_TUPLE` are not
-/// advertised — so an entry whose `type` is not `column` has no rendering
-/// path.
-fn read_group_by_column(entry: &Value, tables: &[InvolvedTable]) -> Result<ColumnRef, String> {
-    let entry_type = entry
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("groupBy entry {entry} carries no `type` field"))?;
-    if entry_type != "column" {
-        return Err(format!(
-            "groupBy entry of type `{entry_type}` has no rendering path in this release"
-        ));
-    }
-
-    read_column_ref(entry, tables, "groupBy entry")
 }
 
 /// Reads a `function_aggregate` node: its function name, normalized to upper
@@ -942,7 +974,7 @@ fn read_named_expression(
 
 /// Reads one value expression: a `column` reference resolved against the
 /// involved tables, one of the six literal kinds this release delegates, a
-/// `function_aggregate`, the shape a select-list predicate's operand takes
+/// `function_scalar`, a `function_aggregate`, the shape a select-list predicate's operand takes
 /// for `COUNT(*) > 0`, or a `predicate_*` node read as a boolean value, the
 /// shape `b = (d > 5)` arrives in. Keyed on `type` for the same reason a
 /// `selectList` entry is: an operand is not always a column once a predicate
@@ -973,6 +1005,9 @@ fn read_expression(node: &Value, tables: &[InvolvedTable]) -> Result<Expression,
             node,
         )?))),
         "function_aggregate" => Ok(Expression::Aggregate(read_aggregate_call(node, tables)?)),
+        "function_scalar" => Ok(Expression::Scalar(Box::new(scalar::read_scalar_call(
+            node, tables,
+        )?))),
         _ if expression_type.starts_with("predicate_") => Ok(Expression::Predicate(Box::new(
             read_predicate(node, tables)?,
         ))),

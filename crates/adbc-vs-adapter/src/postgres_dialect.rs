@@ -76,9 +76,10 @@ use crate::dialect_common::{
     counted, is_numeric_constant, plain_dialect, render_literal_with, render_select,
     StatementRenderer, Tables,
 };
-use crate::exa_type::ExasolType;
 use crate::postgres_type_mapping;
-use crate::pushdown_query::{ColumnRef, Expression, Literal, OperandConversion};
+use crate::pushdown_query::{
+    ColumnRef, DatePart, Direction, Expression, Literal, OperandConversion, Operator, ValueClass,
+};
 use crate::sql_dialect::RenderError;
 
 /// The PostgreSQL keyword each `join_type` this dialect renders spells, and
@@ -105,6 +106,103 @@ plain_dialect!(
     "PostgreSQL",
     "DOUBLE PRECISION",
     {
+        const TEXT_TYPE: &'static str = "text"; // NOSONAR: an associated const cannot elide its lifetime
+        const LENGTH_FUNCTION: &'static str = "char_length"; // NOSONAR: an associated const cannot elide its lifetime
+
+        fn date_part(&self, part: DatePart, operand: &str) -> String {
+            format!("EXTRACT({} FROM {operand})", date_field(part))
+        }
+
+        fn text_to_timestamp(&self, operand: &str) -> String {
+            format!("CAST({operand} AS timestamp)")
+        }
+
+        fn number_text(&self, operand: &str, _scale: u32) -> String {
+            format!("CAST(trim_scale(CAST({operand} AS numeric)) AS text)")
+        }
+
+        fn temporal_text(&self, operand: &str, class: ValueClass) -> String {
+            match class {
+                ValueClass::Date => format!("to_char({operand}, 'YYYY-MM-DD')"),
+                _ => format!("to_char({operand}, 'YYYY-MM-DD HH24:MI:SS.US')"),
+            }
+        }
+
+        /// `btrim` removes a set of characters, as Exasol's two-argument `TRIM`.
+        fn render_trim(
+            &self,
+            operand: &str,
+            characters: Option<&str>,
+        ) -> Result<String, RenderError> {
+            Ok(match characters {
+                Some(characters) => format!("btrim({operand}, {characters})"),
+                None => format!("TRIM({operand})"),
+            })
+        }
+
+        fn exact(&self, operand: &str, _class: ValueClass, _operator: Operator) -> String {
+            format!("CAST({operand} AS numeric)")
+        }
+
+        fn integer(&self, operand: &str) -> String {
+            format!("CAST({operand} AS integer)")
+        }
+
+        fn timestamp(&self, operand: &str, class: ValueClass) -> String {
+            match class {
+                ValueClass::Date => format!("CAST({operand} AS timestamp)"),
+                _ => operand.to_string(),
+            }
+        }
+
+        /// A `date` plus an integer is a `date`, and a timestamp shifts by
+        /// whole days of `interval`.
+        fn shift_days(
+            &self,
+            temporal: &str,
+            class: ValueClass,
+            days: &str,
+            direction: Direction,
+        ) -> String {
+            let sign = direction.sign();
+            match class {
+                ValueClass::Date => format!("({temporal} {sign} {days})"),
+                _ => format!("({temporal} {sign} {days} * INTERVAL '1 day')"),
+            }
+        }
+
+        fn days_between(&self, left: &str, right: &str) -> String {
+            format!("({left} - {right})")
+        }
+
+        fn timestamp_difference(&self, left: &str, right: &str) -> String {
+            format!("date_trunc('milliseconds', {left} - {right})")
+        }
+
+        fn shift_interval(
+            &self,
+            temporal: &str,
+            class: ValueClass,
+            interval: &str,
+            direction: Direction,
+        ) -> String {
+            let sign = direction.sign();
+            match class {
+                ValueClass::Date => {
+                    format!("CAST(CAST({temporal} AS timestamp) {sign} {interval} AS date)")
+                }
+                _ => format!("({temporal} {sign} {interval})"),
+            }
+        }
+
+        fn interval_scale(&self, interval: &str, factor: &str) -> String {
+            format!("date_trunc('milliseconds', {interval} * {factor})")
+        }
+
+        fn interval_seconds(&self, interval: &str) -> String {
+            format!("EXTRACT(EPOCH FROM {interval})")
+        }
+
         /// Adds the operand as Exasol converts it. PostgreSQL defines no `sum`
         /// over a boolean or a character type, so a boolean sums as an `INTEGER`
         /// and a character operand as a `DOUBLE PRECISION` with an empty value read
@@ -156,10 +254,15 @@ plain_dialect!(
 );
 
 fn is_double_column(operand: &Expression) -> bool {
-    matches!(
-        operand,
-        Expression::Column(column) if column.declared_type == ExasolType::Double
-    )
+    operand.value_class() == ValueClass::Double
+}
+
+fn date_field(part: DatePart) -> &'static str {
+    match part {
+        DatePart::Year => "YEAR",
+        DatePart::Month => "MONTH",
+        DatePart::Day => "DAY",
+    }
 }
 
 /// The aggregate PostgreSQL spells for `function` over a `BOOLEAN` operand.
