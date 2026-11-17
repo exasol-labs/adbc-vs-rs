@@ -165,6 +165,12 @@ pub trait StatementRenderer {
     const TEXT_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
     /// The function that counts a string's characters rather than its bytes.
     const LENGTH_FUNCTION: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The timestamp type a date or a date's text casts to.
+    const TIMESTAMP_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The integer type a day count and a `SUBSTR` position cast to.
+    const INTEGER_TYPE: &'static str; // NOSONAR: an associated const cannot elide its lifetime
+    /// The function that removes a set of characters from both ends.
+    const TRIM_SET_FUNCTION: &'static str = "TRIM"; // NOSONAR: an associated const cannot elide its lifetime
 
     fn tables(&self) -> &Tables<'_>;
 
@@ -200,10 +206,14 @@ pub trait StatementRenderer {
     }
 
     /// `YEAR`, `MONTH`, or `DAY` of a date or timestamp.
-    fn date_part(&self, part: DatePart, operand: &str) -> String;
+    fn date_part(&self, part: DatePart, operand: &str) -> String {
+        format!("{}({operand})", part.name())
+    }
 
     /// Text in Exasol's default timestamp format read as a timestamp.
-    fn text_to_timestamp(&self, operand: &str) -> String;
+    fn text_to_timestamp(&self, operand: &str) -> String {
+        format!("CAST({operand} AS {})", Self::TIMESTAMP_TYPE)
+    }
 
     /// An exact number with `scale` fractional digits as Exasol's text, which
     /// drops trailing fractional zeros.
@@ -214,7 +224,12 @@ pub trait StatementRenderer {
     fn temporal_text(&self, operand: &str, class: ValueClass) -> String;
 
     /// `TRIM` over text, removing blanks or every character of `characters`.
-    fn render_trim(&self, operand: &str, characters: Option<&str>) -> Result<String, RenderError>;
+    fn render_trim(&self, operand: &str, characters: Option<&str>) -> Result<String, RenderError> {
+        Ok(match characters {
+            Some(characters) => format!("{}({operand}, {characters})", Self::TRIM_SET_FUNCTION),
+            None => format!("TRIM({operand})"),
+        })
+    }
 
     /// An exact operand of `operator`, widened so the operation cannot
     /// overflow before Exasol's would. `class` carries the precision and
@@ -223,10 +238,17 @@ pub trait StatementRenderer {
 
     /// A whole number as the integer type a target's day and position
     /// arguments take.
-    fn integer(&self, operand: &str) -> String;
+    fn integer(&self, operand: &str) -> String {
+        format!("CAST({operand} AS {})", Self::INTEGER_TYPE)
+    }
 
     /// A date or a timestamp, a date reading as midnight.
-    fn timestamp(&self, operand: &str, class: ValueClass) -> String;
+    fn timestamp(&self, operand: &str, class: ValueClass) -> String {
+        match class {
+            ValueClass::Date => self.text_to_timestamp(operand),
+            _ => operand.to_string(),
+        }
+    }
 
     /// A date or timestamp shifted by `days`, an integer.
     fn shift_days(
@@ -242,7 +264,9 @@ pub trait StatementRenderer {
 
     /// The interval from `right` to `left`, two timestamps, truncated to the
     /// milliseconds an Exasol interval holds.
-    fn timestamp_difference(&self, left: &str, right: &str) -> String;
+    fn timestamp_difference(&self, left: &str, right: &str) -> String {
+        format!("({left} - {right})")
+    }
 
     /// A date or timestamp shifted by an interval; a date stays a date.
     fn shift_interval(
@@ -251,10 +275,21 @@ pub trait StatementRenderer {
         class: ValueClass,
         interval: &str,
         direction: Direction,
-    ) -> String;
+    ) -> String {
+        let sign = direction.sign();
+        match class {
+            ValueClass::Date => format!(
+                "CAST({} {sign} {interval} AS DATE)",
+                self.timestamp(temporal, class)
+            ),
+            _ => format!("({temporal} {sign} {interval})"),
+        }
+    }
 
     /// An interval times a double, truncated to milliseconds.
-    fn interval_scale(&self, interval: &str, factor: &str) -> String;
+    fn interval_scale(&self, interval: &str, factor: &str) -> String {
+        format!("({interval} * {factor})")
+    }
 
     /// An interval as its count of seconds.
     fn interval_seconds(&self, interval: &str) -> String;

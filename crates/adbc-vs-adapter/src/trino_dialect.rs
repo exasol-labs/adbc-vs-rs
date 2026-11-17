@@ -98,8 +98,8 @@ use crate::dialect_common::{
     StatementRenderer, Tables,
 };
 use crate::pushdown_query::{
-    ColumnRef, DatePart, Direction, Expression, LikePredicate, Literal, OperandConversion,
-    Operator, ValueClass,
+    ColumnRef, Direction, Expression, LikePredicate, Literal, OperandConversion, Operator,
+    ValueClass,
 };
 use crate::sql_dialect::RenderError;
 
@@ -125,20 +125,9 @@ pub struct TrinoDialect;
 
 plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
     const TEXT_TYPE: &'static str = "VARCHAR"; // NOSONAR: an associated const cannot elide its lifetime
-    const LENGTH_FUNCTION: &'static str = "length"; // NOSONAR: an associated const cannot elide its lifetime
-
-    fn date_part(&self, part: DatePart, operand: &str) -> String {
-        let function = match part {
-            DatePart::Year => "year",
-            DatePart::Month => "month",
-            DatePart::Day => "day",
-        };
-        format!("{function}({operand})")
-    }
-
-    fn text_to_timestamp(&self, operand: &str) -> String {
-        format!("CAST({operand} AS TIMESTAMP(6))")
-    }
+    const LENGTH_FUNCTION: &'static str = "LENGTH"; // NOSONAR: an associated const cannot elide its lifetime
+    const TIMESTAMP_TYPE: &'static str = "TIMESTAMP(3)"; // NOSONAR: an associated const cannot elide its lifetime
+    const INTEGER_TYPE: &'static str = "BIGINT"; // NOSONAR: an associated const cannot elide its lifetime
 
     fn number_text(&self, operand: &str, _scale: u32) -> String {
         format!("regexp_replace(CAST({operand} AS VARCHAR), '\\.?0+$', '')")
@@ -149,14 +138,6 @@ plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
             ValueClass::Date => format!("CAST({operand} AS VARCHAR)"),
             _ => format!("date_format({operand}, '%Y-%m-%d %H:%i:%s.%f')"),
         }
-    }
-
-    /// Trino's two-argument `trim` removes a set of characters, as Exasol's.
-    fn render_trim(&self, operand: &str, characters: Option<&str>) -> Result<String, RenderError> {
-        Ok(match characters {
-            Some(characters) => format!("trim({operand}, {characters})"),
-            None => format!("trim({operand})"),
-        })
     }
 
     /// A sum or difference widens to `DECIMAL(38,s)`. A product keeps each
@@ -171,17 +152,6 @@ plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
             Operator::Add | Operator::Subtract => MAX_DECIMAL_PRECISION,
         };
         format!("CAST({operand} AS DECIMAL({precision},{scale}))")
-    }
-
-    fn integer(&self, operand: &str) -> String {
-        format!("CAST({operand} AS BIGINT)")
-    }
-
-    fn timestamp(&self, operand: &str, class: ValueClass) -> String {
-        match class {
-            ValueClass::Date => format!("CAST({operand} AS TIMESTAMP(3))"),
-            _ => operand.to_string(),
-        }
     }
 
     fn shift_days(
@@ -200,31 +170,6 @@ plain_dialect!(TrinoDialect, Trino, "Trino", "Trino SQL", "DOUBLE", {
 
     fn days_between(&self, left: &str, right: &str) -> String {
         format!("date_diff('day', {right}, {left})")
-    }
-
-    /// Trino's `interval day to second` holds milliseconds, as Exasol's does.
-    fn timestamp_difference(&self, left: &str, right: &str) -> String {
-        format!("({left} - {right})")
-    }
-
-    fn shift_interval(
-        &self,
-        temporal: &str,
-        class: ValueClass,
-        interval: &str,
-        direction: Direction,
-    ) -> String {
-        let sign = direction.sign();
-        match class {
-            ValueClass::Date => {
-                format!("CAST(CAST({temporal} AS TIMESTAMP(3)) {sign} {interval} AS DATE)")
-            }
-            _ => format!("({temporal} {sign} {interval})"),
-        }
-    }
-
-    fn interval_scale(&self, interval: &str, factor: &str) -> String {
-        format!("({interval} * {factor})")
     }
 
     fn interval_seconds(&self, interval: &str) -> String {

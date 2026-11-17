@@ -39,112 +39,20 @@ pub const COLUMNS: [Column; 14] = [
 /// `TIMESTAMP(3)`.
 const NOT_AT_TRINO: [usize; 4] = [9, 11, 12, 13];
 
-/// The rows, one value per column of [`COLUMNS`]. `i` reaches the `BIGINT`
+/// The rows, one value per column of [`COLUMNS`], separated by `, `, which
+/// no value contains. `i` reaches the `BIGINT`
 /// maximum, `d` carries fractional days, `num` holds numbers as text, `s`
 /// holds blanks, multi-byte characters, and a value only blanks, `ts` and
 /// `ts2` lie a millisecond, days, and more than a year apart, and `us1` and
 /// `us2` lie a millisecond and a half apart in both directions.
-const ROWS: [[&str; 14]; 7] = [
-    [
-        "1",
-        "9223372036854775807",
-        "12.5",
-        "1.5",
-        "'1.5'",
-        "'  ab  '",
-        "DATE '2024-02-29'",
-        "TIMESTAMP '2024-02-28 23:59:59.500'",
-        "TIMESTAMP '2024-01-01 00:00:00.000'",
-        "'ab'",
-        "'2024-01-05'",
-        "TRUE",
-        "TIMESTAMP '2024-01-01 00:00:00.001500'",
-        "TIMESTAMP '2024-01-01 00:00:00.000000'",
-    ],
-    [
-        "2",
-        "-5",
-        "-0.25",
-        "0.25",
-        "'-2'",
-        "'abcdef'",
-        "DATE '2023-12-31'",
-        "TIMESTAMP '2024-01-01 00:00:00.000'",
-        "TIMESTAMP '2023-12-31 23:59:59.999'",
-        "'abcde'",
-        "'2023-12-31'",
-        "FALSE",
-        "TIMESTAMP '2024-01-01 00:00:00.000000'",
-        "TIMESTAMP '2024-01-01 00:00:00.001500'",
-    ],
-    [
-        "3",
-        "0",
-        "1000",
-        "-3.5",
-        "'10'",
-        "'xxaxx'",
-        "DATE '2024-01-01'",
-        "TIMESTAMP '2025-03-01 12:00:00.250'",
-        "TIMESTAMP '2024-02-29 06:00:00.000'",
-        "'a'",
-        "'2024-02-29 10:11:12'",
-        "TRUE",
-        "TIMESTAMP '2024-01-02 00:00:00.123456'",
-        "TIMESTAMP '2024-01-01 00:00:00.000001'",
-    ],
-    [
-        "4",
-        "7",
-        "0.0001",
-        "2.0",
-        "'0.5'",
-        "'   '",
-        "DATE '2024-03-01'",
-        "TIMESTAMP '2024-03-01 00:00:00.001'",
-        "TIMESTAMP '2024-03-01 00:00:00.000'",
-        "'xy'",
-        "'2024-03-01'",
-        "FALSE",
-        "TIMESTAMP '2024-01-01 00:00:00.000999'",
-        "TIMESTAMP '2024-01-01 00:00:00.000000'",
-    ],
-    [
-        "5",
-        "2",
-        "3.75",
-        "0.5",
-        "'3'",
-        "'é'",
-        "DATE '2020-06-15'",
-        "TIMESTAMP '2020-06-15 08:30:00.000'",
-        "TIMESTAMP '2020-06-14 20:30:00.000'",
-        "'é'",
-        "'2020-06-15'",
-        "TRUE",
-        "TIMESTAMP '2020-06-15 08:30:00.250000'",
-        "TIMESTAMP '2020-06-15 08:30:00.250000'",
-    ],
-    [
-        "6", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL",
-        "NULL", "NULL", "NULL",
-    ],
-    [
-        "7",
-        "1",
-        "1",
-        "1.0",
-        "'1'",
-        "'ß'",
-        "DATE '2021-01-01'",
-        "TIMESTAMP '2021-01-01 00:00:00.000'",
-        "TIMESTAMP '2021-01-01 00:00:00.000'",
-        "'ß'",
-        "'2021-01-01'",
-        "TRUE",
-        "TIMESTAMP '2021-01-01 00:00:00.000000'",
-        "TIMESTAMP '2021-01-01 00:00:00.000000'",
-    ],
+const ROWS: [&str; 7] = [
+    "1, 9223372036854775807, 12.5, 1.5, '1.5', '  ab  ', DATE '2024-02-29', TIMESTAMP '2024-02-28 23:59:59.500', TIMESTAMP '2024-01-01 00:00:00.000', 'ab', '2024-01-05', TRUE, TIMESTAMP '2024-01-01 00:00:00.001500', TIMESTAMP '2024-01-01 00:00:00.000000'",
+    "2, -5, -0.25, 0.25, '-2', 'abcdef', DATE '2023-12-31', TIMESTAMP '2024-01-01 00:00:00.000', TIMESTAMP '2023-12-31 23:59:59.999', 'abcde', '2023-12-31', FALSE, TIMESTAMP '2024-01-01 00:00:00.000000', TIMESTAMP '2024-01-01 00:00:00.001500'",
+    "3, 0, 1000, -3.5, '10', 'xxaxx', DATE '2024-01-01', TIMESTAMP '2025-03-01 12:00:00.250', TIMESTAMP '2024-02-29 06:00:00.000', 'a', '2024-02-29 10:11:12', TRUE, TIMESTAMP '2024-01-02 00:00:00.123456', TIMESTAMP '2024-01-01 00:00:00.000001'",
+    "4, 7, 0.0001, 2.0, '0.5', '   ', DATE '2024-03-01', TIMESTAMP '2024-03-01 00:00:00.001', TIMESTAMP '2024-03-01 00:00:00.000', 'xy', '2024-03-01', FALSE, TIMESTAMP '2024-01-01 00:00:00.000999', TIMESTAMP '2024-01-01 00:00:00.000000'",
+    "5, 2, 3.75, 0.5, '3', 'é', DATE '2020-06-15', TIMESTAMP '2020-06-15 08:30:00.000', TIMESTAMP '2020-06-14 20:30:00.000', 'é', '2020-06-15', TRUE, TIMESTAMP '2020-06-15 08:30:00.250000', TIMESTAMP '2020-06-15 08:30:00.250000'",
+    "6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL",
+    "7, 1, 1, 1.0, '1', 'ß', DATE '2021-01-01', TIMESTAMP '2021-01-01 00:00:00.000', TIMESTAMP '2021-01-01 00:00:00.000', 'ß', '2021-01-01', TRUE, TIMESTAMP '2021-01-01 00:00:00.000000', TIMESTAMP '2021-01-01 00:00:00.000000'",
 ];
 
 /// The rows as a `VALUES` list over every column.
@@ -171,10 +79,10 @@ fn render(keep: impl Fn(usize) -> bool) -> String {
     ROWS.iter()
         .map(|row| {
             let values: Vec<&str> = row
-                .iter()
+                .split(", ")
                 .enumerate()
                 .filter(|(index, _)| keep(*index))
-                .map(|(_, value)| *value)
+                .map(|(_, value)| value)
                 .collect();
             format!("({})", values.join(", "))
         })
@@ -323,8 +231,8 @@ impl Scenario<'_> {
     /// and a `TIMESTAMP` column, projected and filtered, each declared a
     /// `DECIMAL`.
     pub fn date_parts(&self) {
-        let year = ["YEAR(`dt`)", "EXTRACT(YEAR FROM \"dt\")", "year(\"dt\")"];
-        let day = ["DAY(`ts`)", "EXTRACT(DAY FROM \"ts\")", "day(\"ts\")"];
+        let year = ["YEAR(`dt`)", "EXTRACT(YEAR FROM \"dt\")", "YEAR(\"dt\")"];
+        let day = ["DAY(`ts`)", "EXTRACT(DAY FROM \"ts\")", "DAY(\"ts\")"];
         self.assert_delegated(&[
             (
                 "YEAR(\"dt\") AS Y, MONTH(\"dt\") AS M, DAY(\"dt\") AS D",
@@ -406,7 +314,7 @@ impl Scenario<'_> {
     /// `pushdown-scalar-function`: a number shifts a date or timestamp by days
     /// rounded half away from zero, and a date minus a date counts days.
     pub fn date_arithmetic(&self) {
-        let shift = ["DATE_ADD(`dt`", "(\"dt\" + ", "date_add('day', "];
+        let shift = ["DATE_ADD(`dt`", "(\"dt\" + CAST(", "date_add('day', "];
         self.assert_delegated(&[
             (
                 "\"dt\" + 1 AS A, 1 + \"dt\" AS B, \"dt\" + 1.5 AS C",
@@ -484,7 +392,7 @@ impl Scenario<'_> {
 
     /// `pushdown-scalar-function`: the string functions over `VARCHAR` text.
     pub fn string_functions(&self) {
-        let length = ["CHAR_LENGTH(", "char_length(", "length("];
+        let length = ["CHAR_LENGTH(", "CHAR_LENGTH(", "LENGTH("];
         self.assert_delegated(&[
             (
                 "UPPER(\"s\") AS U, LOWER(\"s\") AS L",
@@ -504,7 +412,7 @@ impl Scenario<'_> {
             ),
             ("\"s\"", "WHERE LENGTH(\"s\") = 1", length),
         ]);
-        let trim = ["", "TRIM(", "trim("];
+        let trim = ["", "TRIM(", "TRIM("];
         if self.source.delegates_trim() {
             self.assert_delegated(&[
                 ("TRIM(\"s\") AS A, TRIM(\"s\", 'x') AS B", "", trim),
@@ -577,7 +485,7 @@ impl Scenario<'_> {
     /// `pushdown-scalar-function`: a number, a date, text, and a boolean
     /// convert as Exasol converts them under its default formats.
     pub fn implicit_conversions(&self) {
-        let length = ["CHAR_LENGTH(", "char_length(", "length("];
+        let length = ["CHAR_LENGTH(", "CHAR_LENGTH(", "LENGTH("];
         self.assert_delegated(&[
             (
                 "LENGTH(\"d\") AS A, SUBSTR(\"d\", 1) AS B",
@@ -591,7 +499,7 @@ impl Scenario<'_> {
                 [
                     "YEAR(CAST(`dtext`",
                     "EXTRACT(YEAR FROM CAST(\"dtext\"",
-                    "year(CAST(\"dtext\"",
+                    "YEAR(CAST(\"dtext\"",
                 ],
             ),
         ]);
@@ -600,7 +508,7 @@ impl Scenario<'_> {
         }
         if self.source == Source::Trino {
             let statement = self.generated_statement("LENGTH(\"f\")", "");
-            assert!(statement.contains("length("), "{statement}");
+            assert!(statement.contains("LENGTH("), "{statement}");
             let length = self.exasol.query_scalar(&format!(
                 "SELECT LENGTH(\"f\") FROM {}.\"{TABLE}\" WHERE \"id\" = 1",
                 self.virtual_schema
@@ -632,7 +540,7 @@ impl Scenario<'_> {
         let year = [
             "GROUP BY YEAR(`dt`)",
             "GROUP BY EXTRACT(YEAR FROM \"dt\")",
-            "GROUP BY year(\"dt\")",
+            "GROUP BY YEAR(\"dt\")",
         ];
         self.assert_delegated(&[
             (

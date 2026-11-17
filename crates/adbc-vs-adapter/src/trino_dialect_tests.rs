@@ -708,14 +708,14 @@ fn scalar_functions_render_in_trino_forms() {
     let col = fixtures::column;
     let number = fixtures::numeric_literal;
     for (entry, fragment) in [
-        (fixtures::scalar("MONTH", vec![col("dt")]), "month(\"dt\")"),
+        (fixtures::scalar("MONTH", vec![col("dt")]), "MONTH(\"dt\")"),
         (
             fixtures::scalar("LENGTH", vec![col("v")]),
-            "length(NULLIF(\"v\", ''))",
+            "LENGTH(NULLIF(\"v\", ''))",
         ),
         (
             fixtures::scalar("TRIM", vec![col("v"), fixtures::string_literal("x")]),
-            "NULLIF(trim(\"v\", 'x'), '')",
+            "NULLIF(TRIM(\"v\", 'x'), '')",
         ),
         (
             fixtures::scalar("LENGTH", vec![col("d")]),

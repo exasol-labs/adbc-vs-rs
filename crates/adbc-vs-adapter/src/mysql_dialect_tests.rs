@@ -1321,7 +1321,7 @@ fn string_functions_render_with_mysql_semantics() {
                 "SUBSTR",
                 vec![v(), numeric_literal("2"), numeric_literal("3")],
             ),
-            "NULLIF(SUBSTR(`v`, 2, 3), '')",
+            "NULLIF(SUBSTR(`v`, CAST(2 AS SIGNED), CAST(3 AS SIGNED)), '')",
         ),
         (
             fixtures::scalar("SUBSTR", vec![v(), numeric_literal("-2")]),
@@ -1378,11 +1378,11 @@ fn arithmetic_renders_with_mysql_semantics() {
         ),
         (
             fixtures::scalar("ADD", vec![col("dt"), numeric_literal("1")]),
-            "DATE_ADD(`dt`, INTERVAL 1 DAY)",
+            "DATE_ADD(`dt`, INTERVAL CAST(1 AS SIGNED) DAY)",
         ),
         (
             fixtures::scalar("SUB", vec![col("ts"), numeric_literal("1.5")]),
-            "DATE_SUB(`ts`, INTERVAL ROUND(1.5) DAY)",
+            "DATE_SUB(`ts`, INTERVAL CAST(ROUND(1.5) AS SIGNED) DAY)",
         ),
         (
             fixtures::scalar("SUB", vec![col("dt"), col("dt")]),
@@ -1396,7 +1396,7 @@ fn arithmetic_renders_with_mysql_semantics() {
                     fixtures::scalar("SUB", vec![col("ts"), col("dt")]),
                 ],
             ),
-            "DATE_ADD(`ts`, INTERVAL TRUNCATE(TIMESTAMPDIFF(MICROSECOND, `dt`, `ts`), -3) \
+            "DATE_ADD(`ts`, INTERVAL TRUNCATE(TIMESTAMPDIFF(MICROSECOND, CAST(`dt` AS DATETIME(6)), `ts`), -3) \
              MICROSECOND)",
         ),
     ] {
@@ -1409,7 +1409,7 @@ fn arithmetic_renders_with_mysql_semantics() {
     ));
     assert!(
         interval.contains(
-            "(CAST(TRUNCATE(TIMESTAMPDIFF(MICROSECOND, `dt`, `ts`), -3) AS DECIMAL(65,6)) / \
+            "(CAST(TRUNCATE(TIMESTAMPDIFF(MICROSECOND, CAST(`dt` AS DATETIME(6)), `ts`), -3) AS DECIMAL(65,6)) / \
              1000000)"
         ),
         "{interval}"

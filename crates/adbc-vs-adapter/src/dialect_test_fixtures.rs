@@ -1058,63 +1058,24 @@ pub(crate) fn character_sum_avg_entries() -> Vec<(Value, Value)> {
 /// Each capability the dialect tests exercise, with the fragment the MySQL,
 /// PostgreSQL, and Trino dialects must each put in the statement for it, `""` where a
 /// dialect does not advertise it.
+/// The fragment each scalar-function capability puts in the statement, which
+/// every dialect spells alike.
+const SCALAR_FRAGMENTS: &[(&str, &str)] = &[
+    ("AGGREGATE_GROUP_BY_EXPRESSION", "GROUP BY NULLIF(UPPER("),
+    ("FN_YEAR", "YEAR"),
+    ("FN_MONTH", "MONTH"),
+    ("FN_DAY", "DAY"),
+    ("FN_UPPER", "UPPER("),
+    ("FN_LOWER", "LOWER("),
+    ("FN_TRIM", "TRIM("),
+    ("FN_LENGTH", "LENGTH("),
+    ("FN_SUBSTR", "SUBSTR("),
+    ("FN_ADD", "+ CAST(1 AS"),
+    ("FN_SUB", "- CAST(1 AS"),
+    ("FN_MULT", "* CAST(2 AS"),
+];
+
 const EXERCISED_FRAGMENTS: &[(&str, [&str; 3])] = &[
-    (
-        "AGGREGATE_GROUP_BY_EXPRESSION",
-        [
-            "GROUP BY YEAR(`dt`)",
-            r#"GROUP BY EXTRACT(YEAR FROM "dt")"#,
-            r#"GROUP BY year("dt")"#,
-        ],
-    ),
-    (
-        "FN_YEAR",
-        ["YEAR(`dt`)", r#"EXTRACT(YEAR FROM "dt")"#, r#"year("dt")"#],
-    ),
-    (
-        "FN_MONTH",
-        [
-            "MONTH(`dt`)",
-            r#"EXTRACT(MONTH FROM "dt")"#,
-            r#"month("dt")"#,
-        ],
-    ),
-    (
-        "FN_DAY",
-        ["DAY(`dt`)", r#"EXTRACT(DAY FROM "dt")"#, r#"day("dt")"#],
-    ),
-    ("FN_UPPER", ["UPPER(`v`)", r#"UPPER("v")"#, r#"UPPER("v")"#]),
-    ("FN_LOWER", ["LOWER(`v`)", r#"LOWER("v")"#, r#"LOWER("v")"#]),
-    ("FN_TRIM", ["TRIM(`v`)", r#"TRIM("v")"#, r#"trim("v")"#]),
-    ("FN_LENGTH", ["CHAR_LENGTH(", "char_length(", "length("]),
-    (
-        "FN_SUBSTR",
-        ["SUBSTR(`v`, 2)", r#"SUBSTR("v", "#, r#"SUBSTR("v", "#],
-    ),
-    (
-        "FN_ADD",
-        [
-            "DECIMAL(65,0)) + CAST(1 AS",
-            "numeric) + CAST(1 AS",
-            "DECIMAL(38,0)) + CAST(1 AS",
-        ],
-    ),
-    (
-        "FN_SUB",
-        [
-            "DATE_SUB(`dt`, INTERVAL 1 DAY)",
-            r#"("dt" - CAST(1 AS integer))"#,
-            r#"date_add('day', -CAST(1 AS BIGINT), "dt")"#,
-        ],
-    ),
-    (
-        "FN_MULT",
-        [
-            "DECIMAL(65,0)) * CAST(2 AS",
-            "numeric) * CAST(2 AS",
-            "DECIMAL(19,0)) * CAST(2 AS",
-        ],
-    ),
     (
         "SELECTLIST_PROJECTION",
         [
@@ -1363,7 +1324,14 @@ pub(crate) fn query_exercising(
     let fragment = EXERCISED_FRAGMENTS
         .iter()
         .find(|(name, _)| *name == capability)
-        .map_or("", |(_, fragments)| fragments[column]);
+        .map(|(_, fragments)| fragments[column])
+        .or_else(|| {
+            SCALAR_FRAGMENTS
+                .iter()
+                .find(|(name, _)| *name == capability)
+                .map(|(_, fragment)| *fragment)
+        })
+        .unwrap_or("");
     if fragment.is_empty() {
         unexercised();
     }
@@ -1542,7 +1510,7 @@ pub(crate) fn query_exercising(
             request["pushdownRequest"]["selectListDataTypes"] = json!([exact_type()]);
             request["pushdownRequest"]["aggregationType"] = json!("group_by");
             request["pushdownRequest"]["groupBy"] =
-                json!([scalar("YEAR", vec![self::column("dt")])]);
+                json!([scalar("UPPER", vec![self::column("v")])]);
             pushdown_query::parse(&request, namespace).expect("the request must parse")
         }
         _ if capability.starts_with("FN_") && !capability.starts_with("FN_AGG_") => {
@@ -1555,7 +1523,7 @@ pub(crate) fn query_exercising(
                 }
                 "FN_SUBSTR" => scalar("SUBSTR", vec![self::column("v"), numeric_literal("2")]),
                 "FN_ADD" => scalar("ADD", vec![self::column("i"), numeric_literal("1")]),
-                "FN_SUB" => scalar("SUB", vec![self::column("dt"), numeric_literal("1")]),
+                "FN_SUB" => scalar("SUB", vec![self::column("i"), numeric_literal("1")]),
                 "FN_MULT" => scalar("MULT", vec![self::column("i"), numeric_literal("2")]),
                 _ => unexercised(),
             };

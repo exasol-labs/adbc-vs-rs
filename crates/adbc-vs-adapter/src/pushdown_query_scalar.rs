@@ -112,6 +112,17 @@ pub enum DatePart {
     Day,
 }
 
+impl DatePart {
+    /// The SQL name of the part, which every target spells the same.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Year => "YEAR",
+            Self::Month => "MONTH",
+            Self::Day => "DAY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     Add,

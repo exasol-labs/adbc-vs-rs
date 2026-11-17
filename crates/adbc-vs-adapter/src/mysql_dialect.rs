@@ -65,8 +65,8 @@ use crate::dialect_common::{
 };
 use crate::mysql_type_mapping;
 use crate::pushdown_query::{
-    Aggregation, ColumnRef, DatePart, Direction, Expression, Literal, OperandConversion, Operator,
-    Query, ValueClass,
+    Aggregation, ColumnRef, Direction, Expression, Literal, OperandConversion, Operator, Query,
+    ValueClass,
 };
 use crate::sql_dialect::{RenderError, SqlDialect};
 
@@ -202,6 +202,8 @@ impl StatementRenderer for Statement<'_> {
     const TEXT_TYPE: &'static str = "CHAR"; // NOSONAR: an associated const cannot elide its lifetime
     /// MySQL's `LENGTH` counts bytes.
     const LENGTH_FUNCTION: &'static str = "CHAR_LENGTH"; // NOSONAR: an associated const cannot elide its lifetime
+    const TIMESTAMP_TYPE: &'static str = "DATETIME(6)"; // NOSONAR: an associated const cannot elide its lifetime
+    const INTEGER_TYPE: &'static str = "SIGNED"; // NOSONAR: an associated const cannot elide its lifetime
 
     fn tables(&self) -> &Tables<'_> {
         self.tables
@@ -239,19 +241,6 @@ impl StatementRenderer for Statement<'_> {
         rendered
     }
 
-    fn date_part(&self, part: DatePart, operand: &str) -> String {
-        let function = match part {
-            DatePart::Year => "YEAR",
-            DatePart::Month => "MONTH",
-            DatePart::Day => "DAY",
-        };
-        format!("{function}({operand})")
-    }
-
-    fn text_to_timestamp(&self, operand: &str) -> String {
-        format!("CAST({operand} AS DATETIME(6))")
-    }
-
     fn number_text(&self, operand: &str, _scale: u32) -> String {
         format!("TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM CAST({operand} AS CHAR)))")
     }
@@ -287,14 +276,6 @@ impl StatementRenderer for Statement<'_> {
             return operand.to_string();
         }
         format!("CAST({operand} AS DECIMAL({MAX_DECIMAL_PRECISION},{scale}))")
-    }
-
-    fn integer(&self, operand: &str) -> String {
-        operand.to_string()
-    }
-
-    fn timestamp(&self, operand: &str, _class: ValueClass) -> String {
-        operand.to_string()
     }
 
     /// MySQL's `+` reads a date as the number `YYYYMMDD`, so days shift

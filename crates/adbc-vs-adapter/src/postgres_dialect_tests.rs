@@ -1404,7 +1404,7 @@ fn scalar_functions_render_in_postgresql_forms() {
         ),
         (
             fixtures::scalar("LENGTH", vec![col("v")]),
-            "char_length(NULLIF(\"v\", ''))",
+            "CHAR_LENGTH(NULLIF(\"v\", ''))",
         ),
         (
             fixtures::scalar("TRIM", vec![col("v")]),

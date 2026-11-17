@@ -107,14 +107,14 @@ plain_dialect!(
     "DOUBLE PRECISION",
     {
         const TEXT_TYPE: &'static str = "text"; // NOSONAR: an associated const cannot elide its lifetime
-        const LENGTH_FUNCTION: &'static str = "char_length"; // NOSONAR: an associated const cannot elide its lifetime
+        const LENGTH_FUNCTION: &'static str = "CHAR_LENGTH"; // NOSONAR: an associated const cannot elide its lifetime
+        const TIMESTAMP_TYPE: &'static str = "timestamp"; // NOSONAR: an associated const cannot elide its lifetime
+        const INTEGER_TYPE: &'static str = "integer"; // NOSONAR: an associated const cannot elide its lifetime
+        /// `btrim` removes a set of characters, as Exasol's two-argument `TRIM`.
+        const TRIM_SET_FUNCTION: &'static str = "btrim"; // NOSONAR: an associated const cannot elide its lifetime
 
         fn date_part(&self, part: DatePart, operand: &str) -> String {
-            format!("EXTRACT({} FROM {operand})", date_field(part))
-        }
-
-        fn text_to_timestamp(&self, operand: &str) -> String {
-            format!("CAST({operand} AS timestamp)")
+            format!("EXTRACT({} FROM {operand})", part.name())
         }
 
         fn number_text(&self, operand: &str, _scale: u32) -> String {
@@ -128,31 +128,8 @@ plain_dialect!(
             }
         }
 
-        /// `btrim` removes a set of characters, as Exasol's two-argument `TRIM`.
-        fn render_trim(
-            &self,
-            operand: &str,
-            characters: Option<&str>,
-        ) -> Result<String, RenderError> {
-            Ok(match characters {
-                Some(characters) => format!("btrim({operand}, {characters})"),
-                None => format!("TRIM({operand})"),
-            })
-        }
-
         fn exact(&self, operand: &str, _class: ValueClass, _operator: Operator) -> String {
             format!("CAST({operand} AS numeric)")
-        }
-
-        fn integer(&self, operand: &str) -> String {
-            format!("CAST({operand} AS integer)")
-        }
-
-        fn timestamp(&self, operand: &str, class: ValueClass) -> String {
-            match class {
-                ValueClass::Date => format!("CAST({operand} AS timestamp)"),
-                _ => operand.to_string(),
-            }
         }
 
         /// A `date` plus an integer is a `date`, and a timestamp shifts by
@@ -177,22 +154,6 @@ plain_dialect!(
 
         fn timestamp_difference(&self, left: &str, right: &str) -> String {
             format!("date_trunc('milliseconds', {left} - {right})")
-        }
-
-        fn shift_interval(
-            &self,
-            temporal: &str,
-            class: ValueClass,
-            interval: &str,
-            direction: Direction,
-        ) -> String {
-            let sign = direction.sign();
-            match class {
-                ValueClass::Date => {
-                    format!("CAST(CAST({temporal} AS timestamp) {sign} {interval} AS date)")
-                }
-                _ => format!("({temporal} {sign} {interval})"),
-            }
         }
 
         fn interval_scale(&self, interval: &str, factor: &str) -> String {
@@ -255,14 +216,6 @@ plain_dialect!(
 
 fn is_double_column(operand: &Expression) -> bool {
     operand.value_class() == ValueClass::Double
-}
-
-fn date_field(part: DatePart) -> &'static str {
-    match part {
-        DatePart::Year => "YEAR",
-        DatePart::Month => "MONTH",
-        DatePart::Day => "DAY",
-    }
 }
 
 /// The aggregate PostgreSQL spells for `function` over a `BOOLEAN` operand.
