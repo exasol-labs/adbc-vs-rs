@@ -17,12 +17,11 @@ ADBC gives every backend a uniform C API and an Arrow-native result format. adbc
 
 ## Core Capabilities
 
-1. **ADBC-backed Virtual Schema**: one adapter exposes the tables of a source database as Exasol virtual tables. Column types map to a closed set of Exasol types, and columns or tables without a mapping are omitted and recorded.
-2. **Self-installing drivers**: when a schema is created or refreshed, the adapter resolves the driver version from the `dbc` registry and installs the platform tarball into BucketFS. Without registry access, the operator supplies the driver.
-3. **SQL pushdown**: projection, filters, aggregation (single group and `GROUP BY`), and equi and outer joins, including nested joins, are rewritten into the source dialect and executed at the source. `ORDER BY` and `LIMIT`/`OFFSET` stay in Exasol. No dialect renders a collation, so string comparison follows the source's collation.
-4. **Arrow-native scan path**: the scan UDF runs the pushed-down statement through the ADBC driver and returns the Arrow record batches to Exasol without row-by-row marshaling.
-5. **Supported sources**: MySQL, PostgreSQL, and Trino. Adding a source technology requires a dialect and a metadata source in the adapter code.
-6. **Supported platforms**: Linux x86_64 and aarch64 Exasol clusters. The release has one library per architecture, and self-install requests the driver package of the library's architecture.
+1. **ADBC-backed Virtual Schema**: exposes the tables of a source database as Exasol virtual tables, with each column type mapped to an Exasol type.
+2. **Self-installing drivers**: installs the matching ADBC driver into BucketFS, or uses a driver the operator supplies.
+3. **SQL pushdown**: runs the query fragments each source dialect can render at the source, and leaves the rest to Exasol.
+4. **Arrow-native scan**: returns source rows to Exasol as Arrow record batches, with no row-by-row conversion.
+5. **Supported sources and platforms**: MySQL, PostgreSQL, and Trino, on Linux x86_64 and aarch64 Exasol clusters.
 
 ## Out of Scope
 

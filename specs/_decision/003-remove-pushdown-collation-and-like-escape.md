@@ -67,23 +67,4 @@ The Trino dialect does not advertise `FN_PRED_LIKE_ESCAPE` and renders `predicat
 
 - A plain `LIKE` whose pattern holds a backslash matches different rows at Trino than Exasol computes locally. The README states this.
 - A Trino request that carries an `escapeChar` fails with a named error.
-
-## ADR: Trino's set is PostgreSQL's without FN_PRED_LIKE_ESCAPE, plus AGGREGATE_GROUP_BY_TUPLE
-
-**ID:** trino-set-is-postgresql-without-like-escape-plus-group-by-tuple
-**Plan:** remove-pushdown-collation-and-like-escape
-**Status:** Accepted
-
-### Context
-
-Trino alone withholds `FN_PRED_LIKE_ESCAPE`. The MySQL and PostgreSQL dialects render the clause only when a request carries one, with no default clause and no validation, and match Exasol for an escape character followed by `%`, `_`, or itself.
-
-### Decision
-
-The Trino dialect's capability set is the PostgreSQL dialect's set without `FN_PRED_LIKE_ESCAPE`, plus `AGGREGATE_GROUP_BY_TUPLE`.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Withdraw `FN_PRED_LIKE_ESCAPE` from every dialect | Rejected: moves a working MySQL and PostgreSQL fragment back into Exasol |
+- MySQL and PostgreSQL keep `FN_PRED_LIKE_ESCAPE`: they render the clause only when a request carries one, and withdrawing it would move a working fragment back into Exasol.
