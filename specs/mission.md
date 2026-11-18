@@ -1,6 +1,6 @@
 # Mission: adbc-vs
 
-> A Rust Exasol Virtual Schema that queries MySQL, PostgreSQL, and Trino through ADBC, moving data as Arrow record batches end to end and installing the matching driver into BucketFS itself.
+> A Rust Exasol Virtual Schema that queries external databases through ADBC, moving data as Arrow record batches end to end and installing the matching driver into BucketFS itself.
 
 ## Problem Statement
 
