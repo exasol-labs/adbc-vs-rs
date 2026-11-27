@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="adbc-vs-rs logo" width="200">
+<img src="assets/logo.svg" alt="adbc-vs-rs logo" width="160">
 
 # adbc-vs-rs
 
